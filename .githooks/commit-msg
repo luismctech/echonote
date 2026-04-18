@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# -----------------------------------------------------------------------------
+# EchoNote commit-msg hook
+#
+# Enforces Conventional Commits (https://www.conventionalcommits.org/).
+# Allowed types match CONTRIBUTING.md §3. Scope is optional, 1-50 chars,
+# lowercase with hyphens or dots.
+#
+# Examples that pass:
+#   feat(audio): capture system output via ScreenCaptureKit
+#   fix: resume transcription after OS sleep
+#   docs(adr): add ADR-0004 for llama.cpp runtime
+#   chore!: drop Linux x86_64 from default installers
+#
+# Bypass with --no-verify only for emergency hotfix branches.
+# -----------------------------------------------------------------------------
+set -Eeuo pipefail
+
+MSG_FILE="$1"
+# First non-empty, non-comment line is the subject.
+SUBJECT=$(grep -v -E '^[[:space:]]*(#|$)' "$MSG_FILE" | head -n1 || true)
+
+# Let tooling pass through: merge/fixup/revert commits and reverts.
+case "$SUBJECT" in
+  "Merge "*|"Revert "*|"fixup! "*|"squash! "*|"amend! "*) exit 0 ;;
+esac
+
+TYPES='feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert|deps'
+PATTERN="^(${TYPES})(\([a-z0-9._-]{1,50}\))?!?: [^[:space:]].{0,100}$"
+
+if [[ ! "$SUBJECT" =~ $PATTERN ]]; then
+  cat >&2 <<EOF
+!! Commit subject does not follow Conventional Commits.
+
+   Got:     $SUBJECT
+
+   Expected: <type>(<scope>)?!?: <subject>
+   Where <type> is one of: ${TYPES//|/, }
+
+   Examples:
+     feat(audio): capture system output via ScreenCaptureKit
+     fix: resume transcription after OS sleep
+     docs(adr): add ADR-0004 for llama.cpp runtime
+
+See CONTRIBUTING.md §3 for the full policy.
+EOF
+  exit 1
+fi
+
+# Length guard on the subject line.
+if (( ${#SUBJECT} > 100 )); then
+  echo "!! Commit subject is ${#SUBJECT} chars; keep it <= 100." >&2
+  exit 1
+fi
+
+exit 0
