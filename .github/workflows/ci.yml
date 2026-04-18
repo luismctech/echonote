@@ -1,0 +1,105 @@
+# -----------------------------------------------------------------------------
+# EchoNote — Continuous Integration
+# -----------------------------------------------------------------------------
+# Runs on every push and PR. Three parallel jobs:
+#
+#   1. fmt       — rustfmt --check (fast, fails early)
+#   2. macos     — full pipeline: clippy + tests + build on Apple Silicon
+#   3. linux     — `cargo check` only, to catch platform-specific drift early
+#
+# Phase 0 runs macOS-only as the primary dev target. Linux and Windows get
+# full pipelines in Phase 1 per DEVELOPMENT_PLAN §5.3 (weeks 12-15).
+# -----------------------------------------------------------------------------
+
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUSTFLAGS: -D warnings
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # fmt — formatting check only, gate for everything else.
+  # ---------------------------------------------------------------------------
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install toolchain (honors rust-toolchain.toml)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: cargo fmt --check
+        run: cargo fmt --all --check
+
+  # ---------------------------------------------------------------------------
+  # macos — primary platform for Phase 0. Full clippy + tests + build.
+  # ---------------------------------------------------------------------------
+  macos:
+    name: macOS (Apple Silicon)
+    runs-on: macos-14
+    needs: fmt
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install toolchain (honors rust-toolchain.toml)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: macos-14
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: cargo test
+        run: cargo test --workspace --all-targets --locked
+
+      - name: cargo build (dev profile)
+        run: cargo build --workspace --locked
+
+      - name: cargo run echo-proto --help (smoke test)
+        run: cargo run --locked -p echo-proto -- --help
+
+  # ---------------------------------------------------------------------------
+  # linux — cross-platform drift guard. Cheap `cargo check` so Linux-specific
+  # regressions (missing cfg gates, wrong target attrs) are caught day one.
+  # ---------------------------------------------------------------------------
+  linux:
+    name: Linux (cargo check)
+    runs-on: ubuntu-24.04
+    needs: fmt
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install toolchain (honors rust-toolchain.toml)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ubuntu-24.04
+
+      - name: cargo check
+        run: cargo check --workspace --all-targets --locked

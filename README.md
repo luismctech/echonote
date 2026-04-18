@@ -1,5 +1,9 @@
 # EchoNote
 
+[![CI](https://github.com/AlbertoMZCruz/echonote/actions/workflows/ci.yml/badge.svg?branch=develop)](https://github.com/AlbertoMZCruz/echonote/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
+[![Rust](https://img.shields.io/badge/rust-1.88%2B-orange.svg?logo=rust)](./rust-toolchain.toml)
+
 > Private, local-first meeting transcription and AI summaries.
 > Runs 100% on your device. No cloud, no bots, no subscriptions.
 

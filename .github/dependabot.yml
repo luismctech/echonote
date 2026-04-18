@@ -1,0 +1,42 @@
+# Dependabot configuration for EchoNote.
+# Weekly updates for Cargo dependencies and GitHub Actions. Kept conservative
+# to avoid noise; bump-and-merge workflow will live in docs/CONTRIBUTING.md.
+
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: America/Mexico_City
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - rust
+    commit-message:
+      prefix: deps
+      include: scope
+    groups:
+      tokio:
+        patterns: ["tokio*", "futures*", "async-trait"]
+      tracing:
+        patterns: ["tracing*"]
+      serde:
+        patterns: ["serde*"]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: America/Mexico_City
+    open-pull-requests-limit: 3
+    labels:
+      - dependencies
+      - github-actions
+    commit-message:
+      prefix: ci
+      include: scope
