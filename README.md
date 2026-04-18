@@ -101,9 +101,9 @@ Windows and Linux are added in Phase 1 (weeks 12–15).
 ### Prerequisites
 
 - macOS 12.3+ (Monterey) on Apple Silicon or Intel
-- Rust 1.75+ (`rustup install stable`)
-- Node 20+ and pnpm 9+
-- CMake, Ninja, Clang (for whisper.cpp / llama.cpp builds)
+- Rust 1.88+ (pinned in `rust-toolchain.toml`)
+- Node 20+ and pnpm 10+
+- CMake, Clang (required by whisper.cpp / llama.cpp build scripts)
   ```sh
   brew install cmake ninja
   xcode-select --install
@@ -167,8 +167,45 @@ cargo run -p echo-proto -- record --device "BlackHole 2ch" --duration 3 --output
 
 The capture format follows what CoreAudio negotiates with the device
 (typically 44.1 kHz mono `f32`, transcoded to 16-bit PCM in the WAV).
-Resampling to Whisper-native 16 kHz mono lands in Sprint 0 day 6 alongside
-the ASR adapter.
+Files are resampled to Whisper-native 16 kHz mono on the fly inside the
+`transcribe` subcommand below.
+
+#### Transcription (Sprint 0 day 6)
+
+`transcribe` runs whisper.cpp locally through the `echo-asr` adapter.
+On macOS the build uses the Metal backend; on Linux it falls back to a
+CPU build (acceleration features land in Phase 1).
+
+Fetch a Whisper model (default: `base.en`, ~142 MiB):
+
+```sh
+./scripts/download-models.sh             # base.en
+./scripts/download-models.sh small.en    # ~466 MiB, slightly better quality
+./scripts/download-models.sh medium      # ~1.5 GiB, multilingual
+./scripts/download-models.sh --all       # base.en + small.en
+```
+
+Transcribe a WAV (any sample rate, any channel count — it gets
+downmixed to mono and resampled to 16 kHz before inference):
+
+```sh
+cargo run -p echo-proto -- transcribe /tmp/sample.wav
+
+# pin language, ask for JSON output:
+cargo run -p echo-proto -- transcribe /tmp/sample.wav --language en --json
+
+# point at a non-default model:
+cargo run -p echo-proto -- transcribe /tmp/sample.wav \
+    --model models/asr/ggml-medium.bin --language es
+
+# translate a non-English source to English instead of transcribing:
+cargo run -p echo-proto -- transcribe /tmp/sample.wav --translate
+```
+
+The plain-text output ends with a footer reporting the detected
+language, segment count, audio duration and the **real-time factor**
+(`elapsed / audio`). On an Apple M1 Pro with `ggml-base.en` and Metal,
+expect RTF ≈ 0.03 (≈ 30× realtime).
 
 ---
 

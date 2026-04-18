@@ -68,6 +68,12 @@ clap = { version = "4.5", features = ["derive", "env"] }
 # Audio
 cpal = "0.15"
 hound = "3.5"
+rubato = "0.16"
+
+# ASR
+# whisper-rs builds whisper.cpp from source via cmake. The Metal feature
+# is enabled per-crate on macOS only (see crates/echo-asr/Cargo.toml).
+whisper-rs = { version = "0.16", default-features = false, features = ["tracing_backend"] }
 
 # Testing
 mockall = "0.13"

@@ -26,6 +26,9 @@ cpal.workspace = true
 # WAV reader/writer used by the file-sink and integration tests.
 hound.workspace = true
 
+# Sample-rate conversion (any rate -> 16 kHz mono for Whisper).
+rubato.workspace = true
+
 [dev-dependencies]
 pretty_assertions.workspace = true
 tempfile.workspace = true

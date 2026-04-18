@@ -59,9 +59,10 @@ require() {
   fi
 }
 
-require git "git"  "xcode-select --install  # or: brew install git"
+require git   "git"   "xcode-select --install  # or: brew install git"
 require cargo "cargo" "brew install rust  # or: https://rustup.rs"
 require rustc "rustc" "brew install rust  # or: https://rustup.rs"
+require cmake "cmake" "brew install cmake  # required by whisper.cpp / llama.cpp"
 
 # rust-toolchain.toml pin
 EXPECTED_RUST="$(grep -E '^channel' rust-toolchain.toml | sed -E 's/.*"([^"]+)".*/\1/')"

@@ -28,8 +28,14 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
 use echo_app::{FrameSink, RecordToSink};
-use echo_audio::{CpalMicrophoneCapture, WavSink, WriteOptions};
-use echo_domain::{AudioCapture, AudioFormat, AudioFrame, AudioSource, CaptureSpec, DomainError};
+use echo_asr::WhisperCppTranscriber;
+use echo_audio::{
+    resample_to_whisper, CpalMicrophoneCapture, WavSink, WriteOptions, WHISPER_SAMPLE_RATE,
+};
+use echo_domain::{
+    AudioCapture, AudioFormat, AudioFrame, AudioSource, CaptureSpec, DomainError,
+    TranscribeOptions, Transcriber,
+};
 
 /// EchoNote CLI prototype.
 #[derive(Parser, Debug)]
@@ -70,13 +76,27 @@ enum Command {
     /// List the input devices the host exposes.
     RecordDevices,
 
-    /// Transcribe a previously recorded WAV file.
+    /// Transcribe a WAV file with the local whisper.cpp adapter.
+    ///
+    /// The file is decoded, downmixed to mono and resampled to 16 kHz
+    /// `f32` before being fed to Whisper.
     Transcribe {
-        /// Path to a 16 kHz mono WAV file (or it will be resampled).
-        input: String,
-        /// ASR model path. Defaults to the environment-detected model.
+        /// Path to any RIFF/WAV file (mono or stereo, any sample rate).
+        input: PathBuf,
+        /// Path to a `ggml-*.bin` Whisper model. Defaults to the
+        /// `ECHO_ASR_MODEL` env var or `./models/asr/ggml-base.en.bin`.
+        #[arg(long, env = "ECHO_ASR_MODEL")]
+        model: Option<PathBuf>,
+        /// ISO-639-1 language hint (e.g. `en`, `es`). Auto-detect if
+        /// omitted.
         #[arg(long)]
-        model: Option<String>,
+        language: Option<String>,
+        /// Translate to English instead of transcribing in source.
+        #[arg(long)]
+        translate: bool,
+        /// Emit the full transcript as JSON instead of plain text.
+        #[arg(long)]
+        json: bool,
     },
 
     /// Summarize a transcript using the local LLM.
@@ -122,14 +142,13 @@ async fn main() -> Result<()> {
             device,
         } => run_record(duration, output, device).await,
         Command::RecordDevices => run_list_devices().await,
-        Command::Transcribe { input, model } => {
-            tracing::info!(
-                input = %input,
-                model = ?model,
-                "transcribe subcommand not yet wired (Sprint 0 day 6)"
-            );
-            Ok(())
-        }
+        Command::Transcribe {
+            input,
+            model,
+            language,
+            translate,
+            json,
+        } => run_transcribe(input, model, language, translate, json).await,
         Command::Summarize { input, template } => {
             tracing::info!(
                 input = %input,
@@ -244,4 +263,111 @@ impl FrameSink for WavFrameSink {
         }
         Ok(())
     }
+}
+
+// ---------------------------------------------------------------------------
+// `transcribe` subcommand
+// ---------------------------------------------------------------------------
+
+async fn run_transcribe(
+    input: PathBuf,
+    model: Option<PathBuf>,
+    language: Option<String>,
+    translate: bool,
+    json: bool,
+) -> Result<()> {
+    let model_path = model
+        .or_else(|| Some(PathBuf::from("./models/asr/ggml-base.en.bin")))
+        .filter(|p| p.exists())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "no model found. Set --model or ECHO_ASR_MODEL, or run \
+                 `scripts/download-models.sh base.en` to fetch the default."
+            )
+        })?;
+
+    let (samples, source_format) = load_wav_as_pcm(&input)
+        .with_context(|| format!("failed to read wav: {}", input.display()))?;
+    tracing::info!(
+        path = %input.display(),
+        samples = samples.len(),
+        source.rate = source_format.sample_rate_hz,
+        source.ch = source_format.channels,
+        "loaded wav"
+    );
+
+    let pcm16k = resample_to_whisper(&samples, source_format)
+        .map_err(DomainError::from)
+        .context("resample to 16 kHz mono failed")?;
+    tracing::info!(
+        samples_in = samples.len(),
+        samples_out = pcm16k.len(),
+        target_rate = WHISPER_SAMPLE_RATE,
+        "resampled to whisper format"
+    );
+
+    let started = std::time::Instant::now();
+    let transcriber = WhisperCppTranscriber::load(&model_path)
+        .map_err(anyhow::Error::from)
+        .context("failed to load whisper model")?;
+    tracing::info!(
+        model = %model_path.display(),
+        load_ms = started.elapsed().as_millis() as u64,
+        "whisper context ready"
+    );
+
+    let opts = TranscribeOptions {
+        language,
+        initial_prompt: None,
+        translate,
+        threads: None,
+    };
+    let started = std::time::Instant::now();
+    let transcript = transcriber.transcribe(&pcm16k, &opts).await?;
+    let elapsed = started.elapsed();
+
+    let audio_secs = pcm16k.len() as f64 / f64::from(WHISPER_SAMPLE_RATE);
+    let rtf = elapsed.as_secs_f64() / audio_secs.max(1e-6);
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&transcript)?);
+    } else {
+        println!(
+            "{}\n\n--\nlanguage: {}\nsegments: {}\naudio:    {:.2} s\nelapsed:  {:.2} s (rtf={:.3})",
+            transcript.full_text(),
+            transcript.language.as_deref().unwrap_or("?"),
+            transcript.segments.len(),
+            audio_secs,
+            elapsed.as_secs_f64(),
+            rtf,
+        );
+    }
+    Ok(())
+}
+
+/// Decode any RIFF/WAV file (16-bit int, 24-bit int or 32-bit float;
+/// any sample rate, any channel count) into interleaved `f32` samples
+/// in `[-1.0, 1.0]` plus the source [`AudioFormat`].
+fn load_wav_as_pcm(path: &Path) -> Result<(Vec<f32>, AudioFormat)> {
+    let mut reader = hound::WavReader::open(path)?;
+    let spec = reader.spec();
+    let samples: Vec<f32> = match spec.sample_format {
+        hound::SampleFormat::Float => reader
+            .samples::<f32>()
+            .collect::<Result<Vec<_>, _>>()
+            .context("decoding f32 wav samples")?,
+        hound::SampleFormat::Int => {
+            let max = (1u64 << (spec.bits_per_sample - 1)) as f32;
+            reader
+                .samples::<i32>()
+                .map(|s| s.map(|v| v as f32 / max))
+                .collect::<Result<Vec<_>, _>>()
+                .context("decoding integer wav samples")?
+        }
+    };
+    let format = AudioFormat {
+        sample_rate_hz: spec.sample_rate,
+        channels: spec.channels,
+    };
+    Ok((samples, format))
 }

@@ -18,5 +18,18 @@ thiserror.workspace = true
 tracing.workspace = true
 serde.workspace = true
 
-# whisper-rs (with CoreML feature on Apple Silicon) and rubato will be added
-# Sprint 0 day 6 when the adapter lands. Omitted now to keep Day 1 build fast.
+# whisper-rs builds whisper.cpp from source via cmake. The default,
+# CPU-only build works everywhere. We additively enable hardware
+# acceleration per host below.
+whisper-rs.workspace = true
+
+# Apple Silicon / Intel Mac: enable Metal so whisper.cpp uses the GPU.
+[target.'cfg(target_os = "macos")'.dependencies]
+whisper-rs = { workspace = true, features = ["metal"] }
+
+[dev-dependencies]
+echo-audio.workspace = true
+hound.workspace = true
+pretty_assertions.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

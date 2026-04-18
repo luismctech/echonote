@@ -25,4 +25,5 @@ pub mod preprocess;
 pub mod sink;
 
 pub use capture::CpalMicrophoneCapture;
+pub use preprocess::resample::{resample_to_whisper, ResampleError, WHISPER_SAMPLE_RATE};
 pub use sink::{WavSink, WriteOptions};
