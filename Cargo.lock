@@ -1037,7 +1037,7 @@ dependencies = [
  "mockall",
  "pretty_assertions",
  "serde",
- "thiserror 1.0.69",
+ "thiserror 2.0.18",
  "tokio",
  "tracing",
  "uuid",
@@ -1054,7 +1054,7 @@ dependencies = [
  "pretty_assertions",
  "serde",
  "tempfile",
- "thiserror 1.0.69",
+ "thiserror 2.0.18",
  "tokio",
  "tracing",
  "whisper-rs",
@@ -1072,7 +1072,7 @@ dependencies = [
  "rubato",
  "serde",
  "tempfile",
- "thiserror 1.0.69",
+ "thiserror 2.0.18",
  "tokio",
  "tracing",
 ]
@@ -1084,7 +1084,7 @@ dependencies = [
  "async-trait",
  "echo-domain",
  "serde",
- "thiserror 1.0.69",
+ "thiserror 2.0.18",
  "tokio",
  "tracing",
 ]
@@ -1096,7 +1096,7 @@ dependencies = [
  "async-trait",
  "pretty_assertions",
  "serde",
- "thiserror 1.0.69",
+ "thiserror 2.0.18",
  "time",
  "uuid",
 ]
@@ -1109,7 +1109,7 @@ dependencies = [
  "echo-domain",
  "serde",
  "serde_json",
- "thiserror 1.0.69",
+ "thiserror 2.0.18",
  "tokio",
  "tracing",
 ]
@@ -1147,7 +1147,7 @@ dependencies = [
  "tauri",
  "tauri-build",
  "tauri-plugin-log",
- "thiserror 1.0.69",
+ "thiserror 2.0.18",
  "time",
  "tokio",
  "tracing",
@@ -1160,7 +1160,7 @@ dependencies = [
  "async-trait",
  "echo-domain",
  "serde",
- "thiserror 1.0.69",
+ "thiserror 2.0.18",
  "tokio",
  "tracing",
  "uuid",
@@ -1171,7 +1171,7 @@ name = "echo-telemetry"
 version = "0.1.0"
 dependencies = [
  "serde",
- "thiserror 1.0.69",
+ "thiserror 2.0.18",
  "tracing",
  "tracing-subscriber",
 ]
