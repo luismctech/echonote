@@ -17,6 +17,15 @@ pub enum DomainError {
     #[error("audio device unavailable: {0}")]
     AudioDeviceUnavailable(String),
 
+    /// The host exposes the device but the requested format is not
+    /// supported (sample rate, channel count, sample format).
+    #[error("audio format unsupported: {0}")]
+    AudioFormatUnsupported(String),
+
+    /// The capture engine itself reported a runtime error.
+    #[error("audio capture failed: {0}")]
+    AudioCaptureFailed(String),
+
     /// A model required for transcription or summarization is not loaded.
     #[error("model not loaded: {0}")]
     ModelNotLoaded(String),

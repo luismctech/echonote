@@ -21,3 +21,7 @@ pub mod errors;
 pub mod ports;
 
 pub use errors::DomainError;
+pub use ports::audio::{
+    AudioCapture, AudioFormat, AudioFrame, AudioSource, AudioStream, CaptureSpec, DeviceInfo,
+    Sample,
+};

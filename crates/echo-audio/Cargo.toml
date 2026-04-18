@@ -18,9 +18,15 @@ thiserror.workspace = true
 tracing.workspace = true
 serde.workspace = true
 
-# Heavy native dependencies (cpal, ScreenCaptureKit bindings, WASAPI, Silero
-# ONNX, rubato) will be added on Sprint 0 day 5 when the first capture
-# adapter lands. Kept out today to keep `cargo build` lean on Day 1.
+# Cross-platform PCM capture. cpal owns its own real-time audio thread per
+# stream; we wrap it behind the AudioStream port so callers do not have to
+# care.
+cpal.workspace = true
+
+# WAV reader/writer used by the file-sink and integration tests.
+hound.workspace = true
 
 [dev-dependencies]
 pretty_assertions.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }

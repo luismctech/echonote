@@ -137,13 +137,38 @@ cargo test --workspace --all-targets
 
 ### CLI prototype (Phase 0)
 
+`echo-proto` is the headless prototype that grows through Sprint 0 into a
+full record → transcribe → summarize pipeline. Subcommands land
+incrementally; `--help` always lists what is wired today.
+
 ```sh
 cargo run -p echo-proto -- --help
 ```
 
-The `echo-proto` binary will grow through Sprint 0 into a headless
-record → transcribe → summarize pipeline used for benchmarking before the
-Tauri UI wires the same commands.
+#### Recording (Sprint 0 day 5)
+
+List input devices:
+
+```sh
+cargo run -p echo-proto -- record-devices
+```
+
+Capture 5 seconds from the default microphone to a WAV file:
+
+```sh
+cargo run -p echo-proto -- record --duration 5 --output /tmp/sample.wav
+```
+
+Pick a specific device by name (use `record-devices` to discover names):
+
+```sh
+cargo run -p echo-proto -- record --device "BlackHole 2ch" --duration 3 --output /tmp/sys.wav
+```
+
+The capture format follows what CoreAudio negotiates with the device
+(typically 44.1 kHz mono `f32`, transcoded to 16-bit PCM in the WAV).
+Resampling to Whisper-native 16 kHz mono lands in Sprint 0 day 6 alongside
+the ASR adapter.
 
 ---
 

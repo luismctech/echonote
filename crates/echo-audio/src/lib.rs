@@ -22,3 +22,7 @@
 pub mod buffer;
 pub mod capture;
 pub mod preprocess;
+pub mod sink;
+
+pub use capture::CpalMicrophoneCapture;
+pub use sink::{WavSink, WriteOptions};
