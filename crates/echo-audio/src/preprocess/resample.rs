@@ -14,10 +14,11 @@
 //! pipeline in Sprint 1.
 
 use rubato::{
-    Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction,
+    Resampler as RubatoResampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType,
+    WindowFunction,
 };
 
-use echo_domain::{AudioFormat, DomainError, Sample};
+use echo_domain::{AudioFormat, DomainError, Resampler, Sample};
 
 /// Whisper expects 16 kHz mono `f32`.
 pub const WHISPER_SAMPLE_RATE: u32 = 16_000;
@@ -140,6 +141,22 @@ fn resample_mono(
 
     output.truncate(expected_out);
     Ok(output)
+}
+
+/// Stateless adapter that satisfies the [`echo_domain::Resampler`] port
+/// using [`resample_to_whisper`]. Cheap to clone; safe to share across
+/// async tasks.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct RubatoResamplerAdapter;
+
+impl Resampler for RubatoResamplerAdapter {
+    fn to_whisper(
+        &self,
+        samples: &[Sample],
+        input: AudioFormat,
+    ) -> Result<Vec<Sample>, DomainError> {
+        Ok(resample_to_whisper(samples, input)?)
+    }
 }
 
 #[cfg(test)]

@@ -6,3 +6,4 @@ pub mod generate_summary;
 pub mod rename_speaker;
 pub mod start_recording;
 pub mod stop_recording;
+pub mod streaming;

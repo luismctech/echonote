@@ -10,3 +10,4 @@
 pub mod meeting;
 pub mod segment;
 pub mod speaker;
+pub mod streaming;

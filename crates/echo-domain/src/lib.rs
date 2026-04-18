@@ -25,7 +25,9 @@ pub use ports::audio::{
     AudioCapture, AudioFormat, AudioFrame, AudioSource, AudioStream, CaptureSpec, DeviceInfo,
     Sample,
 };
+pub use ports::resampler::Resampler;
 pub use ports::transcriber::{TranscribeOptions, Transcriber, Transcript};
 
 pub use entities::segment::{Segment, SegmentId};
 pub use entities::speaker::SpeakerId;
+pub use entities::streaming::{StreamingOptions, StreamingSessionId, TranscriptEvent};
