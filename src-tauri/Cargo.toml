@@ -21,10 +21,11 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = [] }
-tauri-plugin-log = "2"
 
 # Workspace-level crates — the application and its adapters.
 echo-app = { path = "../crates/echo-app" }
+echo-asr = { path = "../crates/echo-asr" }
+echo-audio = { path = "../crates/echo-audio" }
 echo-domain = { path = "../crates/echo-domain" }
 echo-telemetry = { path = "../crates/echo-telemetry" }
 

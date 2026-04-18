@@ -20,9 +20,17 @@ pub fn run() {
         "echo-shell starting"
     );
 
+    // NOTE: `tauri-plugin-log` conflicts with `echo_telemetry::init`,
+    // which already installs a global `log → tracing` bridge. Logging
+    // is delivered through that subscriber. Reintroduce the plugin only
+    // if we move telemetry off `tracing-subscriber`.
     tauri::Builder::default()
-        .plugin(tauri_plugin_log::Builder::new().build())
-        .invoke_handler(generate_handler![commands::health_check])
+        .manage(commands::AppState::new())
+        .invoke_handler(generate_handler![
+            commands::health_check,
+            commands::start_streaming,
+            commands::stop_streaming,
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
