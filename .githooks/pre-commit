@@ -10,23 +10,31 @@
 # -----------------------------------------------------------------------------
 set -Eeuo pipefail
 
-# Only act on staged Rust files. Frontend hooks come online in Sprint 0 day 4.
 STAGED_RS=$(git diff --cached --name-only --diff-filter=ACMR -- '*.rs' || true)
+STAGED_TS=$(git diff --cached --name-only --diff-filter=ACMR -- '*.ts' '*.tsx' || true)
 
-if [[ -z "$STAGED_RS" ]]; then
-  exit 0
+# --- Rust gate ---------------------------------------------------------------
+if [[ -n "$STAGED_RS" ]]; then
+  echo "==> pre-commit: cargo fmt --all --check"
+  if ! cargo fmt --all --check; then
+    echo "!! rustfmt found issues. Run 'cargo fmt --all' and re-stage." >&2
+    exit 1
+  fi
+
+  echo "==> pre-commit: cargo clippy (workspace, -D warnings)"
+  if ! cargo clippy --workspace --all-targets --quiet -- -D warnings; then
+    echo "!! clippy failed. Fix warnings or prove they are intentional before committing." >&2
+    exit 1
+  fi
 fi
 
-echo "==> pre-commit: cargo fmt --all --check"
-if ! cargo fmt --all --check; then
-  echo "!! rustfmt found issues. Run 'cargo fmt --all' and re-stage." >&2
-  exit 1
-fi
-
-echo "==> pre-commit: cargo clippy (workspace, -D warnings)"
-if ! cargo clippy --workspace --all-targets --quiet -- -D warnings; then
-  echo "!! clippy failed. Fix warnings or prove they are intentional before committing." >&2
-  exit 1
+# --- Frontend gate -----------------------------------------------------------
+if [[ -n "$STAGED_TS" && -f "package.json" && -d "node_modules" ]]; then
+  echo "==> pre-commit: pnpm typecheck"
+  if ! pnpm -s typecheck; then
+    echo "!! TypeScript typecheck failed." >&2
+    exit 1
+  fi
 fi
 
 exit 0

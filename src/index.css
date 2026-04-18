@@ -1,0 +1,14 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Selection: editorial, subtle. Final palette lands in Sprint 1. */
+::selection {
+  background-color: rgb(24 24 27 / 0.1);
+}
+
+@media (prefers-color-scheme: dark) {
+  ::selection {
+    background-color: rgb(244 244 245 / 0.15);
+  }
+}

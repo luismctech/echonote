@@ -17,6 +17,7 @@ members = [
   "crates/echo-storage",
   "crates/echo-telemetry",
   "crates/echo-proto",
+  "src-tauri",
 ]
 
 # -----------------------------------------------------------------------------

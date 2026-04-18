@@ -34,7 +34,7 @@ cloud-based tools like Granola.
 | Layer | Technology |
 |---|---|
 | Desktop shell | [Tauri 2.x](https://tauri.app/) |
-| Backend | Rust 1.75+ (Clean Architecture with ports & adapters) |
+| Backend | Rust 1.88+ (Clean Architecture with ports & adapters) |
 | Frontend | React 18 + TypeScript + Tailwind + shadcn/ui + Zustand |
 | ASR | [whisper.cpp](https://github.com/ggerganov/whisper.cpp) via `whisper-rs` |
 | LLM | [llama.cpp](https://github.com/ggerganov/llama.cpp) via `llama-cpp-rs` |
@@ -65,12 +65,21 @@ in `docs/benchmarks/` (populated during Phase 0).
 ```
 echonote/
 ├── Cargo.toml                Rust workspace root
+├── package.json              Frontend root (pnpm)
+├── vite.config.ts            Vite configuration
+├── tailwind.config.ts        Tailwind configuration
+├── index.html                Vite entry HTML
+├── src/                      React frontend (TypeScript)
+│   ├── main.tsx
+│   ├── App.tsx
+│   └── lib/ipc.ts            Typed IPC client
+├── src-tauri/                Tauri host shell (echo-shell crate)
+│   ├── Cargo.toml
+│   ├── tauri.conf.json
+│   ├── capabilities/         Capability manifests (security)
+│   └── src/                  commands.rs + lib.rs + main.rs
 ├── crates/                   Rust library crates (domain, app, audio, asr, …)
-├── src-tauri/                Tauri binary (commands + event wiring)
-├── src/                      React frontend
 ├── tests/                    Fixtures, integration, e2e
-├── docs/                     ADRs, benchmarks, user docs
-├── scripts/                  Utility scripts (download-models, etc.)
 ├── docs/
 │   ├── ARCHITECTURE.md       Technical architecture
 │   ├── DESIGN.md             UI/UX system
@@ -78,6 +87,7 @@ echonote/
 │   ├── adr/                  Architecture Decision Records (MADR)
 │   ├── benchmarks/           ASR/LLM benchmark results per phase
 │   └── mockup-*.html         Interactive mockups
+├── scripts/                  Utility scripts (bootstrap, download-models)
 └── README.md                 You are here
 ```
 
@@ -105,16 +115,35 @@ Windows and Linux are added in Phase 1 (weeks 12–15).
 git clone https://github.com/AlbertoMZCruz/echonote.git
 cd echonote
 git checkout develop
-./scripts/download-models.sh    # will exist at the end of Sprint 0
-cargo build
+./scripts/bootstrap.sh          # verifies toolchain and wires up git hooks
+pnpm install                    # frontend deps
+cargo build --workspace         # backend deps
 ```
 
-### Quickstart (will be valid at the end of Sprint 0)
+### Day-to-day
 
 ```sh
-# 30-second end-to-end prototype: record → transcribe → summarize
-cargo run --release -p echo-proto -- record --duration 30
+# Launch the desktop shell in dev mode (webview + hot-reload + Rust).
+pnpm tauri:dev
+
+# Frontend only (browser, no IPC).
+pnpm dev
+
+# Run all backend checks (same as CI).
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace --all-targets
 ```
+
+### CLI prototype (Phase 0)
+
+```sh
+cargo run -p echo-proto -- --help
+```
+
+The `echo-proto` binary will grow through Sprint 0 into a headless
+record → transcribe → summarize pipeline used for benchmarking before the
+Tauri UI wires the same commands.
 
 ---
 

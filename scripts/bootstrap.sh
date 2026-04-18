@@ -89,21 +89,34 @@ check_component() {
 check_component fmt
 check_component clippy
 
-# --- 4. optional tooling (frontend, not required until Day 4) ----------------
-section "Frontend tooling (optional until Sprint 0 day 4)"
+# --- 4. frontend tooling -----------------------------------------------------
+section "Frontend tooling"
+FRONTEND_ERRORS=0
 if command -v node >/dev/null 2>&1; then
   ok "node: $(node --version)"
 else
-  warn "node not found. Install with: brew install node@20  # or use nvm"
+  fail "node not found. Install with: brew install node@20  # or use nvm"
+  FRONTEND_ERRORS=$((FRONTEND_ERRORS + 1))
 fi
 
 if command -v pnpm >/dev/null 2>&1; then
   ok "pnpm: $(pnpm --version)"
 elif command -v corepack >/dev/null 2>&1; then
-  warn "pnpm not activated. Run: corepack enable && corepack prepare pnpm@9 --activate"
+  warn "pnpm not activated. Run: corepack enable && corepack prepare pnpm@10 --activate"
+  FRONTEND_ERRORS=$((FRONTEND_ERRORS + 1))
 else
-  warn "pnpm not found. Enable via corepack once node is installed."
+  fail "pnpm not found. Enable via corepack once node is installed."
+  FRONTEND_ERRORS=$((FRONTEND_ERRORS + 1))
 fi
+
+if [[ $FRONTEND_ERRORS -eq 0 && -f "package.json" ]]; then
+  if [[ -d "node_modules" ]]; then
+    ok "node_modules present (run 'pnpm install' after every pnpm-lock.yaml change)"
+  else
+    warn "node_modules missing. Run: pnpm install"
+  fi
+fi
+record_error_count=$FRONTEND_ERRORS
 
 # --- 5. git hooks ------------------------------------------------------------
 section "Git hooks"
