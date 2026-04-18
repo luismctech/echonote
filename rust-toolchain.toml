@@ -8,7 +8,7 @@
 # bit-reproducible. Bumping this file is a deliberate, reviewed change.
 
 [toolchain]
-channel = "1.82.0"
+channel = "1.88.0"
 components = ["rustfmt", "clippy", "rust-src"]
 targets = [
   "aarch64-apple-darwin",
