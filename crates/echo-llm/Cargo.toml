@@ -1,0 +1,22 @@
+[package]
+name = "echo-llm"
+description = "Local LLM adapter around llama.cpp for summaries and chat-with-transcript."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+
+[dependencies]
+echo-domain.workspace = true
+
+tokio.workspace = true
+async-trait.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+# llama-cpp-rs with Metal backend will be added Sprint 0 day 7.

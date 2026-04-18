@@ -1,0 +1,32 @@
+[package]
+name = "echo-proto"
+description = "CLI prototype for EchoNote Phase 0 discovery. Records, transcribes, summarizes."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+publish = false
+
+[[bin]]
+name = "echo-proto"
+path = "src/main.rs"
+
+[dependencies]
+echo-domain.workspace = true
+echo-app.workspace = true
+echo-audio.workspace = true
+echo-asr.workspace = true
+echo-diarize.workspace = true
+echo-llm.workspace = true
+echo-storage.workspace = true
+echo-telemetry.workspace = true
+
+tokio.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+serde.workspace = true
+serde_json.workspace = true

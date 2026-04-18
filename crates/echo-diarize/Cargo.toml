@@ -1,0 +1,19 @@
+[package]
+name = "echo-diarize"
+description = "Speaker diarization via local ONNX embeddings (3D-Speaker ERes2Net) and clustering."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+
+[dependencies]
+echo-domain.workspace = true
+
+tokio.workspace = true
+async-trait.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+serde.workspace = true

@@ -1,0 +1,17 @@
+# Pinned Rust toolchain for EchoNote.
+#
+# This file is honored by `rustup` (https://rustup.rs). If you are using the
+# Homebrew-provided `rustc`, this file has no effect but your compiler must
+# still satisfy the version listed here.
+#
+# We pin to a specific stable release to keep CI and developer machines
+# bit-reproducible. Bumping this file is a deliberate, reviewed change.
+
+[toolchain]
+channel = "1.82.0"
+components = ["rustfmt", "clippy", "rust-src"]
+targets = [
+  "aarch64-apple-darwin",
+  "x86_64-apple-darwin",
+]
+profile = "default"

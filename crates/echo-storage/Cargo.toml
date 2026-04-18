@@ -1,0 +1,22 @@
+[package]
+name = "echo-storage"
+description = "SQLite + FTS5 persistence adapter with optional SQLCipher encryption."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+
+[dependencies]
+echo-domain.workspace = true
+
+tokio.workspace = true
+async-trait.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+serde.workspace = true
+uuid.workspace = true
+
+# sqlx + sqlcipher lands Sprint 3 together with the schema migrations.

@@ -1,0 +1,22 @@
+[package]
+name = "echo-asr"
+description = "Automatic Speech Recognition adapter around whisper.cpp via whisper-rs."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+
+[dependencies]
+echo-domain.workspace = true
+
+tokio.workspace = true
+async-trait.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+serde.workspace = true
+
+# whisper-rs (with CoreML feature on Apple Silicon) and rubato will be added
+# Sprint 0 day 6 when the adapter lands. Omitted now to keep Day 1 build fast.

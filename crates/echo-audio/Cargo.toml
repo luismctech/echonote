@@ -1,0 +1,26 @@
+[package]
+name = "echo-audio"
+description = "Dual audio capture (mic + system) with preprocessing and VAD. Per-OS adapters."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+
+[dependencies]
+echo-domain.workspace = true
+
+tokio.workspace = true
+async-trait.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+serde.workspace = true
+
+# Heavy native dependencies (cpal, ScreenCaptureKit bindings, WASAPI, Silero
+# ONNX, rubato) will be added on Sprint 0 day 5 when the first capture
+# adapter lands. Kept out today to keep `cargo build` lean on Day 1.
+
+[dev-dependencies]
+pretty_assertions.workspace = true

@@ -1,0 +1,24 @@
+[package]
+name = "echo-app"
+description = "Application layer: use cases that orchestrate domain ports. Framework-agnostic."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+
+[dependencies]
+echo-domain.workspace = true
+
+tokio.workspace = true
+async-trait.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+serde.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+mockall.workspace = true
+pretty_assertions.workspace = true

@@ -1,0 +1,105 @@
+# -----------------------------------------------------------------------------
+# EchoNote — Cargo workspace root
+# -----------------------------------------------------------------------------
+# This file defines the Rust workspace for the EchoNote desktop app.
+# See docs/ARCHITECTURE.md §5.1 for the rationale behind the crate split.
+# -----------------------------------------------------------------------------
+
+[workspace]
+resolver = "2"
+members = [
+  "crates/echo-domain",
+  "crates/echo-app",
+  "crates/echo-audio",
+  "crates/echo-asr",
+  "crates/echo-diarize",
+  "crates/echo-llm",
+  "crates/echo-storage",
+  "crates/echo-telemetry",
+  "crates/echo-proto",
+]
+
+# -----------------------------------------------------------------------------
+# Shared package metadata inherited by member crates via `package.xxx.workspace = true`
+# -----------------------------------------------------------------------------
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+authors = ["Alberto Cruz <albertomzcruz@gmail.com>"]
+license = "MIT"
+repository = "https://github.com/AlbertoMZCruz/echonote"
+homepage = "https://github.com/AlbertoMZCruz/echonote"
+readme = "README.md"
+keywords = ["transcription", "whisper", "llm", "local-first", "privacy"]
+categories = ["multimedia", "multimedia::audio"]
+
+# -----------------------------------------------------------------------------
+# Workspace-wide dependency versions.
+# Member crates opt in with `dep = { workspace = true }`. This guarantees a
+# single resolved version across the tree and makes bumps a single-file change.
+# -----------------------------------------------------------------------------
+[workspace.dependencies]
+# Runtime
+tokio = { version = "1.41", features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "fs", "signal"] }
+futures = "0.3"
+async-trait = "0.1"
+
+# Error handling & logging
+thiserror = "1.0"
+anyhow = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.8"
+
+# IDs & time
+uuid = { version = "1.11", features = ["v7", "serde"] }
+time = { version = "0.3", features = ["serde", "formatting", "parsing"] }
+chrono = { version = "0.4", features = ["serde"] }
+
+# CLI (echo-proto)
+clap = { version = "4.5", features = ["derive", "env"] }
+
+# Testing
+mockall = "0.13"
+pretty_assertions = "1.4"
+
+# Internal crates — referenced by path so members can depend on siblings
+echo-domain = { path = "crates/echo-domain" }
+echo-app = { path = "crates/echo-app" }
+echo-audio = { path = "crates/echo-audio" }
+echo-asr = { path = "crates/echo-asr" }
+echo-diarize = { path = "crates/echo-diarize" }
+echo-llm = { path = "crates/echo-llm" }
+echo-storage = { path = "crates/echo-storage" }
+echo-telemetry = { path = "crates/echo-telemetry" }
+
+# -----------------------------------------------------------------------------
+# Profiles
+# -----------------------------------------------------------------------------
+[profile.dev]
+opt-level = 0
+debug = true
+split-debuginfo = "unpacked"
+
+# Heavy crates (whisper-cpp, llama-cpp, ort) stay optimized even in dev to
+# keep the CLI prototype usable during development.
+[profile.dev.package."*"]
+opt-level = 0
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"
+
+# Profile used by CI for faster builds with some optimization.
+[profile.ci]
+inherits = "dev"
+debug = 1
+incremental = false
