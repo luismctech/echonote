@@ -70,10 +70,8 @@ jobs:
         with:
           shared-key: macos-14
 
-      - name: Setup pnpm
+      - name: Setup pnpm (version from packageManager field)
         uses: pnpm/action-setup@v4
-        with:
-          version: 10
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -134,10 +132,8 @@ jobs:
         with:
           shared-key: ubuntu-24.04
 
-      - name: Setup pnpm
+      - name: Setup pnpm (version from packageManager field)
         uses: pnpm/action-setup@v4
-        with:
-          version: 10
 
       - name: Setup Node
         uses: actions/setup-node@v4
