@@ -71,10 +71,10 @@ jobs:
           shared-key: macos-14
 
       - name: Setup pnpm (version from packageManager field)
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v5
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: 20
           cache: pnpm
@@ -137,10 +137,10 @@ jobs:
           shared-key: ubuntu-24.04
 
       - name: Setup pnpm (version from packageManager field)
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v5
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: 20
           cache: pnpm
