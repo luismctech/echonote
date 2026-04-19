@@ -7,8 +7,9 @@
  * timing across browsers — the FTS query is cheap, so we err on the
  * side of "feel responsive" over "save the CPU a few cycles".
  *
- * Lives outside `lib/ipc.ts` so it can be reused by other inputs
- * later (e.g. chat composer typing indicators in Sprint 1 day 9+).
+ * Lives in `lib/` (alongside the other dependency-free helpers) so
+ * it can be reused by other inputs later — e.g. chat composer typing
+ * indicators in Sprint 1 day 9+.
  */
 import { useEffect, useState } from "react";
 

@@ -1,8 +1,10 @@
 //! Tauri IPC commands exposed to the frontend.
 //!
-//! Each command here mirrors a typed contract in `src/lib/ipc.ts`. When
-//! the surface grows beyond a handful, switch to `tauri-specta` code
-//! generation — see ADR note in `docs/adr/0002-rust-plus-react-stack.md`.
+//! Each command here mirrors a typed contract in `src/ipc/client.ts`
+//! (return shapes are mirrored by the pure TS types under `src/types/`).
+//! When the surface grows beyond a handful, switch to `tauri-specta`
+//! code generation — see ADR note in
+//! `docs/adr/0002-rust-plus-react-stack.md`.
 
 use std::collections::HashMap;
 use std::path::PathBuf;

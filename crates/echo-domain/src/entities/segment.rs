@@ -32,7 +32,14 @@ impl Default for SegmentId {
 }
 
 /// One contiguous transcription span.
+///
+/// `serde(rename_all = "camelCase")` keeps the wire format aligned
+/// with the TypeScript `Segment` type in `src/types/segment.ts`, so
+/// the `Meeting` aggregate returned by `get_meeting` exposes
+/// `startMs` (not `start_ms`) — the same convention the streaming
+/// `Chunk` event already uses for the segments it carries.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Segment {
     /// Stable identifier.
     pub id: SegmentId,

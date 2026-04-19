@@ -4,7 +4,7 @@
 //! the capture, ASR and LLM crates together to prove the end-to-end
 //! pipeline on macOS before any UI work begins.
 //!
-//! Subcommands (incrementally wired during Sprint 0):
+//! Subcommands (incrementally wired during Sprints 0 and 1):
 //!
 //! - `record --duration N` — capture N seconds of dual audio to WAV.
 //!   (Wired Sprint 0 day 5.)
@@ -14,6 +14,12 @@
 //!   (Wired Sprint 0 day 7.)
 //! - `run --duration N` — full end-to-end record → transcribe → summarize.
 //!   (Wired Sprint 0 day 8.)
+//! - `stream --duration N` — live capture → resample → whisper streaming,
+//!   optionally diarized; persists into the SQLite store the desktop
+//!   shell shares. (Wired Sprint 0 day 9; diarize flag added Sprint 1.)
+//! - `meetings list|get|delete` — inspect / clean up the SQLite store
+//!   from the terminal without launching the UI.
+//!   (Wired Sprint 0 day 10.)
 //! - `bench wer` / `bench llm` — Phase 0 benchmarks.
 //!   (Wired Sprint 0 day 9-10.)
 //!

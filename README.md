@@ -12,21 +12,31 @@ captures, transcribes and summarizes meetings using open-source AI models that
 run entirely on the user's machine. It is the privacy-first alternative to
 cloud-based tools like Granola.
 
-**Status:** 🚧 Pre-alpha — Sprint 0 complete (`v0.1.0-sprint0`). Live streaming
-transcription, SQLite persistence and a Phase-0 WER bench all work end-to-end
-on macOS. Diarization, system audio, summaries and chat land in Sprint 1+.
+**Status:** 🚧 Pre-alpha — Sprint 1 in progress. Sprint 0 (`v0.1.0-sprint0`)
+shipped end-to-end live streaming, SQLite persistence and a Phase-0 WER bench
+on macOS. Sprint 1 has so far added per-track diarization, FTS5 search, a
+refactored React frontend that follows clean-architecture layering, and an
+ordered shutdown path. Local LLM summaries and chat land next.
 
-**What works today (`v0.1.0-sprint0`):**
+**What works today (`develop`):**
 
 - 🎙️ Live microphone streaming with 5-second windows, energy VAD, and Whisper
   on Metal (RTF ≈ 0.08 on Apple M1 Pro).
-- 💾 Per-chunk persistence into SQLite — recordings survive app restarts.
-- 🖥️ Tauri desktop UI with meetings sidebar, live transcript pane and replay
-  view for past meetings.
+- 🗣️ Online speaker diarization via 3D-Speaker ERes2Net embeddings; speakers
+  are persisted per-meeting and renameable from the UI.
+- 💾 Per-chunk persistence into SQLite — recordings survive app restarts;
+  WAL is checkpointed on app close via an ordered shutdown hook.
+- 🔍 Full-text search across every meeting (SQLite FTS5, diacritic-insensitive,
+  BM25-ranked, with snippet highlights).
+- 🖥️ Tauri desktop UI with meetings sidebar, live transcript pane, replay view
+  for past meetings, and a hand-rolled toast layer.
 - ⌨️ `echo-proto` CLI for headless capture, transcription, streaming, meetings
   inspection and WER benchmarks.
 - 📊 Phase-0 WER baseline at **8.40 %** (`base.en`, synthetic fixtures, see
   [`docs/benchmarks/PHASE-0.md`](./docs/benchmarks/PHASE-0.md)).
+
+**Not yet:** local LLM summaries (day 9), system-audio capture, encrypted-at-rest
+storage, the setup wizard, and the Lite/Quality hardware profiles.
 
 ---
 
@@ -86,7 +96,13 @@ echonote/
 ├── src/                      React frontend (TypeScript)
 │   ├── main.tsx
 │   ├── App.tsx
-│   └── lib/ipc.ts            Typed IPC client
+│   ├── ipc/client.ts         Typed Tauri IPC client
+│   ├── types/                Pure TS types mirroring Rust DTOs
+│   ├── state/                Reducers + context providers
+│   ├── hooks/                Reusable behaviour (recording, meeting detail…)
+│   ├── lib/                  Dependency-free helpers
+│   ├── components/           Reusable UI primitives
+│   └── features/             View-level components grouped by feature
 ├── src-tauri/                Tauri host shell (echo-shell crate)
 │   ├── Cargo.toml
 │   ├── tauri.conf.json
