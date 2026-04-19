@@ -39,6 +39,9 @@ tracing = { workspace = true }
 time = { workspace = true, features = ["formatting"] }
 thiserror = { workspace = true }
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [features]
 # Default features are left empty; the shell opts in to platform backends
 # per build.
