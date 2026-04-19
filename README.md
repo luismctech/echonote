@@ -12,7 +12,21 @@ captures, transcribes and summarizes meetings using open-source AI models that
 run entirely on the user's machine. It is the privacy-first alternative to
 cloud-based tools like Granola.
 
-**Status:** 🚧 Pre-alpha — Sprint 0 (scaffolding & CLI prototype). Not yet usable.
+**Status:** 🚧 Pre-alpha — Sprint 0 complete (`v0.1.0-sprint0`). Live streaming
+transcription, SQLite persistence and a Phase-0 WER bench all work end-to-end
+on macOS. Diarization, system audio, summaries and chat land in Sprint 1+.
+
+**What works today (`v0.1.0-sprint0`):**
+
+- 🎙️ Live microphone streaming with 5-second windows, energy VAD, and Whisper
+  on Metal (RTF ≈ 0.08 on Apple M1 Pro).
+- 💾 Per-chunk persistence into SQLite — recordings survive app restarts.
+- 🖥️ Tauri desktop UI with meetings sidebar, live transcript pane and replay
+  view for past meetings.
+- ⌨️ `echo-proto` CLI for headless capture, transcription, streaming, meetings
+  inspection and WER benchmarks.
+- 📊 Phase-0 WER baseline at **8.40 %** (`base.en`, synthetic fixtures, see
+  [`docs/benchmarks/PHASE-0.md`](./docs/benchmarks/PHASE-0.md)).
 
 ---
 
@@ -207,6 +221,63 @@ language, segment count, audio duration and the **real-time factor**
 (`elapsed / audio`). On an Apple M1 Pro with `ggml-base.en` and Metal,
 expect RTF ≈ 0.03 (≈ 30× realtime).
 
+#### Streaming pipeline (Sprint 0 day 7)
+
+Live mic → resample → whisper streaming. Same pipeline the desktop UI
+uses, headless. Useful as a smoke test or for batch transcribing your
+microphone in a terminal session.
+
+```sh
+# 30 s capture, 5 s chunks, default mic, model from ECHO_ASR_MODEL:
+cargo run -p echo-proto -- stream --duration 30
+
+# Custom chunk window + silence gate (RMS threshold; 0 disables):
+cargo run -p echo-proto -- stream --duration 60 --chunk-ms 4000 --silence-threshold 0.01
+```
+
+Each chunk prints with its index, offset, RTF and the decoded text.
+Silent chunks are reported as `silence (rms=…)` and skipped. Every
+session is **persisted to SQLite** through the same `MeetingRecorder`
+the UI uses — inspect afterwards with `meetings show`.
+
+#### Meetings (Sprint 0 day 8)
+
+Inspect the local SQLite database (default path: `./echonote.db`,
+override with `ECHO_DB_PATH=…`).
+
+```sh
+cargo run -p echo-proto -- meetings list
+cargo run -p echo-proto -- meetings list --json
+cargo run -p echo-proto -- meetings show <uuid>
+cargo run -p echo-proto -- meetings show <uuid> --json
+cargo run -p echo-proto -- meetings delete <uuid>
+```
+
+#### Benchmarks (Sprint 0 day 9)
+
+Phase-0 ASR benchmark over synthetic fixtures (see
+[`fixtures/README.md`](./fixtures/README.md) for the contract). Reports
+per-clip + global WER, RTF p50/p95, and fails when global WER exceeds
+the gate.
+
+```sh
+# Generate the synthetic WAVs locally (macOS `say` + `afconvert`):
+./scripts/build-fixtures.sh
+
+# Run the bench. Writes a JSON report and exits non-zero on regression.
+cargo run --release -p echo-proto -- bench wer \
+    --max-wer 0.25 \
+    --report target/bench-reports/wer.json
+```
+
+The full baseline + analysis lives in
+[`docs/benchmarks/PHASE-0.md`](./docs/benchmarks/PHASE-0.md). To run
+the same bench in CI on a clean macOS runner with a downloaded model:
+
+```sh
+gh workflow run bench.yml -f whisper_model=base.en -f max_wer=0.25
+```
+
 ---
 
 ## Project documentation
@@ -216,8 +287,9 @@ expect RTF ≈ 0.03 (≈ 30× realtime).
 | [docs/DEVELOPMENT_PLAN.md](./docs/DEVELOPMENT_PLAN.md) | Phased roadmap, scope, milestones |
 | [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) | System design, layers, stack justifications |
 | [docs/DESIGN.md](./docs/DESIGN.md) | Visual design system, UX flows, screens |
+| [docs/SPRINT-0-RETRO.md](./docs/SPRINT-0-RETRO.md) | Sprint 0 outcome, decisions, risks |
+| [docs/benchmarks/PHASE-0.md](./docs/benchmarks/PHASE-0.md) | First WER baseline + quality gates |
 | `docs/adr/` | Architecture Decision Records (MADR format) |
-| `docs/benchmarks/` | ASR / LLM benchmark results per phase |
 | `docs/mockup-*.html` | Interactive mockups of key screens |
 
 ---
