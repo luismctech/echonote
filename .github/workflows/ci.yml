@@ -85,6 +85,12 @@ jobs:
       - name: pnpm typecheck
         run: pnpm typecheck
 
+      - name: pnpm test (vitest)
+        # The frontend now has reducer + hook tests under src/. They
+        # run in node (no jsdom) and finish in well under a second, so
+        # there's no reason not to gate macOS CI on them.
+        run: pnpm test
+
       - name: pnpm build (Vite production bundle)
         run: pnpm build
 
