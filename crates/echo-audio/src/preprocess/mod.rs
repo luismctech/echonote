@@ -2,4 +2,5 @@
 
 pub mod denoise;
 pub mod resample;
+pub mod silero_vad;
 pub mod vad;

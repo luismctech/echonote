@@ -13,3 +13,4 @@ pub mod llm;
 pub mod resampler;
 pub mod storage;
 pub mod transcriber;
+pub mod vad;

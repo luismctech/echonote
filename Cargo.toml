@@ -73,6 +73,13 @@ rubato = "0.16"
 # by echo-audio via [target.'cfg(target_os = "macos")'.dependencies].
 screencapturekit = "1.5"
 
+# ML inference
+# Pure-Rust ONNX inference. Used by echo-audio for the Silero VAD v5
+# adapter (Sprint 1 day 4). Avoids the FFI / shared-lib dance of
+# onnxruntime — fine for tiny models. We may swap to `ort` for larger
+# diarization / TTS models if performance becomes an issue.
+tract-onnx = { version = "0.22", default-features = false }
+
 # Storage
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "macros", "migrate"] }
 

@@ -30,6 +30,11 @@ pub enum DomainError {
     #[error("model not loaded: {0}")]
     ModelNotLoaded(String),
 
+    /// Voice activity detection failed at runtime (model inference,
+    /// state corruption, sample-rate mismatch).
+    #[error("voice activity detection failed: {0}")]
+    VadFailed(String),
+
     /// The requested session does not exist or is in an invalid state.
     #[error("invalid session state: {0}")]
     InvalidSessionState(String),

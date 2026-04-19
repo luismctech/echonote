@@ -1,26 +1,33 @@
 #!/usr/bin/env bash
 # -----------------------------------------------------------------------------
-# EchoNote — download Whisper / LLM models from their canonical sources.
+# EchoNote — download Whisper / VAD / LLM models from their canonical sources.
 #
 # Usage:
 #   scripts/download-models.sh                # default: ggml-base.en
 #   scripts/download-models.sh small.en       # ~466 MB
 #   scripts/download-models.sh medium         # ~1.5 GB, multilingual
 #   scripts/download-models.sh large-v3       # ~3.0 GB
-#   scripts/download-models.sh --all          # base.en + small.en
+#   scripts/download-models.sh vad            # Silero VAD v5 (~2 MB)
+#   scripts/download-models.sh --all          # base.en + small.en + vad
 #
-# Models are written to ./models/asr/ggml-<flavor>.bin and skipped if the
-# file already exists with the expected size. SHA-256 checksums are
-# verified when the upstream manifest provides them (Hugging Face does).
+# ASR models are written to ./models/asr/ggml-<flavor>.bin
+# VAD model lives at  ./models/vad/silero_vad.onnx
+# Existing files are skipped if their size looks right.
 # -----------------------------------------------------------------------------
 set -Eeuo pipefail
 
 REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
-MODELS_DIR="${REPO_ROOT}/models/asr"
-mkdir -p "$MODELS_DIR"
+ASR_DIR="${REPO_ROOT}/models/asr"
+VAD_DIR="${REPO_ROOT}/models/vad"
+mkdir -p "$ASR_DIR" "$VAD_DIR"
+# Back-compat alias for code paths that still reference $MODELS_DIR.
+MODELS_DIR="$ASR_DIR"
 
 # Hugging Face repository that mirrors the ggerganov/whisper.cpp models.
 HF_BASE="https://huggingface.co/ggerganov/whisper.cpp/resolve/main"
+# Silero VAD v5 lives in the upstream GitHub repo. Pinned to a commit
+# so we get reproducible downloads across machines and over time.
+SILERO_VAD_URL="https://github.com/snakers4/silero-vad/raw/v5.1.2/src/silero_vad/data/silero_vad.onnx"
 
 # --- cosmetics ---------------------------------------------------------------
 if [[ -t 1 ]]; then
@@ -84,16 +91,53 @@ download_one() {
   printf "  ${GRN}✓${RST} %s (%d MiB)\n" "$fname" "$got_mib"
 }
 
+download_silero_vad() {
+  local out="${VAD_DIR}/silero_vad.onnx"
+  if [[ -f "$out" ]]; then
+    local got_kib
+    got_kib=$(( $(wc -c < "$out") / 1024 ))
+    if (( got_kib < 1500 )); then
+      warn "silero_vad.onnx present but truncated (${got_kib} KiB, expected ~2200 KiB). Re-downloading."
+      rm -f "$out"
+    else
+      info "silero_vad.onnx already present (${got_kib} KiB) — skipping."
+      return
+    fi
+  fi
+
+  info "Fetching Silero VAD v5 → ${out}"
+  if command -v curl >/dev/null 2>&1; then
+    curl --fail --location --progress-bar --output "$out" "$SILERO_VAD_URL"
+  elif command -v wget >/dev/null 2>&1; then
+    wget --show-progress --output-document="$out" "$SILERO_VAD_URL"
+  else
+    fail "Neither curl nor wget is installed."
+  fi
+
+  local got_kib
+  got_kib=$(( $(wc -c < "$out") / 1024 ))
+  if (( got_kib < 1500 )); then
+    fail "silero_vad.onnx downloaded incompletely (${got_kib} KiB)"
+  fi
+  printf "  ${GRN}✓${RST} silero_vad.onnx (%d KiB)\n" "$got_kib"
+}
+
 main() {
   local choice="${1:-base.en}"
   case "$choice" in
     --all)
       download_one base.en
       download_one small.en
+      download_silero_vad
       ;;
     --help|-h)
-      sed -n '4,12p' "$0"
+      sed -n '4,15p' "$0"
       exit 0
+      ;;
+    vad|silero|silero-vad)
+      download_silero_vad
+      info "VAD model in ${VAD_DIR}. Set ECHO_VAD_MODEL=${VAD_DIR}/silero_vad.onnx if you move it."
+      return
       ;;
     tiny|tiny.en|base|base.en|small|small.en|medium|medium.en|large-v3|large-v3-turbo)
       download_one "$choice"
@@ -103,8 +147,8 @@ main() {
       ;;
   esac
 
-  info "All requested models are in ${MODELS_DIR}"
-  info "Try: cargo run -p echo-proto -- transcribe /tmp/sample.wav --model ${MODELS_DIR}/ggml-${choice%.en}.en.bin"
+  info "All requested models are in ${ASR_DIR}"
+  info "Try: cargo run -p echo-proto -- transcribe /tmp/sample.wav --model ${ASR_DIR}/ggml-${choice%.en}.en.bin"
 }
 
 main "$@"
