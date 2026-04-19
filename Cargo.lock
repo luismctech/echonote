@@ -1123,6 +1123,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "echo-domain",
+ "pretty_assertions",
  "serde",
  "thiserror 2.0.18",
  "tokio",

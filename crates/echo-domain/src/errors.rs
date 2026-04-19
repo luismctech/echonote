@@ -35,6 +35,11 @@ pub enum DomainError {
     #[error("voice activity detection failed: {0}")]
     VadFailed(String),
 
+    /// Speaker diarization failed (embedding inference, clustering
+    /// degeneration, or sample-rate mismatch).
+    #[error("speaker diarization failed: {0}")]
+    DiarizationFailed(String),
+
     /// The requested session does not exist or is in an invalid state.
     #[error("invalid session state: {0}")]
     InvalidSessionState(String),
