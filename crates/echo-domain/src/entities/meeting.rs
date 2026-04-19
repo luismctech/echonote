@@ -15,6 +15,7 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::entities::segment::Segment;
+use crate::entities::speaker::Speaker;
 use crate::ports::audio::AudioFormat;
 
 /// Strongly-typed identifier for a [`Meeting`]. UUIDv7 keeps lexical
@@ -70,7 +71,7 @@ pub struct MeetingSummary {
 }
 
 /// Full meeting aggregate. Returned by point lookups and includes the
-/// segment list. Speakers/summary come later.
+/// segment list and any diarized speakers.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Meeting {
@@ -79,8 +80,15 @@ pub struct Meeting {
     pub summary: MeetingSummary,
     /// Audio format negotiated with the device.
     pub input_format: AudioFormat,
-    /// Decoded segments, ordered by `start_ms`.
+    /// Decoded segments, ordered by `start_ms`. Each segment may
+    /// reference a `speaker_id` from `speakers`.
     pub segments: Vec<Segment>,
+    /// Diarized speakers persisted for this meeting, ordered by
+    /// `slot`. Empty when no diarizer was wired into the pipeline.
+    /// `serde(default)` keeps older payloads (pre-Sprint 1 day 7)
+    /// loadable without speakers.
+    #[serde(default)]
+    pub speakers: Vec<Speaker>,
 }
 
 #[cfg(test)]

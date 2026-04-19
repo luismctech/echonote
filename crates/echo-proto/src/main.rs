@@ -773,7 +773,7 @@ async fn run_meetings(kind: MeetingsKind) -> Result<()> {
                 return Ok(());
             }
             let s = &meeting.summary;
-            println!("# {}\nid: {}\nstarted: {}\nended:   {}\nlanguage: {}\nduration: {:.2} s\nsegments: {}\nformat:   {} Hz × {} ch\n",
+            println!("# {}\nid: {}\nstarted: {}\nended:   {}\nlanguage: {}\nduration: {:.2} s\nsegments: {}\nspeakers: {}\nformat:   {} Hz × {} ch\n",
                 s.title,
                 s.id,
                 s.started_at.format(&time::format_description::well_known::Rfc3339).unwrap_or_default(),
@@ -781,14 +781,35 @@ async fn run_meetings(kind: MeetingsKind) -> Result<()> {
                 s.language.as_deref().unwrap_or("?"),
                 (s.duration_ms as f64) / 1_000.0,
                 s.segment_count,
+                meeting.speakers.len(),
                 meeting.input_format.sample_rate_hz,
                 meeting.input_format.channels,
             );
+            if !meeting.speakers.is_empty() {
+                println!("Speakers:");
+                for sp in &meeting.speakers {
+                    println!("  S{}  {}  ({})", sp.slot + 1, sp.display_name(), sp.id);
+                }
+                println!();
+            }
+            // Index speakers by id so each segment line can render
+            // its tag in O(1) without a linear scan per row.
+            let speaker_tags: std::collections::HashMap<_, _> = meeting
+                .speakers
+                .iter()
+                .map(|sp| (sp.id, format!("S{}", sp.slot + 1)))
+                .collect();
             for seg in &meeting.segments {
+                let tag = seg
+                    .speaker_id
+                    .and_then(|sid| speaker_tags.get(&sid))
+                    .map(|s| s.as_str())
+                    .unwrap_or("  ");
                 println!(
-                    "  [{:>6}-{:>6} ms] {}",
+                    "  [{:>6}-{:>6} ms] {}  {}",
                     seg.start_ms,
                     seg.end_ms,
+                    tag,
                     seg.text.trim()
                 );
             }

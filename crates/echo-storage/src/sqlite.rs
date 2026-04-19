@@ -13,7 +13,7 @@ use uuid::Uuid;
 
 use echo_domain::{
     AudioFormat, CreateMeeting, DomainError, FinalizeMeeting, Meeting, MeetingId, MeetingStore,
-    MeetingSummary, Segment, SegmentId, SpeakerId,
+    MeetingSummary, Segment, SegmentId, Speaker, SpeakerId,
 };
 
 /// Embedded migrations (`crates/echo-storage/migrations/`).
@@ -129,6 +129,50 @@ impl MeetingStore for SqliteMeetingStore {
             language: None,
             segment_count: 0,
         })
+    }
+
+    async fn upsert_speaker(
+        &self,
+        meeting_id: MeetingId,
+        speaker: &Speaker,
+    ) -> Result<(), DomainError> {
+        // Upsert key is (meeting_id, slot) — the diarizer's stable
+        // arrival-order index. The first INSERT wins the `id`;
+        // subsequent calls only refresh the `label` *if* the caller
+        // passed a non-null one. The streaming recorder always
+        // upserts with `label = None`, so it cannot clobber a name
+        // the user picked via the rename use case (Sprint 1 day 8).
+        let meeting_str = meeting_id.to_string();
+        let id_str = speaker.id.0.to_string();
+        sqlx::query(
+            r#"INSERT INTO speakers (id, meeting_id, slot, label)
+                   VALUES (?, ?, ?, ?)
+                   ON CONFLICT(meeting_id, slot) DO UPDATE
+                       SET label = COALESCE(excluded.label, speakers.label)"#,
+        )
+        .bind(&id_str)
+        .bind(&meeting_str)
+        .bind(i64::from(speaker.slot))
+        .bind(speaker.label.as_deref())
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx("upsert speaker"))?;
+        Ok(())
+    }
+
+    async fn list_speakers(&self, meeting_id: MeetingId) -> Result<Vec<Speaker>, DomainError> {
+        let id_str = meeting_id.to_string();
+        let rows = sqlx::query(
+            r#"SELECT id, slot, label
+                   FROM speakers
+                  WHERE meeting_id = ?
+               ORDER BY slot ASC"#,
+        )
+        .bind(&id_str)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sqlx("list speakers"))?;
+        rows.iter().map(row_to_speaker).collect()
     }
 
     async fn append_segments(
@@ -279,10 +323,13 @@ impl MeetingStore for SqliteMeetingStore {
             });
         }
 
+        let speakers = self.list_speakers(meeting_id).await?;
+
         Ok(Some(Meeting {
             summary,
             input_format,
             segments,
+            speakers,
         }))
     }
 
@@ -311,6 +358,18 @@ impl SqliteMeetingStore {
         .map_err(map_sqlx("fetch meeting"))?;
         row.as_ref().map(row_to_summary).transpose()
     }
+}
+
+fn row_to_speaker(row: &sqlx::sqlite::SqliteRow) -> Result<Speaker, DomainError> {
+    let id_text: String = row.get(0);
+    let slot = u32::try_from(row.get::<i64, _>(1))
+        .map_err(|e| db_err(format!("speaker slot overflow: {e}")))?;
+    let label: Option<String> = row.get(2);
+    Ok(Speaker {
+        id: SpeakerId(parse_uuid(&id_text, "speaker")?),
+        slot,
+        label,
+    })
 }
 
 fn row_to_summary(row: &sqlx::sqlite::SqliteRow) -> Result<MeetingSummary, DomainError> {
@@ -384,6 +443,7 @@ mod tests {
         assert_eq!(full.segments.len(), 2);
         assert_eq!(full.segments[0].text, "hello");
         assert_eq!(full.input_format, fmt());
+        assert!(full.speakers.is_empty());
 
         let deleted = store.delete(id).await.unwrap();
         assert!(deleted);
@@ -468,6 +528,120 @@ mod tests {
         assert_eq!(listed.len(), 2);
         assert_eq!(listed[0].id, b, "newest first");
         assert_eq!(listed[1].id, a);
+    }
+
+    #[tokio::test]
+    async fn upsert_speaker_is_idempotent_on_meeting_slot() {
+        let store = SqliteMeetingStore::open_in_memory().await.unwrap();
+        let id = MeetingId::new();
+        store
+            .create(CreateMeeting {
+                id,
+                title: "diarized".into(),
+                input_format: fmt(),
+            })
+            .await
+            .unwrap();
+
+        // First insert: anonymous speaker at slot 0.
+        let s0 = Speaker::anonymous(0);
+        store.upsert_speaker(id, &s0).await.unwrap();
+
+        // Recorder-style re-upsert with label=None must keep the
+        // original id and label (preserving the row exactly).
+        let s0_again = Speaker {
+            id: SpeakerId::new(),
+            slot: 0,
+            label: None,
+        };
+        store.upsert_speaker(id, &s0_again).await.unwrap();
+
+        let listed = store.list_speakers(id).await.unwrap();
+        assert_eq!(listed.len(), 1, "second upsert must not spawn a new row");
+        assert_eq!(listed[0].id, s0.id, "original SpeakerId must survive");
+        assert!(listed[0].label.is_none(), "label still anonymous");
+
+        // Rename-style upsert with a label sets it.
+        let renamed = Speaker {
+            id: SpeakerId::new(),
+            slot: 0,
+            label: Some("Alice".into()),
+        };
+        store.upsert_speaker(id, &renamed).await.unwrap();
+        let listed = store.list_speakers(id).await.unwrap();
+        assert_eq!(listed[0].id, s0.id, "rename must NOT replace the SpeakerId");
+        assert_eq!(listed[0].label.as_deref(), Some("Alice"));
+
+        // Subsequent recorder upsert (label None) must NOT clobber
+        // the user-provided "Alice" — that is the whole point of the
+        // COALESCE in the upsert SQL.
+        store.upsert_speaker(id, &s0_again).await.unwrap();
+        let listed = store.list_speakers(id).await.unwrap();
+        assert_eq!(
+            listed[0].label.as_deref(),
+            Some("Alice"),
+            "recorder re-upsert must not erase the user's label"
+        );
+
+        // Insert a second speaker at slot 1; both are returned in slot order.
+        let s1 = Speaker::anonymous(1);
+        store.upsert_speaker(id, &s1).await.unwrap();
+        let listed = store.list_speakers(id).await.unwrap();
+        assert_eq!(listed.len(), 2);
+        assert_eq!(listed[0].slot, 0);
+        assert_eq!(listed[1].slot, 1);
+    }
+
+    #[tokio::test]
+    async fn get_returns_segments_with_their_speaker_ids_and_speaker_rows() {
+        let store = SqliteMeetingStore::open_in_memory().await.unwrap();
+        let id = MeetingId::new();
+        store
+            .create(CreateMeeting {
+                id,
+                title: "diarized".into(),
+                input_format: fmt(),
+            })
+            .await
+            .unwrap();
+
+        // Speaker first, segment referencing it second — matches the
+        // ordering MeetingRecorder uses on every Chunk event.
+        let alice = Speaker::anonymous(0);
+        store.upsert_speaker(id, &alice).await.unwrap();
+        let mut seg = segment(0, 1_000, "hello");
+        seg.speaker_id = Some(alice.id);
+        store.append_segments(id, &[seg.clone()]).await.unwrap();
+
+        let full = store.get(id).await.unwrap().unwrap();
+        assert_eq!(full.segments.len(), 1);
+        assert_eq!(full.segments[0].speaker_id, Some(alice.id));
+        assert_eq!(full.speakers.len(), 1);
+        assert_eq!(full.speakers[0].id, alice.id);
+        assert_eq!(full.speakers[0].slot, 0);
+        assert!(full.speakers[0].label.is_none());
+    }
+
+    #[tokio::test]
+    async fn deleting_meeting_cascades_to_speakers() {
+        let store = SqliteMeetingStore::open_in_memory().await.unwrap();
+        let id = MeetingId::new();
+        store
+            .create(CreateMeeting {
+                id,
+                title: "T".into(),
+                input_format: fmt(),
+            })
+            .await
+            .unwrap();
+        store
+            .upsert_speaker(id, &Speaker::anonymous(0))
+            .await
+            .unwrap();
+        assert_eq!(store.list_speakers(id).await.unwrap().len(), 1);
+
+        store.delete(id).await.unwrap();
+        assert!(store.list_speakers(id).await.unwrap().is_empty());
     }
 
     #[tokio::test]

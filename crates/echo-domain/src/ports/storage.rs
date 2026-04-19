@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::entities::meeting::{Meeting, MeetingId, MeetingSummary};
 use crate::entities::segment::Segment;
+use crate::entities::speaker::Speaker;
 use crate::ports::audio::AudioFormat;
 use crate::DomainError;
 
@@ -60,6 +61,32 @@ pub trait MeetingStore: Send + Sync {
         segments: &[Segment],
     ) -> Result<(), DomainError>;
 
+    /// Persist or refresh a speaker row for the meeting.
+    ///
+    /// Idempotent on `(meeting_id, slot)`: calling it twice with the
+    /// same slot keeps the existing row's `id` (so any
+    /// `segments.speaker_id` foreign keys stay valid). The `label`
+    /// follows COALESCE semantics — a `Some(label)` overwrites the
+    /// stored value, while a `None` preserves it. That lets both the
+    /// streaming recorder (always `label = None`, just registering
+    /// the speaker exists) and the rename use case (always
+    /// `label = Some(...)`) call this same method without stomping
+    /// on each other.
+    ///
+    /// Implementations MUST insert the speaker row before any
+    /// segment that references its `id`; the `MeetingRecorder` orders
+    /// the calls accordingly.
+    async fn upsert_speaker(
+        &self,
+        meeting_id: MeetingId,
+        speaker: &Speaker,
+    ) -> Result<(), DomainError>;
+
+    /// Snapshot of all speakers persisted for a meeting, ordered by
+    /// `slot` ascending. Returns an empty vec when the meeting is
+    /// unknown or has no diarized speakers yet.
+    async fn list_speakers(&self, meeting_id: MeetingId) -> Result<Vec<Speaker>, DomainError>;
+
     /// Update the meeting header. Used by `stop_recording` to mark a
     /// session as ended.
     async fn finalize(
@@ -72,8 +99,8 @@ pub trait MeetingStore: Send + Sync {
     /// caps the result; `0` means "no cap".
     async fn list(&self, limit: u32) -> Result<Vec<MeetingSummary>, DomainError>;
 
-    /// Return the full meeting (with segments) or `None` when the id
-    /// is unknown.
+    /// Return the full meeting (with segments + speakers) or `None`
+    /// when the id is unknown.
     async fn get(&self, meeting_id: MeetingId) -> Result<Option<Meeting>, DomainError>;
 
     /// Delete a meeting and its segments. Returns `false` when the id

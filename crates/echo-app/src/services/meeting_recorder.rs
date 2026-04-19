@@ -30,8 +30,8 @@ use time::OffsetDateTime;
 use tracing::{debug, warn};
 
 use echo_domain::{
-    CreateMeeting, DomainError, FinalizeMeeting, MeetingId, MeetingStore, StreamingSessionId,
-    TranscriptEvent,
+    CreateMeeting, DomainError, FinalizeMeeting, MeetingId, MeetingStore, Speaker,
+    StreamingSessionId, TranscriptEvent,
 };
 
 /// Stateful recorder. One instance per session is the simplest pattern,
@@ -111,12 +111,33 @@ impl MeetingRecorder {
                 session_id,
                 segments,
                 language,
+                speaker_id,
+                speaker_slot,
                 ..
             } => {
                 let meeting_id = self
                     .update_chunk_stats(session_id, segments, language)
                     .await;
                 if let Some(meeting_id) = meeting_id {
+                    // Persist the speaker BEFORE the segments so the
+                    // `segments.speaker_id` foreign key always finds
+                    // its row, even on the very first chunk for this
+                    // slot. Anonymous (label = None) — the rename use
+                    // case populates the label later, and the COALESCE
+                    // upsert keeps it from being clobbered by the next
+                    // recorder pass.
+                    if let (Some(sid), Some(slot)) = (speaker_id, speaker_slot) {
+                        self.store
+                            .upsert_speaker(
+                                meeting_id,
+                                &Speaker {
+                                    id: *sid,
+                                    slot: *slot,
+                                    label: None,
+                                },
+                            )
+                            .await?;
+                    }
                     if !segments.is_empty() {
                         self.store.append_segments(meeting_id, segments).await?;
                     }
@@ -232,7 +253,7 @@ mod tests {
     use async_trait::async_trait;
     use pretty_assertions::assert_eq;
 
-    use echo_domain::{AudioFormat, Meeting, MeetingSummary, Segment, SegmentId};
+    use echo_domain::{AudioFormat, Meeting, MeetingSummary, Segment, SegmentId, SpeakerId};
 
     /// In-memory store keyed by id; threadsafe via a single Mutex.
     #[derive(Default)]
@@ -262,6 +283,7 @@ mod tests {
                 summary: summary.clone(),
                 input_format: params.input_format,
                 segments: vec![],
+                speakers: vec![],
             });
             Ok(summary)
         }
@@ -282,6 +304,40 @@ mod tests {
             }
             m.summary.segment_count = m.segments.len() as u32;
             Ok(())
+        }
+        async fn upsert_speaker(
+            &self,
+            meeting_id: MeetingId,
+            speaker: &Speaker,
+        ) -> Result<(), DomainError> {
+            let mut guard = self.meetings.lock().unwrap();
+            let m = guard
+                .iter_mut()
+                .find(|m| m.summary.id == meeting_id)
+                .ok_or_else(|| DomainError::Invariant("not found".into()))?;
+            // Mirror the SQLite COALESCE behaviour: keep the existing
+            // SpeakerId on slot conflict, only refresh label when the
+            // caller passed Some.
+            if let Some(existing) = m.speakers.iter_mut().find(|s| s.slot == speaker.slot) {
+                if let Some(label) = &speaker.label {
+                    existing.label = Some(label.clone());
+                }
+            } else {
+                m.speakers.push(speaker.clone());
+            }
+            Ok(())
+        }
+        async fn list_speakers(&self, meeting_id: MeetingId) -> Result<Vec<Speaker>, DomainError> {
+            let guard = self.meetings.lock().unwrap();
+            Ok(guard
+                .iter()
+                .find(|m| m.summary.id == meeting_id)
+                .map(|m| {
+                    let mut v = m.speakers.clone();
+                    v.sort_by_key(|s| s.slot);
+                    v
+                })
+                .unwrap_or_default())
         }
         async fn finalize(
             &self,
@@ -445,6 +501,71 @@ mod tests {
             .unwrap();
         let snap = store.snapshot();
         assert_eq!(snap[0].summary.language.as_deref(), Some("en"));
+    }
+
+    #[tokio::test]
+    async fn chunks_with_speakers_persist_speaker_rows_before_segments() {
+        let store = Arc::new(FakeStore::default());
+        let recorder = MeetingRecorder::with_default_title(store.clone());
+        let session = StreamingSessionId::new();
+
+        recorder
+            .record(&TranscriptEvent::Started {
+                session_id: session,
+                input_format: AudioFormat::WHISPER,
+            })
+            .await
+            .unwrap();
+
+        let alice = SpeakerId::new();
+        let bob = SpeakerId::new();
+        // Alternate two speakers across chunks. Each upsert is
+        // idempotent, so re-seeing slot 0 must NOT spawn a duplicate
+        // row, and the speaker must exist before the chunk's segment
+        // is appended (otherwise the speakers vec would be empty
+        // when get() returns the meeting).
+        for (idx, (sid, slot)) in [(alice, 0u32), (bob, 1), (alice, 0), (bob, 1)]
+            .into_iter()
+            .enumerate()
+        {
+            let i = idx as u32;
+            let mut seg = segment(i * 1_000, (i + 1) * 1_000, "x");
+            seg.speaker_id = Some(sid);
+            recorder
+                .record(&TranscriptEvent::Chunk {
+                    session_id: session,
+                    chunk_index: i,
+                    offset_ms: i * 1_000,
+                    segments: vec![seg],
+                    language: Some("en".into()),
+                    rtf: 0.1,
+                    speaker_id: Some(sid),
+                    speaker_slot: Some(slot),
+                })
+                .await
+                .unwrap();
+        }
+
+        let snap = store.snapshot();
+        let meeting = &snap[0];
+        assert_eq!(meeting.segments.len(), 4);
+        assert_eq!(
+            meeting.speakers.len(),
+            2,
+            "exactly one row per slot, idempotent across re-upserts"
+        );
+        let slots: Vec<u32> = meeting.speakers.iter().map(|s| s.slot).collect();
+        assert_eq!(slots, vec![0, 1]);
+        // Original SpeakerIds survive — segments still resolve to a real speaker row.
+        assert!(meeting
+            .speakers
+            .iter()
+            .any(|s| s.id == alice && s.slot == 0));
+        assert!(meeting.speakers.iter().any(|s| s.id == bob && s.slot == 1));
+        assert!(
+            meeting.speakers.iter().all(|s| s.label.is_none()),
+            "recorder leaves labels anonymous; rename use case sets them"
+        );
     }
 
     #[tokio::test]
