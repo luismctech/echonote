@@ -29,8 +29,8 @@ use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 
 use echo_domain::{
-    AudioCapture, AudioFormat, CaptureSpec, DomainError, Resampler, Sample, StreamingOptions,
-    StreamingSessionId, TranscribeOptions, Transcriber, TranscriptEvent,
+    AudioCapture, AudioFormat, CaptureSpec, Diarizer, DomainError, Resampler, Sample, SpeakerId,
+    StreamingOptions, StreamingSessionId, TranscribeOptions, Transcriber, TranscriptEvent,
 };
 
 /// Capacity of the event channel. ~10 minutes of headroom for a
@@ -50,11 +50,21 @@ pub enum StreamingError {
 }
 
 /// Bundle of port implementations required to build a pipeline.
-#[derive(Clone)]
+///
+/// `Clone` is intentionally omitted: the optional [`Diarizer`] is a
+/// `Box<dyn Diarizer>` that owns mutable state (cluster centroids, the
+/// embedder's LSTM, …) and cannot be shared across multiple sessions
+/// safely. Build one pipeline per session — the inner port handles
+/// (`Arc<dyn …>`) can still be reused across constructions.
 pub struct StreamingPipeline {
     capture: Arc<dyn AudioCapture>,
     resampler: Arc<dyn Resampler>,
     transcriber: Arc<dyn Transcriber>,
+    /// Optional diarizer. When set, every transcribed chunk is also
+    /// fed through `Diarizer::assign` and the resulting `SpeakerId`
+    /// (plus its arrival-order slot) is attached to the emitted
+    /// [`TranscriptEvent::Chunk`]. Skipped chunks bypass diarization.
+    diarizer: Option<Box<dyn Diarizer>>,
 }
 
 impl StreamingPipeline {
@@ -68,7 +78,17 @@ impl StreamingPipeline {
             capture,
             resampler,
             transcriber,
+            diarizer: None,
         }
+    }
+
+    /// Attach a diarizer. Call once before `start*`. The diarizer must
+    /// agree with the resampler on sample rate (16 kHz mono); the
+    /// pipeline asserts this at runtime to fail loudly on misconfig.
+    #[must_use]
+    pub fn with_diarizer(mut self, diarizer: Box<dyn Diarizer>) -> Self {
+        self.diarizer = Some(diarizer);
+        self
     }
 
     /// Start capture + transcription for the default microphone.
@@ -87,10 +107,24 @@ impl StreamingPipeline {
         let (event_tx, event_rx) = mpsc::channel::<TranscriptEvent>(EVENT_CHANNEL_CAPACITY);
         let (stop_tx, stop_rx) = oneshot::channel::<()>();
 
+        if let Some(d) = &self.diarizer {
+            // The pipeline always feeds the diarizer the resampled
+            // 16 kHz mono buffer, so any embedder expecting another
+            // rate is misconfigured. Surface it now instead of
+            // returning silently-bad embeddings later.
+            if d.sample_rate_hz() != echo_audio_whisper_rate() {
+                return Err(StreamingError::Domain(DomainError::Invariant(format!(
+                    "diarizer sample rate {} does not match the pipeline's 16 kHz mono",
+                    d.sample_rate_hz()
+                ))));
+            }
+        }
+
         let join = tokio::spawn(run_pipeline(
-            self.capture.clone(),
-            self.resampler.clone(),
-            self.transcriber.clone(),
+            self.capture,
+            self.resampler,
+            self.transcriber,
+            self.diarizer,
             session_id,
             spec,
             options,
@@ -105,6 +139,12 @@ impl StreamingPipeline {
             join: Some(join),
         })
     }
+}
+
+/// Whisper's canonical sample rate. Inlined here to avoid pulling
+/// `echo-audio` into the application layer just for the constant.
+const fn echo_audio_whisper_rate() -> u32 {
+    16_000
 }
 
 /// Handle returned by [`StreamingPipeline::start`]. Drops the underlying
@@ -157,6 +197,7 @@ async fn run_pipeline(
     capture: Arc<dyn AudioCapture>,
     resampler: Arc<dyn Resampler>,
     transcriber: Arc<dyn Transcriber>,
+    mut diarizer: Option<Box<dyn Diarizer>>,
     session_id: StreamingSessionId,
     spec: CaptureSpec,
     options: StreamingOptions,
@@ -225,6 +266,7 @@ async fn run_pipeline(
             let segs = process_chunk(
                 &resampler,
                 &transcriber,
+                &mut diarizer,
                 session_id,
                 chunk_index,
                 offset_ms,
@@ -254,6 +296,7 @@ async fn run_pipeline(
         let segs = process_chunk(
             &resampler,
             &transcriber,
+            &mut diarizer,
             session_id,
             chunk_index,
             offset_ms,
@@ -289,6 +332,7 @@ async fn run_pipeline(
 async fn process_chunk(
     resampler: &Arc<dyn Resampler>,
     transcriber: &Arc<dyn Transcriber>,
+    diarizer: &mut Option<Box<dyn Diarizer>>,
     session_id: StreamingSessionId,
     chunk_index: u32,
     offset_ms: u32,
@@ -324,6 +368,17 @@ async fn process_chunk(
         }
     };
 
+    // Diarize the same 16 kHz mono buffer we're about to transcribe.
+    // Done before the ASR call so the call site stays linear; the
+    // ASR call below is by far the dominant cost (RTF ≪ 1 → tens of
+    // ms vs Whisper's hundreds), so the lack of parallelism here is
+    // deliberate: keeping the borrow on `diarizer` exclusive is
+    // simpler than spawning a second task and joining.
+    let speaker = match diarizer.as_deref_mut() {
+        Some(d) => assign_speaker(d, &resampled, chunk_index, session_id).await,
+        None => None,
+    };
+
     let asr_started = Instant::now();
     let result = transcriber.transcribe(&resampled, transcribe_options).await;
     let asr_elapsed = asr_started.elapsed();
@@ -334,6 +389,12 @@ async fn process_chunk(
             for seg in &mut transcript.segments {
                 seg.start_ms = seg.start_ms.saturating_add(offset_ms);
                 seg.end_ms = seg.end_ms.saturating_add(offset_ms);
+                // Stamp the speaker on every segment in this chunk so
+                // the storage layer can persist it without needing the
+                // chunk-level event.
+                if let Some((id, _)) = speaker {
+                    seg.speaker_id = Some(id);
+                }
             }
             let segs = transcript.segments.len() as u32;
             let rtf = if duration_ms == 0 {
@@ -350,6 +411,8 @@ async fn process_chunk(
                     segments: transcript.segments,
                     language: transcript.language,
                     rtf,
+                    speaker_id: speaker.map(|(id, _)| id),
+                    speaker_slot: speaker.map(|(_, slot)| slot),
                 })
                 .await;
             segs
@@ -357,6 +420,47 @@ async fn process_chunk(
         Err(e) => {
             warn!(error = %e, chunk_index, "transcribe failed; dropping chunk");
             0
+        }
+    }
+}
+
+/// Run the diarizer over `samples` and look up the assigned speaker's
+/// arrival-order slot. Returns `None` when the diarizer chose not to
+/// embed (chunk too short, low confidence, …) or errored — diarization
+/// is *strictly* best-effort, so we never abort the pipeline because
+/// of it.
+async fn assign_speaker(
+    diarizer: &mut dyn Diarizer,
+    samples: &[Sample],
+    chunk_index: u32,
+    session_id: StreamingSessionId,
+) -> Option<(SpeakerId, u32)> {
+    match diarizer.assign(samples).await {
+        Ok(Some(id)) => {
+            let slot = diarizer
+                .speakers()
+                .into_iter()
+                .find(|s| s.id == id)
+                .map(|s| s.slot)
+                .unwrap_or_else(|| {
+                    // Shouldn't happen — assign() just told us this id
+                    // exists. Log and fall back to slot 0 so the UI
+                    // still gets *some* colour.
+                    warn!(
+                        %session_id, chunk_index, %id,
+                        "diarizer returned id not present in speakers() snapshot"
+                    );
+                    0
+                });
+            Some((id, slot))
+        }
+        Ok(None) => None,
+        Err(e) => {
+            warn!(
+                %session_id, chunk_index, error = %e,
+                "diarizer failed; chunk will be unlabelled"
+            );
+            None
         }
     }
 }

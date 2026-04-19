@@ -369,6 +369,8 @@ mod tests {
                 segments: vec![segment(0, 1_000, "hello")],
                 language: Some("en".into()),
                 rtf: 0.1,
+                speaker_id: None,
+                speaker_slot: None,
             })
             .await
             .unwrap();
@@ -380,6 +382,8 @@ mod tests {
                 segments: vec![segment(1_000, 2_000, "world")],
                 language: Some("en".into()),
                 rtf: 0.1,
+                speaker_id: None,
+                speaker_slot: None,
             })
             .await
             .unwrap();
@@ -425,6 +429,8 @@ mod tests {
                     segments: vec![segment(0, 1_000, "x")],
                     language: Some(lang.into()),
                     rtf: 0.1,
+                    speaker_id: None,
+                    speaker_slot: None,
                 })
                 .await
                 .unwrap();
@@ -453,6 +459,8 @@ mod tests {
                 segments: vec![segment(0, 1_000, "ghost")],
                 language: None,
                 rtf: 0.0,
+                speaker_id: None,
+                speaker_slot: None,
             })
             .await
             .unwrap();

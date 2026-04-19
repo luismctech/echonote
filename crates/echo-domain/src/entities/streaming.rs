@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::entities::segment::Segment;
+use crate::entities::speaker::SpeakerId;
 use crate::ports::audio::AudioFormat;
 
 /// Identifier of a single streaming session. UUIDv7 keeps insertion
@@ -97,6 +98,18 @@ pub enum TranscriptEvent {
         /// Real-time factor for this chunk
         /// (`asr_elapsed / audio_duration`). Lower is faster.
         rtf: f32,
+        /// Speaker the diarizer assigned to this chunk. `None` when no
+        /// diarizer is wired into the pipeline (default), or when the
+        /// chunk is too short to embed reliably. Persisted alongside
+        /// every segment in the chunk.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        speaker_id: Option<SpeakerId>,
+        /// Arrival-order slot of the assigned speaker, mirrored from
+        /// `speaker_id` for the convenience of the UI palette (no
+        /// need to round-trip through the speakers list to colour a
+        /// chip). 0-based; `None` whenever `speaker_id` is `None`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        speaker_slot: Option<u32>,
     },
     /// A chunk was discarded by the silence gate before being sent to
     /// the ASR backend. Useful for UI / metrics.
@@ -183,5 +196,76 @@ mod tests {
             total_audio_ms: 12_000,
         };
         assert_eq!(evt.session_id(), id);
+    }
+
+    #[test]
+    fn chunk_without_speaker_omits_field_on_the_wire() {
+        let evt = TranscriptEvent::Chunk {
+            session_id: StreamingSessionId::new(),
+            chunk_index: 0,
+            offset_ms: 0,
+            segments: vec![],
+            language: None,
+            rtf: 0.1,
+            speaker_id: None,
+            speaker_slot: None,
+        };
+        let json = serde_json::to_string(&evt).unwrap();
+        assert!(
+            !json.contains("speakerId"),
+            "speakerId leaked when None: {json}"
+        );
+        assert!(
+            !json.contains("speakerSlot"),
+            "speakerSlot leaked when None: {json}"
+        );
+    }
+
+    #[test]
+    fn chunk_with_speaker_serialises_both_fields() {
+        use crate::entities::speaker::SpeakerId;
+        let speaker = SpeakerId::new();
+        let evt = TranscriptEvent::Chunk {
+            session_id: StreamingSessionId::new(),
+            chunk_index: 2,
+            offset_ms: 10_000,
+            segments: vec![],
+            language: None,
+            rtf: 0.2,
+            speaker_id: Some(speaker),
+            speaker_slot: Some(1),
+        };
+        let json = serde_json::to_string(&evt).unwrap();
+        assert!(json.contains("\"speakerId\""), "got: {json}");
+        assert!(json.contains("\"speakerSlot\":1"), "got: {json}");
+    }
+
+    #[test]
+    fn chunk_without_speaker_fields_deserialises_via_serde_default() {
+        // Older payloads (pre-Sprint 1 day 7) did not carry speaker
+        // info; ensure they still round-trip through the new schema.
+        let id = StreamingSessionId::new();
+        let json = serde_json::json!({
+            "type": "chunk",
+            "sessionId": id,
+            "chunkIndex": 0,
+            "offsetMs": 0,
+            "segments": [],
+            "language": null,
+            "rtf": 0.0,
+        })
+        .to_string();
+        let parsed: TranscriptEvent = serde_json::from_str(&json).unwrap();
+        match parsed {
+            TranscriptEvent::Chunk {
+                speaker_id,
+                speaker_slot,
+                ..
+            } => {
+                assert!(speaker_id.is_none());
+                assert!(speaker_slot.is_none());
+            }
+            other => panic!("expected Chunk, got {other:?}"),
+        }
     }
 }

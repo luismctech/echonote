@@ -35,9 +35,11 @@ use echo_audio::{
     resample_to_whisper, CpalMicrophoneCapture, RoutingAudioCapture, RubatoResamplerAdapter,
     WavSink, WriteOptions, WHISPER_SAMPLE_RATE,
 };
+use echo_diarize::{Eres2NetEmbedder, OnlineDiarizer};
 use echo_domain::{
-    AudioCapture, AudioFormat, AudioFrame, AudioSource, CaptureSpec, DomainError, MeetingId,
-    MeetingStore, Resampler, StreamingOptions, TranscribeOptions, Transcriber, TranscriptEvent,
+    AudioCapture, AudioFormat, AudioFrame, AudioSource, CaptureSpec, Diarizer, DomainError,
+    MeetingId, MeetingStore, Resampler, StreamingOptions, TranscribeOptions, Transcriber,
+    TranscriptEvent,
 };
 use echo_storage::SqliteMeetingStore;
 
@@ -138,6 +140,17 @@ enum Command {
         /// the gate.
         #[arg(long, default_value_t = 0.005)]
         silence_threshold: f32,
+        /// Attach a speaker diarizer to the pipeline. Each chunk is
+        /// also fed through ERes2Net + online clustering and the
+        /// resulting speaker is printed alongside the transcript.
+        #[arg(long, default_value_t = false)]
+        diarize: bool,
+        /// Path to the ERes2Net ONNX export. Defaults to the
+        /// `ECHO_EMBED_MODEL` env var or
+        /// `./models/embed/3dspeaker_speech_eres2net_sv_en_voxceleb_16k.onnx`.
+        /// Only consulted when `--diarize` is set.
+        #[arg(long, env = "ECHO_EMBED_MODEL")]
+        embed_model: Option<PathBuf>,
     },
 
     /// Summarize a transcript using the local LLM.
@@ -284,6 +297,8 @@ async fn main() -> Result<()> {
             language,
             chunk_ms,
             silence_threshold,
+            diarize,
+            embed_model,
         } => {
             run_stream(
                 duration,
@@ -293,6 +308,8 @@ async fn main() -> Result<()> {
                 language,
                 chunk_ms,
                 silence_threshold,
+                diarize,
+                embed_model,
             )
             .await
         }
@@ -512,6 +529,8 @@ async fn run_stream(
     language: Option<String>,
     chunk_ms: u32,
     silence_threshold: f32,
+    diarize: bool,
+    embed_model: Option<PathBuf>,
 ) -> Result<()> {
     let model_path = model
         .or_else(|| Some(PathBuf::from("./models/asr/ggml-base.en.bin")))
@@ -567,18 +586,47 @@ async fn run_stream(
     let store: Arc<dyn MeetingStore> = Arc::new(open_cli_store().await?);
     let recorder = MeetingRecorder::with_default_title(store.clone());
 
-    let pipeline = StreamingPipeline::new(capture, resampler, transcriber);
+    let mut pipeline = StreamingPipeline::new(capture, resampler, transcriber);
+    if diarize {
+        let embed_path = embed_model
+            .or_else(|| {
+                Some(PathBuf::from(
+                    "./models/embed/3dspeaker_speech_eres2net_sv_en_voxceleb_16k.onnx",
+                ))
+            })
+            .filter(|p| p.exists())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "no speaker embedder found. Set --embed-model or ECHO_EMBED_MODEL, or run \
+                     `scripts/download-models.sh embed` to fetch the default."
+                )
+            })?;
+        let embed_started = std::time::Instant::now();
+        let embedder = Eres2NetEmbedder::new(&embed_path)
+            .map_err(anyhow::Error::from)
+            .context("failed to load ERes2Net embedder")?;
+        tracing::info!(
+            model = %embed_path.display(),
+            load_ms = embed_started.elapsed().as_millis() as u64,
+            "speaker embedder ready"
+        );
+        let diarizer: Box<dyn Diarizer> =
+            Box::new(OnlineDiarizer::with_defaults(Box::new(embedder)));
+        pipeline = pipeline.with_diarizer(diarizer);
+    }
+
     let mut handle = pipeline
         .start_with_spec(spec, options)
         .await
         .context("failed to start streaming pipeline")?;
 
     println!(
-        "▶ streaming session {} — source={:?} — {}s window {}ms — Ctrl-C or wait to stop",
+        "▶ streaming session {} — source={:?} — {}s window {}ms — diarize={} — Ctrl-C or wait to stop",
         handle.session_id(),
         source,
         duration_secs,
-        chunk_ms
+        chunk_ms,
+        diarize,
     );
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(duration_secs);
@@ -619,6 +667,7 @@ async fn run_stream(
                 segments,
                 language,
                 rtf,
+                speaker_slot,
                 ..
             }) => {
                 total_chunks += 1;
@@ -634,7 +683,14 @@ async fn run_stream(
                 } else {
                     &text
                 };
-                println!("  [{chunk_index:>2}] +{offset_ms:>5} ms  rtf={rtf:.2}  {lang} → {body}");
+                let speaker_tag = match speaker_slot {
+                    Some(slot) => format!("S{}", slot + 1),
+                    None if diarize => "S?".to_string(),
+                    None => "  ".to_string(),
+                };
+                println!(
+                    "  [{chunk_index:>2}] +{offset_ms:>5} ms  rtf={rtf:.2}  {speaker_tag}  {lang} → {body}"
+                );
             }
             Some(TranscriptEvent::Skipped {
                 chunk_index,
