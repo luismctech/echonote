@@ -12,7 +12,7 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use crate::entities::meeting::{Meeting, MeetingId, MeetingSummary};
+use crate::entities::meeting::{Meeting, MeetingId, MeetingSearchHit, MeetingSummary};
 use crate::entities::segment::Segment;
 use crate::entities::speaker::{Speaker, SpeakerId};
 use crate::ports::audio::AudioFormat;
@@ -116,6 +116,25 @@ pub trait MeetingStore: Send + Sync {
     /// Return the full meeting (with segments + speakers) or `None`
     /// when the id is unknown.
     async fn get(&self, meeting_id: MeetingId) -> Result<Option<Meeting>, DomainError>;
+
+    /// Full-text search over segment text. Implementations return at
+    /// most one hit per meeting (collapsed on the strongest segment),
+    /// ordered by FTS5 BM25 rank ascending — i.e. best match first.
+    /// `limit` caps the result; `0` means "no cap".
+    ///
+    /// The query is treated as raw user input. Implementations MUST
+    /// escape FTS5 syntax characters (`"`, `*`, `(`, `)`, `^`, `:`,
+    /// `+`, `-`, `~`, `NEAR`, `AND`, `OR`, `NOT`) so a stray double
+    /// quote can never become a parser error or, worse, a CYK
+    /// injection through the trigger machinery. The simplest path —
+    /// and the one the SQLite adapter takes — is to wrap each
+    /// whitespace-separated token in double quotes after escaping
+    /// embedded quotes; that turns the query into a plain
+    /// "match all of these phrases" search.
+    ///
+    /// Returns an empty vec for empty / whitespace-only queries
+    /// instead of erroring, so the UI can wire `onChange` directly.
+    async fn search(&self, query: &str, limit: u32) -> Result<Vec<MeetingSearchHit>, DomainError>;
 
     /// Delete a meeting and its segments. Returns `false` when the id
     /// did not exist.

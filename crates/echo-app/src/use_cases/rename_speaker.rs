@@ -176,6 +176,13 @@ mod tests {
         async fn delete(&self, _: MeetingId) -> Result<bool, DomainError> {
             unreachable!()
         }
+        async fn search(
+            &self,
+            _: &str,
+            _: u32,
+        ) -> Result<Vec<echo_domain::MeetingSearchHit>, DomainError> {
+            unreachable!()
+        }
     }
 
     fn seed_meeting(store: &FakeStore) -> (MeetingId, SpeakerId) {

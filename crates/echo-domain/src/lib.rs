@@ -30,7 +30,7 @@ pub use ports::resampler::Resampler;
 pub use ports::transcriber::{TranscribeOptions, Transcriber, Transcript};
 pub use ports::vad::{Vad, VoiceState};
 
-pub use entities::meeting::{Meeting, MeetingId, MeetingSummary};
+pub use entities::meeting::{Meeting, MeetingId, MeetingSearchHit, MeetingSummary};
 pub use entities::segment::{Segment, SegmentId};
 pub use entities::speaker::{Speaker, SpeakerId};
 pub use entities::streaming::{StreamingOptions, StreamingSessionId, TranscriptEvent};

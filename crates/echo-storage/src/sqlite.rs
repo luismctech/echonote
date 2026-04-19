@@ -12,8 +12,8 @@ use tracing::{debug, info};
 use uuid::Uuid;
 
 use echo_domain::{
-    AudioFormat, CreateMeeting, DomainError, FinalizeMeeting, Meeting, MeetingId, MeetingStore,
-    MeetingSummary, Segment, SegmentId, Speaker, SpeakerId,
+    AudioFormat, CreateMeeting, DomainError, FinalizeMeeting, Meeting, MeetingId, MeetingSearchHit,
+    MeetingStore, MeetingSummary, Segment, SegmentId, Speaker, SpeakerId,
 };
 
 /// Embedded migrations (`crates/echo-storage/migrations/`).
@@ -362,6 +362,87 @@ impl MeetingStore for SqliteMeetingStore {
             .map_err(map_sqlx("delete meeting"))?;
         Ok(result.rows_affected() > 0)
     }
+
+    async fn search(&self, query: &str, limit: u32) -> Result<Vec<MeetingSearchHit>, DomainError> {
+        // Empty input ⇒ empty result. The UI binds this to `onChange`
+        // so the initial empty string would otherwise hit FTS with a
+        // syntax error ("no terms to match").
+        let Some(match_expr) = sanitize_fts_query(query) else {
+            return Ok(Vec::new());
+        };
+
+        // FTS5 auxiliary functions (`bm25`, `snippet`) only resolve
+        // when the FTS table appears directly in the FROM clause of
+        // the *same* SELECT that holds the MATCH — they do NOT work
+        // through CTEs or subqueries. So we run a single flat query
+        // and dedupe per meeting in Rust.
+        //
+        // `snippet(segments_fts, 0, '<mark>', '</mark>', '…', 16)`
+        // requests 16 tokens of context with `<mark>` markers — the
+        // React side renders them via `dangerouslySetInnerHTML` (the
+        // markers are HTML-safe and the index is built off our own
+        // text so XSS surface is the same as showing the segment
+        // body raw, which the rest of the UI already does).
+        //
+        // We over-fetch by a small factor before dedupe so a single
+        // long meeting can't crowd out other hits below `limit`.
+        // 4× is enough in practice; this stays bounded because we
+        // also pass `LIMIT raw_cap` to SQLite.
+        let raw_cap: i64 = if limit == 0 {
+            -1
+        } else {
+            (i64::from(limit)).saturating_mul(4)
+        };
+        let rows = sqlx::query(
+            r#"
+            SELECT  m.id, m.title, m.started_at, m.ended_at, m.duration_ms,
+                    m.language, m.segment_count,
+                    snippet(segments_fts, 0, '<mark>', '</mark>', '…', 16) AS snippet,
+                    bm25(segments_fts) AS rank,
+                    s.meeting_id AS meeting_id
+              FROM segments_fts
+              JOIN segments s ON s.rowid = segments_fts.rowid
+              JOIN meetings m ON m.id = s.meeting_id
+             WHERE segments_fts MATCH ?
+          ORDER BY rank ASC
+             LIMIT ?
+            "#,
+        )
+        .bind(&match_expr)
+        .bind(raw_cap)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sqlx("search meetings"))?;
+
+        // Dedupe per meeting, keeping the strongest match (rows are
+        // already ordered ASC by rank so the first occurrence wins).
+        // `seen` is a hash set keyed on meeting id text — no need to
+        // re-parse the UUID for the lookup.
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let cap = if limit == 0 {
+            usize::MAX
+        } else {
+            limit as usize
+        };
+        let mut hits = Vec::new();
+        for row in &rows {
+            let mid_text: String = row.get(9);
+            if !seen.insert(mid_text) {
+                continue;
+            }
+            let snippet: String = row.get(7);
+            let rank: f64 = row.get(8);
+            hits.push(MeetingSearchHit {
+                meeting: row_to_summary(row)?,
+                snippet,
+                rank,
+            });
+            if hits.len() >= cap {
+                break;
+            }
+        }
+        Ok(hits)
+    }
 }
 
 impl SqliteMeetingStore {
@@ -410,6 +491,45 @@ fn row_to_summary(row: &sqlx::sqlite::SqliteRow) -> Result<MeetingSummary, Domai
         segment_count: u32::try_from(row.get::<i64, _>(6))
             .map_err(|e| db_err(format!("segment_count overflow: {e}")))?,
     })
+}
+
+/// Convert raw user input into a safe FTS5 `MATCH` expression.
+///
+/// FTS5 has its own micro-grammar (`"phrase"`, `term1 AND term2`,
+/// `column:foo`, `^bar`, `*` prefix, etc.) and a stray `"` from the
+/// user can either error out or — depending on what comes next —
+/// silently change the meaning of the query. Defense: we strip
+/// FTS5 syntax characters from each whitespace-delimited token and
+/// then wrap the survivor in double quotes, turning the input into
+/// the safe shape `"tok1" "tok2" "tok3"` (an implicit AND).
+///
+/// Returns `None` for empty / whitespace-only / all-stripped inputs
+/// so the caller can short-circuit to "no hits" without ever asking
+/// SQLite. That matches the search port contract.
+fn sanitize_fts_query(raw: &str) -> Option<String> {
+    // FTS5's tokenizer treats these as syntax / operator chars.
+    // Stripping is safer than trying to escape them — the user is
+    // looking for natural words, not composing a search expression.
+    const STRIP: &[char] = &['"', '*', '(', ')', '^', ':', '+', '-', '~'];
+
+    let mut out = String::new();
+    for token in raw.split_whitespace() {
+        let cleaned: String = token.chars().filter(|c| !STRIP.contains(c)).collect();
+        if cleaned.is_empty() {
+            continue;
+        }
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push('"');
+        out.push_str(&cleaned);
+        out.push('"');
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
 }
 
 #[cfg(test)]
@@ -707,6 +827,176 @@ mod tests {
 
         store.delete(id).await.unwrap();
         assert!(store.list_speakers(id).await.unwrap().is_empty());
+    }
+
+    // ---------- FTS5 search (Sprint 1 day 8) -------------------------------
+
+    /// Convenience: create a meeting and append a single segment with
+    /// the given text. Returns the id so tests can search for it.
+    async fn seed_meeting_with_text(
+        store: &SqliteMeetingStore,
+        title: &str,
+        text: &str,
+    ) -> MeetingId {
+        let id = MeetingId::new();
+        store
+            .create(CreateMeeting {
+                id,
+                title: title.into(),
+                input_format: fmt(),
+            })
+            .await
+            .unwrap();
+        store
+            .append_segments(id, &[segment(0, 1_000, text)])
+            .await
+            .unwrap();
+        id
+    }
+
+    #[tokio::test]
+    async fn search_finds_matching_segment_and_returns_summary_with_snippet() {
+        let store = SqliteMeetingStore::open_in_memory().await.unwrap();
+        let id = seed_meeting_with_text(&store, "Roadmap", "we ship the alpha next quarter").await;
+
+        let hits = store.search("alpha", 10).await.unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].meeting.id, id);
+        assert_eq!(hits[0].meeting.title, "Roadmap");
+        // snippet() wraps the matched term with our chosen markers.
+        assert!(
+            hits[0].snippet.contains("<mark>alpha</mark>"),
+            "got: {}",
+            hits[0].snippet
+        );
+    }
+
+    #[tokio::test]
+    async fn search_orders_by_bm25_rank_ascending() {
+        // Two meetings, one with the term repeated → lower (better)
+        // bm25 rank, so it must come first.
+        let store = SqliteMeetingStore::open_in_memory().await.unwrap();
+        let _weak = seed_meeting_with_text(&store, "weak", "we mention budget once").await;
+        let strong = seed_meeting_with_text(
+            &store,
+            "strong",
+            "budget budget budget — budget review meeting",
+        )
+        .await;
+
+        let hits = store.search("budget", 10).await.unwrap();
+        assert_eq!(hits.len(), 2);
+        // BM25 negative-scaled: smaller is better.
+        assert!(hits[0].rank <= hits[1].rank, "ranks: {hits:?}");
+        assert_eq!(hits[0].meeting.id, strong);
+    }
+
+    #[tokio::test]
+    async fn search_collapses_per_meeting_to_one_hit() {
+        // Three matching segments in the same meeting → still one hit.
+        let store = SqliteMeetingStore::open_in_memory().await.unwrap();
+        let id = MeetingId::new();
+        store
+            .create(CreateMeeting {
+                id,
+                title: "Long".into(),
+                input_format: fmt(),
+            })
+            .await
+            .unwrap();
+        store
+            .append_segments(
+                id,
+                &[
+                    segment(0, 1_000, "alpha release notes"),
+                    segment(1_000, 2_000, "alpha milestones"),
+                    segment(2_000, 3_000, "alpha retro"),
+                ],
+            )
+            .await
+            .unwrap();
+
+        let hits = store.search("alpha", 10).await.unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].meeting.id, id);
+    }
+
+    #[tokio::test]
+    async fn search_is_diacritic_insensitive_for_spanish() {
+        // Tokenizer is `unicode61 remove_diacritics 2` so "Garcia"
+        // must hit a segment containing "García". This is the whole
+        // reason we picked that tokenizer in the migration.
+        let store = SqliteMeetingStore::open_in_memory().await.unwrap();
+        let id = seed_meeting_with_text(&store, "ES", "la propuesta de García fue aprobada").await;
+
+        let hits = store.search("garcia", 10).await.unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].meeting.id, id);
+    }
+
+    #[tokio::test]
+    async fn search_handles_special_chars_without_erroring() {
+        // A user typing `"` or `*` in the search box must not crash
+        // the FTS parser. Sanitiser strips them before MATCH.
+        let store = SqliteMeetingStore::open_in_memory().await.unwrap();
+        let id =
+            seed_meeting_with_text(&store, "Quoted", "we discuss the design doc tomorrow").await;
+
+        // Quote in the middle of the term: should still match "design".
+        let hits = store.search(r#"design""#, 10).await.unwrap();
+        assert_eq!(hits.len(), 1, "got: {:?}", hits);
+        assert_eq!(hits[0].meeting.id, id);
+
+        // All-syntax input collapses to None → empty result, no error.
+        assert!(store.search(r#"*()"^"#, 10).await.unwrap().is_empty());
+
+        // Empty / whitespace-only inputs return empty without hitting FTS.
+        assert!(store.search("", 10).await.unwrap().is_empty());
+        assert!(store.search("   \t\n  ", 10).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn search_respects_limit_and_zero_means_no_cap() {
+        let store = SqliteMeetingStore::open_in_memory().await.unwrap();
+        for i in 0..5 {
+            seed_meeting_with_text(&store, &format!("m{i}"), "shared term").await;
+        }
+        let capped = store.search("shared", 2).await.unwrap();
+        assert_eq!(capped.len(), 2);
+
+        let uncapped = store.search("shared", 0).await.unwrap();
+        assert_eq!(uncapped.len(), 5);
+    }
+
+    #[tokio::test]
+    async fn deleting_meeting_removes_its_text_from_search_index() {
+        // Trigger `segments_ad` must keep the inverted index in sync
+        // when ON DELETE CASCADE wipes the segments out from under us.
+        let store = SqliteMeetingStore::open_in_memory().await.unwrap();
+        let id = seed_meeting_with_text(&store, "ToDelete", "ephemeral phrase here").await;
+
+        assert_eq!(store.search("ephemeral", 10).await.unwrap().len(), 1);
+        store.delete(id).await.unwrap();
+        assert!(
+            store.search("ephemeral", 10).await.unwrap().is_empty(),
+            "FTS index leaked after meeting delete"
+        );
+    }
+
+    #[test]
+    fn sanitize_fts_query_wraps_tokens_in_quotes_and_strips_syntax() {
+        assert_eq!(sanitize_fts_query("hello"), Some(r#""hello""#.into()));
+        assert_eq!(
+            sanitize_fts_query("hello world"),
+            Some(r#""hello" "world""#.into())
+        );
+        // Quote inside the token is stripped, not escaped — simpler
+        // and equivalent for natural-language search.
+        assert_eq!(sanitize_fts_query(r#"he"llo"#), Some(r#""hello""#.into()));
+        // All operators stripped → nothing to search → None.
+        assert_eq!(sanitize_fts_query(r#"*()^"#), None);
+        assert_eq!(sanitize_fts_query(""), None);
+        assert_eq!(sanitize_fts_query("   "), None);
     }
 
     #[tokio::test]

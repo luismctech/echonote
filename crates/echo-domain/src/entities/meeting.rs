@@ -70,6 +70,30 @@ pub struct MeetingSummary {
     pub segment_count: u32,
 }
 
+/// One hit returned by the search port. Carries the meeting summary
+/// (so the sidebar can render it without an extra round-trip), the
+/// FTS5 BM25 rank (smaller = better, by SQLite convention) and a
+/// pre-rendered snippet around the strongest match. Snippet
+/// boundaries are decided by SQLite's `snippet()` function and use
+/// the markers chosen by the storage adapter — typically `<mark>` /
+/// `</mark>` so the UI can render them as highlights.
+///
+/// `serde(rename_all = "camelCase")` keeps the wire format aligned
+/// with the rest of the IPC surface.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeetingSearchHit {
+    /// Meeting matched by the query.
+    pub meeting: MeetingSummary,
+    /// Highlighted excerpt of the segment that matched.
+    pub snippet: String,
+    /// FTS5 BM25 rank — *smaller is better* (negative numbers are
+    /// strongest matches). The UI should sort ascending; tests assert
+    /// the same. We keep the raw value rather than mapping to a
+    /// `[0,1]` score so consumers can decide their own normalisation.
+    pub rank: f64,
+}
+
 /// Full meeting aggregate. Returned by point lookups and includes the
 /// segment list and any diarized speakers.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

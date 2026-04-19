@@ -241,6 +241,21 @@ enum MeetingsKind {
         #[arg(long = "id", value_name = "ID", conflicts_with = "id_positional")]
         id_flag: Option<String>,
     },
+    /// Full-text search over segment text. Returns one hit per
+    /// meeting, ordered by FTS5 BM25 rank (best match first).
+    Search {
+        /// Search query. Quote multi-word phrases at the shell level
+        /// (`echo-proto meetings search "design review"`); FTS5
+        /// operators in the input are stripped before matching.
+        #[arg(value_name = "QUERY")]
+        query: String,
+        /// Maximum hits to return. `0` = unlimited.
+        #[arg(long, default_value_t = 20)]
+        limit: u32,
+        /// Emit JSON instead of a human-readable table.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -852,6 +867,39 @@ async fn run_meetings(kind: MeetingsKind) -> Result<()> {
                 println!("deleted {id}");
             } else {
                 println!("not found: {id}");
+            }
+        }
+        MeetingsKind::Search { query, limit, json } => {
+            let hits = store.search(&query, limit).await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&hits)?);
+                return Ok(());
+            }
+            if hits.is_empty() {
+                println!("(no matches for {query:?})");
+                return Ok(());
+            }
+            println!(
+                "{:<38}  {:>9}  {:<25}  title / snippet",
+                "id", "rank", "started_at"
+            );
+            for hit in &hits {
+                let started = hit
+                    .meeting
+                    .started_at
+                    .format(&time::format_description::well_known::Rfc3339)
+                    .unwrap_or_default();
+                // Strip the <mark> markers for the plain CLI; the JSON
+                // path keeps them so downstream tools can still highlight.
+                let snippet = hit
+                    .snippet
+                    .replace("<mark>", "")
+                    .replace("</mark>", "")
+                    .replace('\n', " ");
+                println!(
+                    "{:<38}  {:>9.3}  {:<25}  {}\n{:<76}{}",
+                    hit.meeting.id, hit.rank, started, hit.meeting.title, "", snippet,
+                );
             }
         }
     }

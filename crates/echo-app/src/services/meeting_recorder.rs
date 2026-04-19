@@ -403,6 +403,14 @@ mod tests {
             guard.retain(|m| m.summary.id != meeting_id);
             Ok(guard.len() != len_before)
         }
+        async fn search(
+            &self,
+            _query: &str,
+            _limit: u32,
+        ) -> Result<Vec<echo_domain::MeetingSearchHit>, DomainError> {
+            // FakeStore is only used to test the recorder, not search.
+            Ok(Vec::new())
+        }
     }
 
     fn segment(start_ms: u32, end_ms: u32, text: &str) -> Segment {
