@@ -7,7 +7,7 @@ import {
   shortTag,
   SPEAKER_PALETTE,
 } from "./speakers";
-import type { Speaker } from "./ipc";
+import type { Speaker } from "../types/speaker";
 
 const speaker = (id: string, slot: number, label: string | null): Speaker => ({
   id,

@@ -1,60 +1,26 @@
-import {
-  useCallback,
-  useEffect,
-  useReducer,
-  useRef,
-  useState,
-} from "react";
+import { useCallback, useEffect, useState } from "react";
 
-import { useToast } from "./components/Toaster";
 import { HealthProbe } from "./features/live/HealthProbe";
 import { LivePane } from "./features/live/LivePane";
 import { MeetingDetail } from "./features/meetings/MeetingDetail";
 import { MeetingsList } from "./features/sidebar/MeetingsList";
 import { MeetingsSearchBox } from "./features/sidebar/MeetingsSearchBox";
 import { SearchResults } from "./features/sidebar/SearchResults";
-import {
-  deleteMeeting,
-  getMeeting,
-  healthCheck,
-  isTauri,
-  listMeetings,
-  renameSpeaker,
-  searchMeetings,
-  startStreaming,
-  stopStreaming,
-} from "./lib/ipc";
+import { useHealthProbe } from "./hooks/useHealthProbe";
+import { useMeetingDetail } from "./hooks/useMeetingDetail";
+import { useRecordingSession } from "./hooks/useRecordingSession";
+import { listMeetings, searchMeetings } from "./ipc/client";
+import { isTauri } from "./ipc/isTauri";
+import { useIpcAction } from "./ipc/useIpcAction";
 import { useDebouncedValue } from "./lib/useDebouncedValue";
-import {
-  canStart as selectCanStart,
-  canStop as selectCanStop,
-  initialRecordingState,
-  recordingReducer,
-} from "./state/recording";
 import type {
-  MeetingId,
   MeetingSearchHit,
   MeetingSummary,
 } from "./types/meeting";
-import type { SpeakerId } from "./types/speaker";
-import type { TranscriptEvent } from "./types/streaming";
-import type { MainView, Probe, StreamLine } from "./types/view";
+import type { MainView } from "./types/view";
 
 export function App() {
-  const toast = useToast();
-
-  const [probe, setProbe] = useState<Probe>({ kind: "idle" });
-  const [stream, dispatch] = useReducer(
-    recordingReducer,
-    initialRecordingState,
-  );
-  const [lines, setLines] = useState<StreamLine[]>([]);
-  const [stats, setStats] = useState<{
-    chunks: number;
-    skipped: number;
-    audioMs: number;
-  }>({ chunks: 0, skipped: 0, audioMs: 0 });
-  const listRef = useRef<HTMLDivElement>(null);
+  const probe = useHealthProbe();
 
   const [meetings, setMeetings] = useState<MeetingSummary[]>([]);
   const [meetingsError, setMeetingsError] = useState<string | null>(null);
@@ -66,10 +32,7 @@ export function App() {
   // Language hint passed to whisper. `""` means "let the model auto-detect"
   // and is mapped to `undefined` in the IPC payload. We default to Spanish
   // because that's the primary target language for this build, but the
-  // user can switch on the fly. The `.en`-only model will report any
-  // non-English audio as "(speaking in foreign language)" — that's a
-  // model-capability issue, not a UI bug; surfacing the picker makes the
-  // dependency on a multilingual model obvious.
+  // user can switch on the fly.
   const [language, setLanguage] = useState<string>("es");
 
   // Sidebar search (Sprint 1 day 8). `searchInput` mirrors the text
@@ -84,28 +47,27 @@ export function App() {
   const [searchError, setSearchError] = useState<string | null>(null);
   const isSearching = searchQuery.trim().length > 0;
 
+  // Wraps `listMeetings` so any failure pushes a warning toast and
+  // surfaces inline in the sidebar via `meetingsError`.
+  const refreshList = useIpcAction(
+    "Couldn't refresh meetings list.",
+    listMeetings,
+  );
   const refreshMeetings = useCallback(async () => {
     if (!isTauri()) return;
-    try {
-      const rows = await listMeetings();
-      setMeetings(rows);
-      setMeetingsError(null);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      setMeetingsError(message);
-      toast.push({
-        kind: "warning",
-        message: "Couldn't refresh meetings list.",
-        detail: message,
-      });
+    const rows = await refreshList();
+    if (rows === undefined) {
+      // useIpcAction already toasted; mirror the message inline so it
+      // stays visible after the toast auto-dismisses.
+      setMeetingsError("Couldn't refresh meetings list.");
+      return;
     }
-  }, [toast]);
+    setMeetings(rows);
+    setMeetingsError(null);
+  }, [refreshList]);
 
   // Run the FTS5 query whenever the debounced input changes. The
-  // `cancelled` flag protects against out-of-order responses (the user
-  // can type fast enough that a slow request returns *after* a faster
-  // one for a newer query, which would otherwise overwrite the fresh
-  // hits with stale ones).
+  // `cancelled` flag protects against out-of-order responses.
   useEffect(() => {
     if (!isTauri()) return;
     const query = searchQuery.trim();
@@ -136,263 +98,28 @@ export function App() {
     };
   }, [searchQuery]);
 
+  // Refresh the sidebar once on mount, after the probe is wired up.
   useEffect(() => {
-    if (!isTauri()) {
-      setProbe({
-        kind: "error",
-        message:
-          "Running outside Tauri — IPC is unavailable in `pnpm dev`. Use `pnpm tauri:dev`.",
-      });
-      return;
-    }
-    setProbe({ kind: "loading" });
-    healthCheck()
-      .then((status) => setProbe({ kind: "ok", status }))
-      .catch((err: unknown) => {
-        const message = err instanceof Error ? err.message : String(err);
-        setProbe({ kind: "error", message });
-        toast.push({
-          kind: "error",
-          message: "Backend health check failed.",
-          detail: message,
-        });
-      });
     void refreshMeetings();
-  }, [refreshMeetings, toast]);
+  }, [refreshMeetings]);
 
-  // Auto-scroll the live transcript list as new lines arrive.
-  useEffect(() => {
-    const el = listRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [lines]);
+  const recording = useRecordingSession({
+    backendReady: probe.kind === "ok",
+    onSessionFinished: refreshMeetings,
+  });
 
-  // Surface state-machine errors as toasts (single source of truth).
-  // The reducer is the only place that decides "this is an error";
-  // here we just translate that into a notification. Recoverable errors
-  // get the standard error toast; non-recoverable ones get an extra hint.
-  const lastReportedErrorRef = useRef<string | null>(null);
-  useEffect(() => {
-    if (stream.kind === "error") {
-      const signature = `${stream.recoverable}|${stream.message}`;
-      if (lastReportedErrorRef.current === signature) return;
-      lastReportedErrorRef.current = signature;
-      toast.push({
-        kind: "error",
-        message: stream.recoverable
-          ? "Streaming failed — you can retry."
-          : "Streaming failed mid-stop. Some audio may not have been persisted.",
-        detail: stream.message,
-      });
-    } else if (stream.kind === "persisted") {
-      lastReportedErrorRef.current = null;
-      toast.push({
-        kind: "success",
-        message: "Meeting saved",
-        detail: `${stream.lastTotalSegments} segments · ${(
-          stream.lastTotalAudioMs / 1000
-        ).toFixed(1)} s`,
-      });
-    } else if (stream.kind !== "starting" && stream.kind !== "stopping") {
-      lastReportedErrorRef.current = null;
-    }
-  }, [stream, toast]);
+  const { openMeeting, renameSpeakerAction, deleteMeetingAction } =
+    useMeetingDetail({
+      view,
+      setView,
+      refreshMeetings,
+      setMeetingsError,
+    });
 
-  const handleEvent = useCallback(
-    (evt: TranscriptEvent) => {
-      switch (evt.type) {
-        case "started":
-          dispatch({
-            type: "STREAMING_STARTED",
-            sessionId: evt.sessionId,
-            inputFormat: evt.inputFormat,
-          });
-          break;
-        case "chunk": {
-          setStats((s) => ({
-            ...s,
-            chunks: s.chunks + 1,
-            audioMs:
-              s.audioMs +
-              (evt.segments.at(-1)?.endMs ?? evt.offsetMs) -
-              evt.offsetMs,
-          }));
-          const text = evt.segments
-            .map((s) => s.text.trim())
-            .filter((t) => t.length > 0)
-            .join(" ");
-          setLines((prev) => [
-            ...prev,
-            {
-              kind: "chunk",
-              key: `${evt.sessionId}-${evt.chunkIndex}`,
-              chunkIndex: evt.chunkIndex,
-              offsetMs: evt.offsetMs,
-              text: text || "[no speech]",
-              language: evt.language,
-              rtf: evt.rtf,
-              speakerSlot: evt.speakerSlot,
-            },
-          ]);
-          break;
-        }
-        case "skipped":
-          setStats((s) => ({
-            ...s,
-            skipped: s.skipped + 1,
-            audioMs: s.audioMs + evt.durationMs,
-          }));
-          setLines((prev) => [
-            ...prev,
-            {
-              kind: "skipped",
-              key: `${evt.sessionId}-${evt.chunkIndex}`,
-              chunkIndex: evt.chunkIndex,
-              offsetMs: evt.offsetMs,
-              durationMs: evt.durationMs,
-              rms: evt.rms,
-            },
-          ]);
-          break;
-        case "stopped":
-          dispatch({
-            type: "STREAMING_STOPPED",
-            totalSegments: evt.totalSegments,
-            totalAudioMs: evt.totalAudioMs,
-          });
-          // Pipeline finalized the meeting in the DB — refresh sidebar.
-          void refreshMeetings();
-          break;
-        case "failed":
-          dispatch({ type: "STREAMING_FAILED", message: evt.message });
-          void refreshMeetings();
-          break;
-      }
-    },
-    [refreshMeetings],
-  );
-
-  const onStart = async () => {
-    setLines([]);
-    setStats({ chunks: 0, skipped: 0, audioMs: 0 });
+  const onStart = useCallback(async () => {
     setView({ kind: "live" });
-    dispatch({ type: "START_REQUESTED" });
-    try {
-      const langHint = language.trim();
-      await startStreaming(
-        {
-          chunkMs: 5_000,
-          silenceRmsThreshold: 0.005,
-          diarize,
-          ...(langHint.length > 0 ? { language: langHint } : {}),
-        },
-        handleEvent,
-      );
-    } catch (err) {
-      dispatch({
-        type: "BACKEND_ERROR",
-        message: err instanceof Error ? err.message : String(err),
-      });
-    }
-  };
-
-  const onStop = async () => {
-    if (stream.kind !== "recording") return;
-    const id = stream.sessionId;
-    dispatch({ type: "STOP_REQUESTED" });
-    try {
-      await stopStreaming(id);
-    } catch (err) {
-      dispatch({
-        type: "BACKEND_ERROR",
-        message: err instanceof Error ? err.message : String(err),
-      });
-    }
-  };
-
-  const openMeeting = useCallback(
-    async (id: MeetingId) => {
-      setView({ kind: "meeting", id, meeting: null, loading: true });
-      try {
-        const meeting = await getMeeting(id);
-        if (!meeting) {
-          setView({
-            kind: "meeting",
-            id,
-            meeting: null,
-            loading: false,
-            error: "Meeting not found",
-          });
-        } else {
-          setView({ kind: "meeting", id, meeting, loading: false });
-        }
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        setView({
-          kind: "meeting",
-          id,
-          meeting: null,
-          loading: false,
-          error: message,
-        });
-        toast.push({
-          kind: "error",
-          message: "Couldn't load meeting.",
-          detail: message,
-        });
-      }
-    },
-    [toast],
-  );
-
-  const onRenameSpeaker = useCallback(
-    async (speakerId: SpeakerId, label: string | null) => {
-      if (view.kind !== "meeting" || !view.meeting) return;
-      const meetingId = view.id;
-      try {
-        const updated = await renameSpeaker(meetingId, speakerId, label);
-        // Re-render from the canonical post-rename meeting returned by
-        // the backend so we don't drift from disk on the optimistic path.
-        setView((prev) =>
-          prev.kind === "meeting" && prev.id === meetingId
-            ? { kind: "meeting", id: meetingId, meeting: updated, loading: false }
-            : prev,
-        );
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        toast.push({
-          kind: "error",
-          message: "Couldn't rename speaker.",
-          detail: message,
-        });
-      }
-    },
-    [view, toast],
-  );
-
-  const onDeleteMeeting = useCallback(
-    async (id: MeetingId) => {
-      try {
-        await deleteMeeting(id);
-        await refreshMeetings();
-        if (view.kind === "meeting" && view.id === id) {
-          setView({ kind: "live" });
-        }
-        toast.push({ kind: "info", message: "Meeting deleted" });
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        setMeetingsError(message);
-        toast.push({
-          kind: "error",
-          message: "Couldn't delete meeting.",
-          detail: message,
-        });
-      }
-    },
-    [refreshMeetings, view, toast],
-  );
-
-  const canStart = probe.kind === "ok" && selectCanStart(stream);
-  const canStop = selectCanStop(stream);
+    await recording.start({ language, diarize });
+  }, [recording, language, diarize]);
 
   // Switching to the live pane after a session finished should also
   // clear the previous transcript and reset the state machine to
@@ -401,12 +128,8 @@ export function App() {
   // the visual context implies the recording is still in flight).
   const goLive = useCallback(() => {
     setView({ kind: "live" });
-    if (stream.kind === "persisted" || stream.kind === "error") {
-      dispatch({ type: "ACKNOWLEDGE" });
-      setLines([]);
-      setStats({ chunks: 0, skipped: 0, audioMs: 0 });
-    }
-  }, [stream.kind]);
+    recording.reset();
+  }, [recording]);
 
   return (
     <main className="flex h-full w-full flex-col gap-3 overflow-hidden px-4 py-3 sm:px-6 sm:py-4">
@@ -461,7 +184,7 @@ export function App() {
                 meetings={meetings}
                 activeId={view.kind === "meeting" ? view.id : null}
                 onSelect={(m) => void openMeeting(m.id)}
-                onDelete={(m) => void onDeleteMeeting(m.id)}
+                onDelete={(m) => void deleteMeetingAction(m.id)}
               />
             )}
           </div>
@@ -470,22 +193,22 @@ export function App() {
         <section className="flex min-h-0 min-w-0 flex-col gap-3 overflow-hidden rounded-lg border border-zinc-200 bg-white p-4 shadow-sm dark:border-zinc-800 dark:bg-zinc-950">
           {view.kind === "live" ? (
             <LivePane
-              stream={stream}
-              stats={stats}
-              lines={lines}
-              listRef={listRef}
-              canStart={canStart}
-              canStop={canStop}
+              stream={recording.stream}
+              stats={recording.stats}
+              lines={recording.lines}
+              listRef={recording.listRef}
+              canStart={recording.canStart}
+              canStop={recording.canStop}
               diarize={diarize}
               onToggleDiarize={setDiarize}
               language={language}
               onChangeLanguage={setLanguage}
               onStart={onStart}
-              onStop={onStop}
-              onDismissError={() => dispatch({ type: "ACKNOWLEDGE" })}
+              onStop={recording.stop}
+              onDismissError={recording.dismissError}
             />
           ) : (
-            <MeetingDetail view={view} onRenameSpeaker={onRenameSpeaker} />
+            <MeetingDetail view={view} onRenameSpeaker={renameSpeakerAction} />
           )}
         </section>
       </div>

@@ -1,12 +1,15 @@
 /**
  * Typed IPC client for the Tauri backend.
  *
- * The shapes returned/accepted by `invoke` live in `src/types/`
- * (one file per domain) and are re-exported from this module so
- * existing callers keep working. Once the backend surface grows
- * enough to justify it, type generation will be delegated to
- * `tauri-specta`, which will emit `src/types/` from Rust
- * `#[specta::specta]` annotations.
+ * This module is the only place in the frontend that calls
+ * `@tauri-apps/api/core#invoke`. Higher layers (hooks, components)
+ * import these wrappers, never `invoke` directly — that's how we
+ * keep the adapter boundary intact (see src/README.md).
+ *
+ * Hand-rolled today; once the backend surface stabilises, type
+ * generation will be delegated to `tauri-specta`, which will emit
+ * the request/response shapes from Rust `#[specta::specta]` so this
+ * file becomes a thin call-site index.
  */
 
 import { Channel, invoke } from "@tauri-apps/api/core";
@@ -24,35 +27,6 @@ import type {
   StreamingSessionId,
   TranscriptEvent,
 } from "../types/streaming";
-
-// Re-export domain types so existing `import { ... } from "./lib/ipc"`
-// call sites keep compiling unchanged. Phase 2+ will switch callers
-// to import directly from `src/types/`, after which these re-exports
-// become an alias surface we can shrink at our leisure.
-export type { HealthStatus } from "../types/health";
-export type {
-  Meeting,
-  MeetingId,
-  MeetingSearchHit,
-  MeetingSummary,
-  Segment,
-} from "../types/meeting";
-export type { Speaker, SpeakerId } from "../types/speaker";
-export type {
-  AudioFormat,
-  AudioSourceKind,
-  StartStreamingOptions,
-  StreamingSessionId,
-  TranscriptEvent,
-} from "../types/streaming";
-
-// ---------------------------------------------------------------------------
-// Environment guard
-// ---------------------------------------------------------------------------
-
-/** True when the frontend is running inside a Tauri webview. */
-export const isTauri = (): boolean =>
-  typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
 // ---------------------------------------------------------------------------
 // Health
