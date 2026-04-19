@@ -429,7 +429,7 @@ export function App() {
       </div>
 
       <footer className="text-xs text-zinc-400 dark:text-zinc-600">
-        Sprint 1 · day 1 · frontend hardening
+        Sprint 1 · day 7 · diarization end-to-end
       </footer>
     </main>
   );

@@ -147,7 +147,7 @@ enum Command {
         diarize: bool,
         /// Path to the ERes2Net ONNX export. Defaults to the
         /// `ECHO_EMBED_MODEL` env var or
-        /// `./models/embed/3dspeaker_speech_eres2net_sv_en_voxceleb_16k.onnx`.
+        /// `./models/embedder/eres2net_en_voxceleb.onnx`.
         /// Only consulted when `--diarize` is set.
         #[arg(long, env = "ECHO_EMBED_MODEL")]
         embed_model: Option<PathBuf>,
@@ -215,17 +215,31 @@ enum MeetingsKind {
         json: bool,
     },
     /// Show one meeting (header + segments).
+    ///
+    /// Accept the meeting id either as a positional arg
+    /// (`meetings show 019d…`) or via the `--id` flag
+    /// (`meetings show --id 019d…`) — both work, exactly one is required.
     Show {
-        /// Meeting UUIDv7.
-        id: String,
+        /// Meeting UUIDv7 (positional form).
+        #[arg(value_name = "ID")]
+        id_positional: Option<String>,
+        /// Meeting UUIDv7 (flag form).
+        #[arg(long = "id", value_name = "ID", conflicts_with = "id_positional")]
+        id_flag: Option<String>,
         /// Emit JSON instead of plain text.
         #[arg(long)]
         json: bool,
     },
     /// Delete a meeting and its segments.
+    ///
+    /// Accept the meeting id either as a positional arg or via `--id`.
     Delete {
-        /// Meeting UUIDv7.
-        id: String,
+        /// Meeting UUIDv7 (positional form).
+        #[arg(value_name = "ID")]
+        id_positional: Option<String>,
+        /// Meeting UUIDv7 (flag form).
+        #[arg(long = "id", value_name = "ID", conflicts_with = "id_positional")]
+        id_flag: Option<String>,
     },
 }
 
@@ -590,9 +604,8 @@ async fn run_stream(
     if diarize {
         let embed_path = embed_model
             .or_else(|| {
-                Some(PathBuf::from(
-                    "./models/embed/3dspeaker_speech_eres2net_sv_en_voxceleb_16k.onnx",
-                ))
+                // Matches what `scripts/download-models.sh embed` writes.
+                Some(PathBuf::from("./models/embedder/eres2net_en_voxceleb.onnx"))
             })
             .filter(|p| p.exists())
             .ok_or_else(|| {
@@ -688,8 +701,19 @@ async fn run_stream(
                     None if diarize => "S?".to_string(),
                     None => "  ".to_string(),
                 };
+                // RTF is meaningless when whisper produced no segments
+                // (e.g. <no speech> on a tail chunk of ~10ms): the
+                // ratio explodes because the divisor is the *audio*
+                // duration, not the wall clock. Render `rtf= --` in
+                // that case so the column stays aligned but doesn't
+                // mislead the eye.
+                let rtf_cell = if text.is_empty() {
+                    "rtf=  --".to_string()
+                } else {
+                    format!("rtf={rtf:.2}")
+                };
                 println!(
-                    "  [{chunk_index:>2}] +{offset_ms:>5} ms  rtf={rtf:.2}  {speaker_tag}  {lang} → {body}"
+                    "  [{chunk_index:>2}] +{offset_ms:>5} ms  {rtf_cell}  {speaker_tag}  {lang} → {body}"
                 );
             }
             Some(TranscriptEvent::Skipped {
@@ -763,8 +787,12 @@ async fn run_meetings(kind: MeetingsKind) -> Result<()> {
                 );
             }
         }
-        MeetingsKind::Show { id, json } => {
-            let id = parse_meeting_id(&id)?;
+        MeetingsKind::Show {
+            id_positional,
+            id_flag,
+            json,
+        } => {
+            let id = resolve_meeting_id(id_positional, id_flag)?;
             let Some(meeting) = store.get(id).await? else {
                 anyhow::bail!("meeting {id} not found");
             };
@@ -814,8 +842,11 @@ async fn run_meetings(kind: MeetingsKind) -> Result<()> {
                 );
             }
         }
-        MeetingsKind::Delete { id } => {
-            let id = parse_meeting_id(&id)?;
+        MeetingsKind::Delete {
+            id_positional,
+            id_flag,
+        } => {
+            let id = resolve_meeting_id(id_positional, id_flag)?;
             let removed = store.delete(id).await?;
             if removed {
                 println!("deleted {id}");
@@ -830,6 +861,17 @@ async fn run_meetings(kind: MeetingsKind) -> Result<()> {
 fn parse_meeting_id(s: &str) -> Result<MeetingId> {
     let uuid = uuid::Uuid::parse_str(s).with_context(|| format!("invalid meeting id: {s:?}"))?;
     Ok(MeetingId(uuid))
+}
+
+/// Accept the meeting id either as a positional value or via the `--id`
+/// flag. `clap` already enforces `conflicts_with`, so at most one of the
+/// two is `Some`; here we just collapse them and surface a friendly
+/// error when both are absent.
+fn resolve_meeting_id(positional: Option<String>, flag: Option<String>) -> Result<MeetingId> {
+    let raw = positional.or(flag).ok_or_else(|| {
+        anyhow::anyhow!("missing meeting id: pass it as the positional arg or with `--id <UUID>`")
+    })?;
+    parse_meeting_id(&raw)
 }
 
 // ---------------------------------------------------------------------------

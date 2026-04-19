@@ -96,16 +96,23 @@ impl AppState {
     /// runs migrations, which is I/O. The transcriber is *not* loaded
     /// eagerly — the first `start_streaming` call pays that cost.
     pub async fn initialize() -> Result<Self, String> {
-        let model_path = std::env::var("ECHO_ASR_MODEL")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from("./models/asr/ggml-base.en.bin"));
-        let embed_model_path = std::env::var("ECHO_EMBED_MODEL")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| {
-                PathBuf::from("./models/embedder/3dspeaker_speech_eres2net_sv_en_voxceleb_16k.onnx")
-            });
+        let model_path = resolve_asset_path(
+            std::env::var("ECHO_ASR_MODEL").ok(),
+            "models/asr/ggml-base.en.bin",
+        );
+        let embed_model_path = resolve_asset_path(
+            std::env::var("ECHO_EMBED_MODEL").ok(),
+            // Matches what `scripts/download-models.sh embed` writes.
+            "models/embedder/eres2net_en_voxceleb.onnx",
+        );
 
         let db_path = resolve_db_path();
+        tracing::info!(
+            asr_model = %model_path.display(),
+            embed_model = %embed_model_path.display(),
+            db_path = %db_path.display(),
+            "echo-shell paths resolved"
+        );
         let store = SqliteMeetingStore::open(&db_path)
             .await
             .map_err(|e| format!("open meeting store at {}: {e}", db_path.display()))?;
@@ -182,10 +189,54 @@ impl AppState {
 /// installer would point this at the OS-appropriate app-data dir;
 /// that's deferred until Sprint 1 when the installer lands.
 fn resolve_db_path() -> PathBuf {
-    if let Ok(p) = std::env::var("ECHO_DB_PATH") {
-        return PathBuf::from(p);
+    resolve_asset_path(std::env::var("ECHO_DB_PATH").ok(), "echonote.db")
+}
+
+/// Resolve an asset path with sensible dev-vs-prod fallbacks.
+///
+/// Order of resolution:
+/// 1. The explicit override (env var) — used as-is when absolute, otherwise
+///    treated relative to the workspace root.
+/// 2. The default relative path resolved against the workspace root, derived
+///    from `CARGO_MANIFEST_DIR` (which points at `src-tauri/`) by walking up
+///    one level. This avoids the "model not found at ./models/..." footgun
+///    when `tauri dev` launches the binary with cwd = `src-tauri/`.
+/// 3. Finally, fall back to the path as-is, so `cargo run -p echo-shell`
+///    from the workspace root still works.
+fn resolve_asset_path(override_value: Option<String>, default_relative: &str) -> PathBuf {
+    let workspace_root = workspace_root();
+
+    if let Some(raw) = override_value.filter(|s| !s.trim().is_empty()) {
+        let raw_path = PathBuf::from(&raw);
+        if raw_path.is_absolute() {
+            return raw_path;
+        }
+        // Try workspace-root-relative first; fall back to cwd-relative.
+        let rooted = workspace_root.join(&raw_path);
+        if rooted.exists() {
+            return rooted;
+        }
+        return raw_path;
     }
-    PathBuf::from("./echonote.db")
+
+    let rooted = workspace_root.join(default_relative);
+    if rooted.exists() {
+        return rooted;
+    }
+    // Either missing (so the caller will surface a useful error message
+    // pointing at the workspace path) or running from a context where the
+    // cwd happens to be correct.
+    rooted
+}
+
+/// Best-effort workspace root: the directory above `src-tauri/` (where
+/// `CARGO_MANIFEST_DIR` points). Falls back to the current working
+/// directory if the parent is somehow missing.
+fn workspace_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
 }
 
 /// IPC mirror of [`echo_domain::AudioSource`] with camelCase naming
