@@ -21,7 +21,7 @@
  * action layer means it slots into either world unchanged.
  */
 
-import { useCallback } from "react";
+import { useCallback, useRef } from "react";
 
 import { useToast } from "../components/Toaster";
 import {
@@ -58,11 +58,19 @@ export function useMeetingDetail({
     renameSpeaker,
   );
 
+  // Track the last requested meeting id so a slow `getMeeting` for an
+  // older click can't overwrite the view after the user already opened
+  // a different meeting. Same pattern the FTS search uses with a
+  // `cancelled` flag, just keyed by id instead of effect lifetime.
+  const lastRequestedRef = useRef<MeetingId | null>(null);
+
   const openMeeting = useCallback(
     async (id: MeetingId) => {
+      lastRequestedRef.current = id;
       setView({ kind: "meeting", id, meeting: null, loading: true });
       try {
         const meeting = await getMeeting(id);
+        if (lastRequestedRef.current !== id) return;
         if (!meeting) {
           setView({
             kind: "meeting",
@@ -75,6 +83,7 @@ export function useMeetingDetail({
           setView({ kind: "meeting", id, meeting, loading: false });
         }
       } catch (err) {
+        if (lastRequestedRef.current !== id) return;
         const message = err instanceof Error ? err.message : String(err);
         setView({
           kind: "meeting",
@@ -113,12 +122,23 @@ export function useMeetingDetail({
   const deleteMeetingAction = useCallback(
     async (id: MeetingId) => {
       try {
-        await deleteMeeting(id);
+        const removed = await deleteMeeting(id);
         await refreshMeetings();
         if (view.kind === "meeting" && view.id === id) {
           setView({ kind: "live" });
         }
-        toast.push({ kind: "info", message: "Meeting deleted" });
+        // Backend returns `false` when the row was already gone (race
+        // with another window or a stale sidebar click). Surface that
+        // honestly instead of pretending the delete succeeded.
+        toast.push(
+          removed
+            ? { kind: "info", message: "Meeting deleted" }
+            : {
+                kind: "warning",
+                message: "Meeting was already gone.",
+                detail: "Refreshed the list to match disk.",
+              },
+        );
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         setMeetingsError(message);

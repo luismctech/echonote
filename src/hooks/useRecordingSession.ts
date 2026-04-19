@@ -80,17 +80,20 @@ export function useRecordingSession({
     if (el) el.scrollTop = el.scrollHeight;
   }, [lines]);
 
-  // Surface state-machine errors as toasts (single source of truth).
-  // The reducer is the only place that decides "this is an error";
-  // here we just translate that into a notification. The dedup ref
-  // prevents the same error from popping repeatedly when the effect
-  // re-runs without an actual state change.
-  const lastReportedErrorRef = useRef<string | null>(null);
+  // Surface state-machine errors AND the success "saved" event as
+  // toasts (single source of truth). The reducer is the only place
+  // that decides terminal kinds; here we just translate them into
+  // notifications. Both branches dedupe via a signature ref so the
+  // same toast doesn't pop twice when the effect re-runs without an
+  // actual state change — including React 18 StrictMode's
+  // double-invoke in dev, which would otherwise yield two
+  // "Meeting saved" toasts on every recording stop.
+  const lastReportedRef = useRef<string | null>(null);
   useEffect(() => {
     if (stream.kind === "error") {
-      const signature = `${stream.recoverable}|${stream.message}`;
-      if (lastReportedErrorRef.current === signature) return;
-      lastReportedErrorRef.current = signature;
+      const signature = `error|${stream.recoverable}|${stream.message}`;
+      if (lastReportedRef.current === signature) return;
+      lastReportedRef.current = signature;
       toast.push({
         kind: "error",
         message: stream.recoverable
@@ -99,7 +102,9 @@ export function useRecordingSession({
         detail: stream.message,
       });
     } else if (stream.kind === "persisted") {
-      lastReportedErrorRef.current = null;
+      const signature = `persisted|${stream.lastTotalSegments}|${stream.lastTotalAudioMs}`;
+      if (lastReportedRef.current === signature) return;
+      lastReportedRef.current = signature;
       toast.push({
         kind: "success",
         message: "Meeting saved",
@@ -108,7 +113,7 @@ export function useRecordingSession({
         ).toFixed(1)} s`,
       });
     } else if (stream.kind !== "starting" && stream.kind !== "stopping") {
-      lastReportedErrorRef.current = null;
+      lastReportedRef.current = null;
     }
   }, [stream, toast]);
 
