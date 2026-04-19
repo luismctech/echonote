@@ -30,7 +30,7 @@
  * three most-likely-to-regress illegal ones.
  */
 
-import type { AudioFormat, StreamingSessionId } from "../lib/ipc";
+import type { AudioFormat, StreamingSessionId } from "../types/streaming";
 
 // ---------------------------------------------------------------------------
 // Types

@@ -14,7 +14,7 @@
  * transcript backgrounds without per-theme overrides.
  */
 
-import type { Speaker } from "./ipc";
+import type { Speaker } from "../types/speaker";
 
 /**
  * Tailwind class pairs for each palette slot. Indexed modulo the

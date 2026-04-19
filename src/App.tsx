@@ -16,14 +16,6 @@ import {
   searchMeetings,
   startStreaming,
   stopStreaming,
-  type HealthStatus,
-  type Meeting,
-  type MeetingId,
-  type MeetingSearchHit,
-  type MeetingSummary,
-  type Speaker,
-  type SpeakerId,
-  type TranscriptEvent,
 } from "./lib/ipc";
 import { useDebouncedValue } from "./lib/useDebouncedValue";
 import {
@@ -33,6 +25,11 @@ import {
   shortTag,
 } from "./lib/speakers";
 import {
+  formatDate,
+  formatDurationMs,
+  formatTimestamp,
+} from "./lib/format";
+import {
   canStart as selectCanStart,
   canStop as selectCanStop,
   initialRecordingState,
@@ -40,38 +37,14 @@ import {
   statusLabel,
   type RecordingState,
 } from "./state/recording";
-
-type Probe =
-  | { kind: "idle" }
-  | { kind: "loading" }
-  | { kind: "ok"; status: HealthStatus }
-  | { kind: "error"; message: string };
-
-type StreamLine =
-  | {
-      kind: "chunk";
-      key: string;
-      chunkIndex: number;
-      offsetMs: number;
-      text: string;
-      language: string | null;
-      rtf: number;
-      /** 0-based slot of the diarized speaker, or undefined if diarization is off. */
-      speakerSlot?: number | undefined;
-    }
-  | {
-      kind: "skipped";
-      key: string;
-      chunkIndex: number;
-      offsetMs: number;
-      durationMs: number;
-      rms: number;
-    };
-
-/** Right-pane mode: live transcription or replay of a stored meeting. */
-type MainView =
-  | { kind: "live" }
-  | { kind: "meeting"; id: MeetingId; meeting: Meeting | null; loading: boolean; error?: string };
+import type {
+  MeetingId,
+  MeetingSearchHit,
+  MeetingSummary,
+} from "./types/meeting";
+import type { Speaker, SpeakerId } from "./types/speaker";
+import type { TranscriptEvent } from "./types/streaming";
+import type { MainView, Probe, StreamLine } from "./types/view";
 
 export function App() {
   const toast = useToast();
@@ -1140,28 +1113,3 @@ function SpeakerChip({
   );
 }
 
-function formatTimestamp(ms: number): string {
-  const totalSeconds = Math.floor(ms / 1000);
-  const m = Math.floor(totalSeconds / 60);
-  const s = totalSeconds % 60;
-  return `${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}`;
-}
-
-function formatDate(rfc3339: string): string {
-  const d = new Date(rfc3339);
-  if (Number.isNaN(d.getTime())) return rfc3339;
-  return d.toLocaleString(undefined, {
-    month: "short",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-}
-
-function formatDurationMs(ms: number): string {
-  const totalSeconds = Math.round(ms / 1000);
-  if (totalSeconds < 60) return `${totalSeconds}s`;
-  const m = Math.floor(totalSeconds / 60);
-  const s = totalSeconds % 60;
-  return `${m}m ${s.toString().padStart(2, "0")}s`;
-}
