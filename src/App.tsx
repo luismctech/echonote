@@ -24,11 +24,22 @@ import { useMeetings } from "./state/useMeetingsStore";
 
 export function App() {
   const probe = useHealthProbe();
-  const meetings = useMeetings();
+  const { goToLive, refreshMeetings, view, renameSpeaker } = useMeetings();
+  // Pull the primitives we depend on out of the hook return so our
+  // useCallback deps below reference stable identities (each member
+  // is memoised inside the hook with `useCallback`); depending on
+  // the whole `recording` object would invalidate the callbacks on
+  // every render and defeat the memoisation entirely.
   const recording = useRecordingSession({
     backendReady: probe.kind === "ok",
-    onSessionFinished: meetings.refreshMeetings,
+    onSessionFinished: refreshMeetings,
   });
+  const {
+    start: startRecording,
+    reset: resetRecording,
+    stop: stopRecording,
+    dismissError,
+  } = recording;
 
   // Diarize is opt-in to keep the existing whisper-only path unchanged
   // for users who haven't downloaded the embedder yet.
@@ -40,18 +51,18 @@ export function App() {
   // Pressing Start while viewing a stored meeting must also flip the
   // pane back to live so the user sees the new transcript.
   const handleStart = useCallback(async () => {
-    meetings.goToLive();
-    await recording.start({ language, diarize });
-  }, [meetings, recording, language, diarize]);
+    goToLive();
+    await startRecording({ language, diarize });
+  }, [goToLive, startRecording, language, diarize]);
 
   // Switching back to the live pane after a session finished must
   // also clear stale lines and reset the state machine to idle —
   // otherwise the user sees a "✓ saved" status with the Start button
   // looking disabled even though it isn't.
   const handleGoLive = useCallback(() => {
-    meetings.goToLive();
-    recording.reset();
-  }, [meetings, recording]);
+    goToLive();
+    resetRecording();
+  }, [goToLive, resetRecording]);
 
   return (
     <main className="flex h-full w-full flex-col gap-3 overflow-hidden px-4 py-3 sm:px-6 sm:py-4">
@@ -71,7 +82,7 @@ export function App() {
         <Sidebar onGoLive={handleGoLive} />
 
         <section className="flex min-h-0 min-w-0 flex-col gap-3 overflow-hidden rounded-lg border border-zinc-200 bg-white p-4 shadow-sm dark:border-zinc-800 dark:bg-zinc-950">
-          {meetings.view.kind === "live" ? (
+          {view.kind === "live" ? (
             <LivePane
               stream={recording.stream}
               stats={recording.stats}
@@ -84,14 +95,11 @@ export function App() {
               language={language}
               onChangeLanguage={setLanguage}
               onStart={handleStart}
-              onStop={recording.stop}
-              onDismissError={recording.dismissError}
+              onStop={stopRecording}
+              onDismissError={dismissError}
             />
           ) : (
-            <MeetingDetail
-              view={meetings.view}
-              onRenameSpeaker={meetings.renameSpeaker}
-            />
+            <MeetingDetail view={view} onRenameSpeaker={renameSpeaker} />
           )}
         </section>
       </div>

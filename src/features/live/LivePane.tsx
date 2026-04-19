@@ -1,7 +1,7 @@
 import type { RefObject } from "react";
 
 import { StatsBar } from "../../components/StatsBar";
-import type { RecordingState } from "../../state/recording";
+import { statusLabel, type RecordingState } from "../../state/recording";
 import type { StreamLine } from "../../types/view";
 import { TranscriptRow } from "./TranscriptRow";
 
@@ -134,7 +134,7 @@ export function LivePane({
         </div>
       )}
 
-      <StatsBar stats={stats} stream={stream} />
+      <StatsBar status={statusLabel(stream)} stats={stats} />
 
       <div
         ref={listRef}
