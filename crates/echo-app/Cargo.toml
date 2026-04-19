@@ -18,6 +18,7 @@ thiserror.workspace = true
 tracing.workspace = true
 serde.workspace = true
 uuid.workspace = true
+time = { workspace = true, features = ["formatting"] }
 
 [dev-dependencies]
 mockall.workspace = true

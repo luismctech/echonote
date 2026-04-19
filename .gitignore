@@ -104,3 +104,10 @@ cobertura.xml
 # Cursor / local agent artifacts (keep skills, ignore session state)
 # -----------------------------------------------------------------------------
 .cursor/projects/
+
+# -----------------------------------------------------------------------------
+# Runtime data (created by `pnpm tauri dev` / `echo-proto stream`)
+# -----------------------------------------------------------------------------
+echonote.db
+echonote.db-shm
+echonote.db-wal

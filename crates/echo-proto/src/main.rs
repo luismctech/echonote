@@ -27,16 +27,17 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
-use echo_app::{FrameSink, RecordToSink, StreamingPipeline};
+use echo_app::{FrameSink, MeetingRecorder, RecordToSink, StreamingPipeline};
 use echo_asr::WhisperCppTranscriber;
 use echo_audio::{
     resample_to_whisper, CpalMicrophoneCapture, RubatoResamplerAdapter, WavSink, WriteOptions,
     WHISPER_SAMPLE_RATE,
 };
 use echo_domain::{
-    AudioCapture, AudioFormat, AudioFrame, AudioSource, CaptureSpec, DomainError, Resampler,
-    StreamingOptions, TranscribeOptions, Transcriber, TranscriptEvent,
+    AudioCapture, AudioFormat, AudioFrame, AudioSource, CaptureSpec, DomainError, MeetingId,
+    MeetingStore, Resampler, StreamingOptions, TranscribeOptions, Transcriber, TranscriptEvent,
 };
+use echo_storage::SqliteMeetingStore;
 
 /// EchoNote CLI prototype.
 #[derive(Parser, Debug)]
@@ -151,6 +152,38 @@ enum Command {
         #[command(subcommand)]
         kind: BenchKind,
     },
+
+    /// Inspect persisted meetings (Sprint 0 day 8).
+    Meetings {
+        #[command(subcommand)]
+        kind: MeetingsKind,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum MeetingsKind {
+    /// List meetings, newest first.
+    List {
+        /// Maximum rows to return. `0` = unlimited.
+        #[arg(long, default_value_t = 50)]
+        limit: u32,
+        /// Emit JSON instead of a human-readable table.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show one meeting (header + segments).
+    Show {
+        /// Meeting UUIDv7.
+        id: String,
+        /// Emit JSON instead of plain text.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Delete a meeting and its segments.
+    Delete {
+        /// Meeting UUIDv7.
+        id: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -217,6 +250,7 @@ async fn main() -> Result<()> {
             tracing::info!(?kind, "bench subcommand not yet wired (Sprint 0 day 9-10)");
             Ok(())
         }
+        Command::Meetings { kind } => run_meetings(kind).await,
     }
 }
 
@@ -441,6 +475,9 @@ async fn run_stream(
         silence_rms_threshold: silence_threshold,
     };
 
+    let store: Arc<dyn MeetingStore> = Arc::new(open_cli_store().await?);
+    let recorder = MeetingRecorder::with_default_title(store.clone());
+
     let pipeline = StreamingPipeline::new(capture, resampler, transcriber);
     let mut handle = pipeline
         .start_with_spec(spec, options)
@@ -472,6 +509,12 @@ async fn run_stream(
                 evt = handle.next_event() => evt,
             }
         };
+
+        if let Some(ref evt) = evt {
+            if let Err(e) = recorder.record(evt).await {
+                tracing::warn!(error = %e, "recorder.record failed");
+            }
+        }
 
         match evt {
             Some(TranscriptEvent::Started { input_format, .. }) => {
@@ -531,6 +574,95 @@ async fn run_stream(
     }
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// `meetings` subcommand
+// ---------------------------------------------------------------------------
+
+async fn open_cli_store() -> Result<SqliteMeetingStore> {
+    let path = std::env::var("ECHO_DB_PATH").unwrap_or_else(|_| "./echonote.db".to_string());
+    SqliteMeetingStore::open(&path)
+        .await
+        .map_err(anyhow::Error::from)
+        .with_context(|| format!("open meeting store at {path}"))
+}
+
+async fn run_meetings(kind: MeetingsKind) -> Result<()> {
+    let store = open_cli_store().await?;
+    match kind {
+        MeetingsKind::List { limit, json } => {
+            let rows = store.list(limit).await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&rows)?);
+                return Ok(());
+            }
+            if rows.is_empty() {
+                println!("(no meetings yet)");
+                return Ok(());
+            }
+            println!(
+                "{:<38}  {:<25}  {:>8}  {:>5}  title",
+                "id", "started_at", "dur_s", "segs"
+            );
+            for m in &rows {
+                let started = m
+                    .started_at
+                    .format(&time::format_description::well_known::Rfc3339)
+                    .unwrap_or_default();
+                let dur = (m.duration_ms as f64) / 1_000.0;
+                println!(
+                    "{:<38}  {:<25}  {:>8.2}  {:>5}  {}",
+                    m.id, started, dur, m.segment_count, m.title
+                );
+            }
+        }
+        MeetingsKind::Show { id, json } => {
+            let id = parse_meeting_id(&id)?;
+            let Some(meeting) = store.get(id).await? else {
+                anyhow::bail!("meeting {id} not found");
+            };
+            if json {
+                println!("{}", serde_json::to_string_pretty(&meeting)?);
+                return Ok(());
+            }
+            let s = &meeting.summary;
+            println!("# {}\nid: {}\nstarted: {}\nended:   {}\nlanguage: {}\nduration: {:.2} s\nsegments: {}\nformat:   {} Hz × {} ch\n",
+                s.title,
+                s.id,
+                s.started_at.format(&time::format_description::well_known::Rfc3339).unwrap_or_default(),
+                s.ended_at.map(|d| d.format(&time::format_description::well_known::Rfc3339).unwrap_or_default()).unwrap_or_else(|| "-".into()),
+                s.language.as_deref().unwrap_or("?"),
+                (s.duration_ms as f64) / 1_000.0,
+                s.segment_count,
+                meeting.input_format.sample_rate_hz,
+                meeting.input_format.channels,
+            );
+            for seg in &meeting.segments {
+                println!(
+                    "  [{:>6}-{:>6} ms] {}",
+                    seg.start_ms,
+                    seg.end_ms,
+                    seg.text.trim()
+                );
+            }
+        }
+        MeetingsKind::Delete { id } => {
+            let id = parse_meeting_id(&id)?;
+            let removed = store.delete(id).await?;
+            if removed {
+                println!("deleted {id}");
+            } else {
+                println!("not found: {id}");
+            }
+        }
+    }
+    Ok(())
+}
+
+fn parse_meeting_id(s: &str) -> Result<MeetingId> {
+    let uuid = uuid::Uuid::parse_str(s).with_context(|| format!("invalid meeting id: {s:?}"))?;
+    Ok(MeetingId(uuid))
 }
 
 // ---------------------------------------------------------------------------

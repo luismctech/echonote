@@ -1,11 +1,23 @@
 //! # echo-storage
 //!
-//! SQLite-backed persistence adapter. Implements the `Storage` port of
-//! `echo-domain` using `sqlx` with SQLite + FTS5, optionally wrapped in
-//! SQLCipher for at-rest encryption.
+//! SQLite-backed persistence adapter. Implements [`MeetingStore`] using
+//! `sqlx` with the bundled SQLite driver. Migrations are embedded at
+//! compile time from `migrations/`.
 //!
-//! Schema and migrations live under `migrations/` (to be created Sprint 3)
-//! and follow the structure described in `docs/ARCHITECTURE.md` §8.2.
+//! Concurrency model:
+//!
+//! * The pool is `WAL` + `synchronous = NORMAL`, which gives us
+//!   concurrent readers and a single writer with crash-safe durability.
+//! * Per-meeting writes are serialized inside one transaction in
+//!   [`SqliteMeetingStore::append_segments`] so the streaming pipeline
+//!   never observes a half-written chunk.
+//!
+//! At-rest encryption (SQLCipher) lands in Sprint 3 behind a cargo
+//! feature flag — the API surface is already future-proof.
 
 #![forbid(unsafe_code)]
-#![warn(rust_2018_idioms, clippy::all)]
+#![warn(missing_docs, rust_2018_idioms, clippy::all)]
+
+mod sqlite;
+
+pub use sqlite::SqliteMeetingStore;

@@ -15,5 +15,6 @@
 pub mod services;
 pub mod use_cases;
 
+pub use services::meeting_recorder::MeetingRecorder;
 pub use use_cases::start_recording::{FrameSink, RecordToSink, RecordingReport};
 pub use use_cases::streaming::{StreamingError, StreamingHandle, StreamingPipeline};

@@ -1,9 +1,8 @@
 //! Tauri IPC commands exposed to the frontend.
 //!
-//! Each command here mirrors a typed contract in
-//! `src/lib/ipc.ts`. When the surface grows beyond a handful, switch to
-//! `tauri-specta` code generation — see ADR note in
-//! `docs/adr/0002-rust-plus-react-stack.md`.
+//! Each command here mirrors a typed contract in `src/lib/ipc.ts`. When
+//! the surface grows beyond a handful, switch to `tauri-specta` code
+//! generation — see ADR note in `docs/adr/0002-rust-plus-react-stack.md`.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -16,13 +15,14 @@ use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::task::JoinHandle;
 
-use echo_app::{StreamingHandle, StreamingPipeline};
+use echo_app::{MeetingRecorder, StreamingHandle, StreamingPipeline};
 use echo_asr::WhisperCppTranscriber;
 use echo_audio::{CpalMicrophoneCapture, RubatoResamplerAdapter};
 use echo_domain::{
-    AudioCapture, AudioFormat, AudioSource, CaptureSpec, Resampler, StreamingOptions,
-    StreamingSessionId, Transcriber, TranscriptEvent,
+    AudioCapture, AudioFormat, AudioSource, CaptureSpec, Meeting, MeetingId, MeetingStore,
+    MeetingSummary, Resampler, StreamingOptions, StreamingSessionId, Transcriber, TranscriptEvent,
 };
+use echo_storage::SqliteMeetingStore;
 
 // ---------------------------------------------------------------------------
 // Health check (Sprint 0 day 4)
@@ -58,20 +58,22 @@ pub fn health_check() -> HealthStatus {
 }
 
 // ---------------------------------------------------------------------------
-// Streaming pipeline (Sprint 0 day 7)
+// Streaming pipeline (Sprint 0 day 7) + persistence (Sprint 0 day 8)
 // ---------------------------------------------------------------------------
 
 /// Shared state injected through `tauri::Builder::manage`. Holds the
-/// shared adapters so the model is loaded once per app session and the
-/// in-flight streaming sessions so they can be stopped from the UI.
+/// shared adapters so the model is loaded once per app session, the
+/// SQLite-backed meeting store, the per-session meeting recorder and
+/// the in-flight streaming sessions so they can be stopped from the UI.
 pub struct AppState {
     capture: Arc<dyn AudioCapture>,
     resampler: Arc<dyn Resampler>,
     /// Async-locked: the whisper context is heavy and we only build it
-    /// on first use. `Option` so the loader can take ownership during
-    /// initialization without holding the lock across the disk read.
+    /// on first use.
     transcriber: AsyncMutex<Option<Arc<dyn Transcriber>>>,
     model_path: PathBuf,
+    store: Arc<dyn MeetingStore>,
+    recorder: Arc<MeetingRecorder>,
     sessions: Mutex<HashMap<StreamingSessionId, SessionEntry>>,
 }
 
@@ -81,20 +83,32 @@ struct SessionEntry {
 }
 
 impl AppState {
-    /// Build the shared state. The transcriber is *not* loaded eagerly
-    /// — the first `start_streaming` call will pay that cost (~150 ms
-    /// for `base.en` on Apple Silicon).
-    pub fn new() -> Self {
+    /// Build the shared state. Async because opening the SQLite database
+    /// runs migrations, which is I/O. The transcriber is *not* loaded
+    /// eagerly — the first `start_streaming` call pays that cost.
+    pub async fn initialize() -> Result<Self, String> {
         let model_path = std::env::var("ECHO_ASR_MODEL")
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from("./models/asr/ggml-base.en.bin"));
-        Self {
+
+        let db_path = resolve_db_path();
+        let store = SqliteMeetingStore::open(&db_path)
+            .await
+            .map_err(|e| format!("open meeting store at {}: {e}", db_path.display()))?;
+        tracing::info!(db_path = %db_path.display(), "meeting store ready");
+
+        let store: Arc<dyn MeetingStore> = Arc::new(store);
+        let recorder = Arc::new(MeetingRecorder::with_default_title(store.clone()));
+
+        Ok(Self {
             capture: Arc::new(CpalMicrophoneCapture::new()),
             resampler: Arc::new(RubatoResamplerAdapter),
             transcriber: AsyncMutex::new(None),
             model_path,
+            store,
+            recorder,
             sessions: Mutex::new(HashMap::new()),
-        }
+        })
     }
 
     async fn ensure_transcriber(&self) -> Result<Arc<dyn Transcriber>, String> {
@@ -119,10 +133,15 @@ impl AppState {
     }
 }
 
-impl Default for AppState {
-    fn default() -> Self {
-        Self::new()
+/// Resolve the SQLite database path. Honours `ECHO_DB_PATH` for tests
+/// and falls back to `./echonote.db` (next to the binary). A real
+/// installer would point this at the OS-appropriate app-data dir;
+/// that's deferred until Sprint 1 when the installer lands.
+fn resolve_db_path() -> PathBuf {
+    if let Ok(p) = std::env::var("ECHO_DB_PATH") {
+        return PathBuf::from(p);
     }
+    PathBuf::from("./echonote.db")
 }
 
 /// Options the frontend may pass when starting a streaming session.
@@ -143,7 +162,8 @@ pub struct StartStreamingOptions {
 
 /// Start a streaming transcription session. Events are pushed through
 /// the supplied `Channel<TranscriptEvent>` until [`stop_streaming`] is
-/// invoked or the capture stream ends.
+/// invoked or the capture stream ends. Persists to SQLite incrementally
+/// via the [`MeetingRecorder`].
 #[tauri::command]
 pub async fn start_streaming(
     state: State<'_, AppState>,
@@ -172,11 +192,13 @@ pub async fn start_streaming(
         .map_err(|e| format!("failed to start streaming: {e}"))?;
     let session_id = handle.session_id();
 
-    // Drain the event receiver in a background task and forward to the
-    // IPC channel. The handle moves into an Arc<AsyncMutex<…>> so
-    // stop_streaming can take ownership without racing the drain task.
+    // Drain the event receiver in a background task. Each event is
+    // first persisted (recorder.record) and then forwarded to the IPC
+    // channel; if persistence fails, we log and keep the UI responsive
+    // — losing a row is preferable to crashing the live transcript.
     let handle_arc = Arc::new(AsyncMutex::new(handle));
     let drain_handle = handle_arc.clone();
+    let recorder = state.recorder.clone();
     let join = tokio::spawn(async move {
         loop {
             let mut guard = drain_handle.lock().await;
@@ -184,6 +206,9 @@ pub async fn start_streaming(
             drop(guard);
             match evt {
                 Some(evt) => {
+                    if let Err(e) = recorder.record(&evt).await {
+                        tracing::warn!(error = %e, %session_id, "recorder.record failed");
+                    }
                     let terminal = matches!(
                         evt,
                         TranscriptEvent::Stopped { .. } | TranscriptEvent::Failed { .. }
@@ -241,4 +266,46 @@ pub async fn stop_streaming(
     }
     let _ = entry.join.await;
     Ok(true)
+}
+
+// ---------------------------------------------------------------------------
+// Meetings (Sprint 0 day 8)
+// ---------------------------------------------------------------------------
+
+/// List meetings, newest first.
+#[tauri::command]
+pub async fn list_meetings(
+    state: State<'_, AppState>,
+    limit: Option<u32>,
+) -> Result<Vec<MeetingSummary>, String> {
+    state
+        .store
+        .list(limit.unwrap_or(0))
+        .await
+        .map_err(|e| format!("list meetings: {e}"))
+}
+
+/// Fetch a single meeting (header + segments). Returns `null` when
+/// the id does not exist.
+#[tauri::command]
+pub async fn get_meeting(
+    state: State<'_, AppState>,
+    id: MeetingId,
+) -> Result<Option<Meeting>, String> {
+    state
+        .store
+        .get(id)
+        .await
+        .map_err(|e| format!("get meeting: {e}"))
+}
+
+/// Delete a meeting and its segments. Returns `true` when the row
+/// existed and was removed.
+#[tauri::command]
+pub async fn delete_meeting(state: State<'_, AppState>, id: MeetingId) -> Result<bool, String> {
+    state
+        .store
+        .delete(id)
+        .await
+        .map_err(|e| format!("delete meeting: {e}"))
 }

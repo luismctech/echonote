@@ -126,3 +126,46 @@ export async function stopStreaming(
 ): Promise<boolean> {
   return invoke<boolean>("stop_streaming", { sessionId });
 }
+
+// ---------------------------------------------------------------------------
+// Meetings (Sprint 0 day 8)
+// ---------------------------------------------------------------------------
+
+/** UUIDv7 string identifying a persisted meeting. */
+export type MeetingId = string;
+
+/** Lightweight projection used by the sidebar listing. */
+export type MeetingSummary = {
+  id: MeetingId;
+  title: string;
+  startedAt: string;
+  endedAt: string | null;
+  durationMs: number;
+  language: string | null;
+  segmentCount: number;
+};
+
+/** Full meeting aggregate (header + segments). */
+export type Meeting = MeetingSummary & {
+  inputFormat: AudioFormat;
+  segments: Segment[];
+};
+
+/**
+ * List meetings, newest first.
+ *
+ * @param limit Maximum rows to return. `0` (the default) means no cap.
+ */
+export async function listMeetings(limit = 0): Promise<MeetingSummary[]> {
+  return invoke<MeetingSummary[]>("list_meetings", { limit });
+}
+
+/** Fetch a single meeting (header + segments) or `null` when missing. */
+export async function getMeeting(id: MeetingId): Promise<Meeting | null> {
+  return invoke<Meeting | null>("get_meeting", { id });
+}
+
+/** Delete a meeting and its segments. Resolves to `true` when deleted. */
+export async function deleteMeeting(id: MeetingId): Promise<boolean> {
+  return invoke<boolean>("delete_meeting", { id });
+}

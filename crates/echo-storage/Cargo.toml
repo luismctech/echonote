@@ -18,5 +18,14 @@ thiserror.workspace = true
 tracing.workspace = true
 serde.workspace = true
 uuid.workspace = true
+time = { workspace = true, features = ["formatting", "parsing"] }
 
-# sqlx + sqlcipher lands Sprint 3 together with the schema migrations.
+# sqlx with the SQLite driver. Native TLS is irrelevant here so we ship
+# the smallest possible feature set; SQLCipher (for at-rest encryption)
+# is wired in Sprint 3 behind a cargo feature flag.
+sqlx.workspace = true
+
+[dev-dependencies]
+pretty_assertions.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
