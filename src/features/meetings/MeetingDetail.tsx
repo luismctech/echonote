@@ -1,9 +1,11 @@
 import { SpeakerChip } from "../../components/SpeakerChip";
+import { useMeetingSummary } from "../../hooks/useMeetingSummary";
 import { formatDate, formatDurationMs, formatTimestamp } from "../../lib/format";
 import { indexSpeakers, shortTag } from "../../lib/speakers";
 import type { SpeakerId } from "../../types/speaker";
 import type { MainView } from "../../types/view";
 import { SpeakersPanel } from "./SpeakersPanel";
+import { SummaryPanel } from "./SummaryPanel";
 
 /** Replay view for a single stored meeting. */
 export function MeetingDetail({
@@ -16,6 +18,12 @@ export function MeetingDetail({
     label: string | null,
   ) => Promise<void>;
 }) {
+  // Hooks must run on every render — call them BEFORE any of the
+  // early returns below so React's rules-of-hooks invariant holds
+  // when the meeting transitions from loading → loaded.
+  const meetingId = view.kind === "meeting" ? view.id : null;
+  const summaryState = useMeetingSummary(meetingId);
+
   if (view.loading) {
     return <p className="text-sm text-zinc-500">Loading meeting…</p>;
   }
@@ -42,6 +50,17 @@ export function MeetingDetail({
       {m.speakers.length > 0 && (
         <SpeakersPanel speakers={m.speakers} onRename={onRenameSpeaker} />
       )}
+
+      <SummaryPanel
+        summary={summaryState.summary}
+        loading={summaryState.loading}
+        generating={summaryState.generating}
+        error={summaryState.error}
+        onGenerate={() => {
+          void summaryState.generate();
+        }}
+      />
+
 
       <div className="min-h-0 flex-1 overflow-y-auto rounded-md border border-zinc-100 bg-zinc-50 p-3 text-sm leading-relaxed dark:border-zinc-900 dark:bg-zinc-900/60">
         {m.segments.length === 0 ? (

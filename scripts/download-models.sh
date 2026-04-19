@@ -9,11 +9,14 @@
 #   scripts/download-models.sh large-v3       # ~3.0 GB
 #   scripts/download-models.sh vad            # Silero VAD v5 (~2 MB)
 #   scripts/download-models.sh embed          # 3D-Speaker ERes2Net (~26 MB)
-#   scripts/download-models.sh --all          # base.en + small.en + vad + embed
+#   scripts/download-models.sh llm            # Qwen 2.5 7B Instruct Q4_K_M (~4.4 GB)
+#   scripts/download-models.sh llm-small      # Qwen 2.5 3B Instruct Q4_K_M (~1.9 GB)
+#   scripts/download-models.sh --all          # base.en + small.en + vad + embed (no LLM)
 #
 # ASR models are written to ./models/asr/ggml-<flavor>.bin
 # VAD model lives at         ./models/vad/silero_vad.onnx
 # Embedder lives at          ./models/embedder/eres2net_en_voxceleb.onnx
+# LLM models live at         ./models/llm/<name>.gguf
 # Existing files are skipped if their size looks right.
 # -----------------------------------------------------------------------------
 set -Eeuo pipefail
@@ -22,7 +25,8 @@ REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 ASR_DIR="${REPO_ROOT}/models/asr"
 VAD_DIR="${REPO_ROOT}/models/vad"
 EMBED_DIR="${REPO_ROOT}/models/embedder"
-mkdir -p "$ASR_DIR" "$VAD_DIR" "$EMBED_DIR"
+LLM_DIR="${REPO_ROOT}/models/llm"
+mkdir -p "$ASR_DIR" "$VAD_DIR" "$EMBED_DIR" "$LLM_DIR"
 # Back-compat alias for code paths that still reference $MODELS_DIR.
 MODELS_DIR="$ASR_DIR"
 
@@ -40,6 +44,18 @@ ERES2NET_URL="https://huggingface.co/csukuangfj/speaker-embedding-models/resolve
 # echo-diarize integration tests as ground-truth cross-speaker audio.
 ERES2NET_FIXTURE_URL="https://huggingface.co/csukuangfj/speaker-embedding-models/resolve/main/1-two-speakers-en.wav"
 ERES2NET_FIXTURE_DIR="${REPO_ROOT}/crates/echo-diarize/tests/fixtures"
+
+# Default LLM for summaries. Qwen 2.5 7B Instruct is multilingual (good
+# Spanish quality), permissively licensed (Apache 2.0), and the Q4_K_M
+# quantization fits in ~5 GB of RAM with ~6-8 t/s on Apple Silicon —
+# right inside the < 45 s/30 min target from DEVELOPMENT_PLAN.md §3.1
+# CU-04. The mirror is the official Qwen team's HF repo.
+QWEN_7B_URL="https://huggingface.co/Qwen/Qwen2.5-7B-Instruct-GGUF/resolve/main/qwen2.5-7b-instruct-q4_k_m.gguf"
+QWEN_7B_NAME="qwen2.5-7b-instruct-q4_k_m.gguf"
+# Smaller variant for laptops with limited RAM and faster iteration in
+# development. Same family + license, just fewer parameters.
+QWEN_3B_URL="https://huggingface.co/Qwen/Qwen2.5-3B-Instruct-GGUF/resolve/main/qwen2.5-3b-instruct-q4_k_m.gguf"
+QWEN_3B_NAME="qwen2.5-3b-instruct-q4_k_m.gguf"
 
 # --- cosmetics ---------------------------------------------------------------
 if [[ -t 1 ]]; then
@@ -186,6 +202,41 @@ download_eres2net() {
   printf "  ${GRN}✓${RST} two_speakers_en.wav (%d KiB)\n" "$fix_kib"
 }
 
+download_llm() {
+  local url="$1"
+  local fname="$2"
+  local expected_mib="$3"
+  local out="${LLM_DIR}/${fname}"
+
+  if [[ -f "$out" ]]; then
+    local got_mib
+    got_mib=$(( $(wc -c < "$out") / 1048576 ))
+    if (( got_mib < expected_mib * 9 / 10 )); then
+      warn "${fname} present but truncated (${got_mib} MiB, expected ~${expected_mib} MiB). Re-downloading."
+      rm -f "$out"
+    else
+      info "${fname} already present (${got_mib} MiB) — skipping."
+      return
+    fi
+  fi
+
+  info "Fetching ${fname} → ${out}"
+  if command -v curl >/dev/null 2>&1; then
+    curl --fail --location --progress-bar --output "$out" "$url"
+  elif command -v wget >/dev/null 2>&1; then
+    wget --show-progress --output-document="$out" "$url"
+  else
+    fail "Neither curl nor wget is installed."
+  fi
+
+  local got_mib
+  got_mib=$(( $(wc -c < "$out") / 1048576 ))
+  if (( got_mib < expected_mib * 9 / 10 )); then
+    fail "${fname} downloaded incompletely (${got_mib} MiB vs ~${expected_mib} MiB)"
+  fi
+  printf "  ${GRN}✓${RST} %s (%d MiB)\n" "$fname" "$got_mib"
+}
+
 main() {
   local choice="${1:-base.en}"
   case "$choice" in
@@ -196,7 +247,7 @@ main() {
       download_eres2net
       ;;
     --help|-h)
-      sed -n '4,17p' "$0"
+      sed -n '4,20p' "$0"
       exit 0
       ;;
     vad|silero|silero-vad)
@@ -207,6 +258,19 @@ main() {
     embed|embedder|eres2net)
       download_eres2net
       info "Embedder in ${EMBED_DIR}. Set ECHO_EMBED_MODEL=${EMBED_DIR}/eres2net_en_voxceleb.onnx if you move it."
+      return
+      ;;
+    llm|llm-7b|qwen-7b|qwen2.5-7b)
+      # Default summary model (DEVELOPMENT_PLAN.md §3.1 CU-04 +
+      # ARCHITECTURE.md profile "Balanced"). ~4.4 GB on disk.
+      download_llm "$QWEN_7B_URL" "$QWEN_7B_NAME" 4400
+      info "LLM in ${LLM_DIR}. Set ECHO_LLM_MODEL=${LLM_DIR}/${QWEN_7B_NAME} if you move it."
+      return
+      ;;
+    llm-small|llm-3b|qwen-3b|qwen2.5-3b)
+      # Lighter alternative for low-RAM hosts and dev iteration.
+      download_llm "$QWEN_3B_URL" "$QWEN_3B_NAME" 1900
+      info "LLM in ${LLM_DIR}. Set ECHO_LLM_MODEL=${LLM_DIR}/${QWEN_3B_NAME} if you move it."
       return
       ;;
     tiny|tiny.en|base|base.en|small|small.en|medium|medium.en|large-v3|large-v3-turbo)

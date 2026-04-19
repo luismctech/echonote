@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use crate::entities::meeting::{Meeting, MeetingId, MeetingSearchHit, MeetingSummary};
 use crate::entities::segment::Segment;
 use crate::entities::speaker::{Speaker, SpeakerId};
+use crate::entities::summary::Summary;
 use crate::ports::audio::AudioFormat;
 use crate::DomainError;
 
@@ -139,6 +140,26 @@ pub trait MeetingStore: Send + Sync {
     /// Delete a meeting and its segments. Returns `false` when the id
     /// did not exist.
     async fn delete(&self, meeting_id: MeetingId) -> Result<bool, DomainError>;
+
+    /// Persist (or replace) the LLM summary attached to a meeting.
+    ///
+    /// Re-running the summarizer overwrites the previous row for the
+    /// same `(meeting_id, template)` pair so a meeting only ever has
+    /// one current summary per template. Implementations MUST set
+    /// the summary's `created_at` as the source of truth — the value
+    /// on the input is treated as authoritative and stored verbatim.
+    ///
+    /// Returns [`DomainError::NotFound`] when `summary.meeting_id`
+    /// does not exist (so the caller can distinguish "the user
+    /// deleted the meeting while we were summarizing" from a real
+    /// storage failure).
+    async fn upsert_summary(&self, summary: &Summary) -> Result<(), DomainError>;
+
+    /// Most-recent summary attached to a meeting, or `None` when
+    /// no summary has been generated yet. The MVP only ships the
+    /// "general" template, so this returns at most one row; once
+    /// other templates land we'll add a `template` parameter.
+    async fn get_summary(&self, meeting_id: MeetingId) -> Result<Option<Summary>, DomainError>;
 
     /// Release any expensive resources (database pool, file handles)
     /// the adapter holds. Called once on app shutdown so the underlying

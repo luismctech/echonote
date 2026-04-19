@@ -94,6 +94,16 @@ sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio",
 # is enabled per-crate on macOS only (see crates/echo-asr/Cargo.toml).
 whisper-rs = { version = "0.16", default-features = false, features = ["tracing_backend"] }
 
+# LLM
+# llama-cpp-2 provides safe bindings to llama.cpp. We disable the default
+# feature set to opt out of `openmp` (which would force libomp at link
+# time on macOS) and `android-shared-stdcxx` (Android-only). Metal is
+# pulled in automatically by `llama-cpp-sys-2` when building on macOS
+# arm64, so no extra feature flag is required for Apple Silicon. CUDA /
+# Vulkan stay opt-in for downstream packagers.
+llama-cpp-2 = { version = "0.1", default-features = false }
+encoding_rs = "0.8"
+
 # Testing
 pretty_assertions = "1.4"
 tempfile = "3.10"

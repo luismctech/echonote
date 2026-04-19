@@ -19,4 +19,15 @@ tracing.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 
-# llama-cpp-rs with Metal backend will be added Sprint 0 day 7.
+# llama.cpp bindings — see workspace Cargo.toml for the rationale behind
+# the disabled default features. Metal is pulled in automatically on
+# macOS arm64 by llama-cpp-sys-2; no extra feature flag is needed.
+llama-cpp-2 = { workspace = true }
+# Token-piece decoding uses the same UTF-8 incremental decoder as the
+# upstream llama-cpp-rs example so multi-byte sequences split across
+# tokens are stitched back together correctly.
+encoding_rs = { workspace = true }
+
+[dev-dependencies]
+pretty_assertions.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

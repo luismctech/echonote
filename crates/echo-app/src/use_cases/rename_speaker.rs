@@ -114,6 +114,7 @@ mod tests {
 
     use echo_domain::{
         AudioFormat, CreateMeeting, FinalizeMeeting, Meeting, MeetingSummary, Segment, Speaker,
+        Summary,
     };
 
     /// Minimal in-memory store. Only implements the methods the use
@@ -181,6 +182,12 @@ mod tests {
             _: &str,
             _: u32,
         ) -> Result<Vec<echo_domain::MeetingSearchHit>, DomainError> {
+            unreachable!()
+        }
+        async fn upsert_summary(&self, _: &Summary) -> Result<(), DomainError> {
+            unreachable!()
+        }
+        async fn get_summary(&self, _: MeetingId) -> Result<Option<Summary>, DomainError> {
             unreachable!()
         }
     }

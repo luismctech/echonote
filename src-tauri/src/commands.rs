@@ -19,15 +19,17 @@ use tokio::task::JoinHandle;
 
 use echo_app::{
     MeetingRecorder, RenameSpeaker, RenameSpeakerError, StreamingHandle, StreamingPipeline,
+    SummarizeMeeting, SummarizeMeetingError,
 };
 use echo_asr::WhisperCppTranscriber;
 use echo_audio::{RoutingAudioCapture, RubatoResamplerAdapter};
 use echo_diarize::{Eres2NetEmbedder, OnlineDiarizer};
 use echo_domain::{
-    AudioCapture, AudioFormat, AudioSource, CaptureSpec, Diarizer, Meeting, MeetingId,
+    AudioCapture, AudioFormat, AudioSource, CaptureSpec, Diarizer, LlmModel, Meeting, MeetingId,
     MeetingSearchHit, MeetingStore, MeetingSummary, Resampler, SpeakerId, StreamingOptions,
-    StreamingSessionId, Transcriber, TranscriptEvent,
+    StreamingSessionId, Summary, Transcriber, TranscriptEvent,
 };
+use echo_llm::{LlamaCppLlm, LoadOptions as LlamaLoadOptions};
 use echo_storage::SqliteMeetingStore;
 
 // ---------------------------------------------------------------------------
@@ -89,6 +91,16 @@ pub struct AppState {
     /// task spawned by `start_streaming` can self-cleanup its own
     /// entry on terminal events without going through `tauri::State`.
     sessions: Arc<Mutex<HashMap<StreamingSessionId, SessionEntry>>>,
+    /// Path to the local LLM (.gguf) used for `summarize_meeting`.
+    /// Resolved at startup via `ECHO_LLM_MODEL` or
+    /// `models/llm/<preferred>.gguf`. The model itself is loaded
+    /// lazily on first use — same pattern as the whisper transcriber
+    /// — because the 7B Q4_K_M file pulls ~4.4 GB into RAM/VRAM and
+    /// most app launches do not summarise.
+    llm_model_path: PathBuf,
+    /// Lazily-loaded LLM. Wrapped in `AsyncMutex` because load is
+    /// cooperative (the first caller pays, the rest wait).
+    llm: AsyncMutex<Option<Arc<dyn LlmModel>>>,
 }
 
 struct SessionEntry {
@@ -172,11 +184,14 @@ impl AppState {
             // Matches what `scripts/download-models.sh embed` writes.
             "models/embedder/eres2net_en_voxceleb.onnx",
         );
+        let llm_model_path =
+            resolve_asset_path(std::env::var("ECHO_LLM_MODEL").ok(), preferred_llm_model());
 
         let db_path = resolve_db_path();
         tracing::info!(
             asr_model = %model_path.display(),
             embed_model = %embed_model_path.display(),
+            llm_model = %llm_model_path.display(),
             db_path = %db_path.display(),
             "echo-shell paths resolved"
         );
@@ -199,7 +214,42 @@ impl AppState {
             recorder,
             rename_speaker,
             sessions: Arc::new(Mutex::new(HashMap::new())),
+            llm_model_path,
+            llm: AsyncMutex::new(None),
         })
+    }
+
+    /// Lazily load the local LLM. Cached for the lifetime of the
+    /// process — model load is the expensive operation (mmap + CUDA/
+    /// Metal init), per-prompt generation runs against the cached
+    /// instance.
+    async fn ensure_llm(&self) -> Result<Arc<dyn LlmModel>, String> {
+        let mut slot = self.llm.lock().await;
+        if let Some(m) = slot.as_ref() {
+            return Ok(m.clone());
+        }
+        if !self.llm_model_path.exists() {
+            return Err(format!(
+                "LLM model not found at {}. Set ECHO_LLM_MODEL or run \
+                 `scripts/download-models.sh llm`.",
+                self.llm_model_path.display()
+            ));
+        }
+        let path = self.llm_model_path.clone();
+        let load_opts = LlamaLoadOptions::default();
+        // `LlamaCppLlm::load_with` is synchronous (mmap + ggml init);
+        // off-load to the blocking pool so we never stall the Tauri
+        // command executor while a 4 GB model loads.
+        let loaded = tokio::task::spawn_blocking({
+            let path = path.clone();
+            move || LlamaCppLlm::load_with(&path, load_opts)
+        })
+        .await
+        .map_err(|e| format!("LLM load task panicked: {e}"))?
+        .map_err(|e| format!("failed to load LLM at {}: {e}", path.display()))?;
+        let arc: Arc<dyn LlmModel> = Arc::new(loaded);
+        *slot = Some(arc.clone());
+        Ok(arc)
     }
 
     /// Build a fresh diarizer for the upcoming session. Each session
@@ -257,6 +307,28 @@ impl AppState {
 /// that's deferred until Sprint 1 when the installer lands.
 fn resolve_db_path() -> PathBuf {
     resolve_asset_path(std::env::var("ECHO_DB_PATH").ok(), "echonote.db")
+}
+
+/// Pick the LLM model to load by default, in priority order:
+/// the largest installed Qwen 2.5 first (best quality), then the
+/// 3B fallback for dev machines / lower-spec hardware. Resolution
+/// against the workspace happens later in [`resolve_asset_path`];
+/// here we only pick a *relative* path that the resolver checks
+/// for existence.
+fn preferred_llm_model() -> &'static str {
+    const CANDIDATES: &[&str] = &[
+        "models/llm/qwen2.5-7b-instruct-q4_k_m.gguf",
+        "models/llm/qwen2.5-3b-instruct-q4_k_m.gguf",
+    ];
+    let root = workspace_root();
+    for rel in CANDIDATES {
+        if root.join(rel).exists() {
+            return rel;
+        }
+    }
+    // Nothing installed yet — default to the canonical 7B path so the
+    // error message points the user at the right download command.
+    "models/llm/qwen2.5-7b-instruct-q4_k_m.gguf"
 }
 
 /// Pick the ASR model to load by default, in priority order:
@@ -624,4 +696,50 @@ pub async fn rename_speaker(
         .await
         .map_err(|e| format!("reload meeting: {e}"))?
         .ok_or_else(|| format!("meeting {meeting_id} disappeared after rename"))
+}
+
+// ---------------------------------------------------------------------------
+// LLM summaries (Sprint 1 day 9)
+// ---------------------------------------------------------------------------
+
+/// Generate (or regenerate) the local-LLM summary for a meeting.
+///
+/// Triggered explicitly by the UI ("Generate summary" button). The
+/// command loads the LLM lazily on first use, prompts it with the
+/// stored transcript, parses the JSON payload, and persists the
+/// resulting `Summary` to SQLite. Errors are mapped to user-facing
+/// strings so the toast layer can surface them verbatim.
+#[tauri::command]
+pub async fn summarize_meeting(
+    state: State<'_, AppState>,
+    meeting_id: MeetingId,
+) -> Result<Summary, String> {
+    let llm = state.ensure_llm().await?;
+    let use_case = SummarizeMeeting::new(llm, state.store.clone());
+    use_case.execute(meeting_id).await.map_err(|e| match e {
+        SummarizeMeetingError::NotFound(id) => {
+            format!("not found: meeting {id} does not exist")
+        }
+        SummarizeMeetingError::EmptyTranscript(id) => {
+            format!("empty transcript: meeting {id} has no segments to summarise")
+        }
+        SummarizeMeetingError::Llm(err) => format!("llm: {err}"),
+        SummarizeMeetingError::Storage(err) => format!("storage: {err}"),
+    })
+}
+
+/// Fetch the most recent summary for a meeting, or `null` when none
+/// has been generated yet. The frontend uses this on `MeetingDetail`
+/// mount so the panel can render either the existing summary or the
+/// "Generate" affordance without a redundant generate call.
+#[tauri::command]
+pub async fn get_summary(
+    state: State<'_, AppState>,
+    meeting_id: MeetingId,
+) -> Result<Option<Summary>, String> {
+    state
+        .store
+        .get_summary(meeting_id)
+        .await
+        .map_err(|e| format!("get summary: {e}"))
 }

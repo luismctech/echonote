@@ -34,7 +34,8 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 
 use echo_app::{
-    compute_wer, FrameSink, MeetingRecorder, RecordToSink, StreamingPipeline, WerStats,
+    compute_wer, FrameSink, MeetingRecorder, RecordToSink, StreamingPipeline, SummarizeMeeting,
+    SummarizeMeetingError, WerStats,
 };
 use echo_asr::WhisperCppTranscriber;
 use echo_audio::{
@@ -44,9 +45,10 @@ use echo_audio::{
 use echo_diarize::{Eres2NetEmbedder, OnlineDiarizer};
 use echo_domain::{
     AudioCapture, AudioFormat, AudioFrame, AudioSource, CaptureSpec, Diarizer, DomainError,
-    MeetingId, MeetingStore, Resampler, StreamingOptions, TranscribeOptions, Transcriber,
-    TranscriptEvent,
+    LlmModel, MeetingId, MeetingStore, Resampler, StreamingOptions, SummaryContent,
+    TranscribeOptions, Transcriber, TranscriptEvent,
 };
+use echo_llm::{LlamaCppLlm, LoadOptions as LlamaLoadOptions};
 use echo_storage::SqliteMeetingStore;
 
 /// EchoNote CLI prototype.
@@ -159,13 +161,27 @@ enum Command {
         embed_model: Option<PathBuf>,
     },
 
-    /// Summarize a transcript using the local LLM.
+    /// Summarize a stored meeting using the local LLM (Sprint 1 day 9).
+    ///
+    /// Loads the persisted meeting, prompts the LLM with the structured
+    /// transcript, parses the JSON payload (with one corrective retry
+    /// and free-text fallback), and upserts the resulting `Summary`.
+    /// The summary is also printed to stdout — JSON when `--json`,
+    /// a plain text rendering otherwise.
     Summarize {
-        /// Path to a plain-text transcript.
-        input: String,
-        /// Template id (general, one_on_one, sprint_review, ...).
-        #[arg(long, default_value = "general")]
-        template: String,
+        /// Meeting UUIDv7 (positional form).
+        #[arg(value_name = "ID")]
+        id_positional: Option<String>,
+        /// Meeting UUIDv7 (flag form).
+        #[arg(long = "id", value_name = "ID", conflicts_with = "id_positional")]
+        id_flag: Option<String>,
+        /// Path to the GGUF LLM model. Defaults to `ECHO_LLM_MODEL`
+        /// or the first installed Qwen 2.5 GGUF under `models/llm/`.
+        #[arg(long, env = "ECHO_LLM_MODEL")]
+        model: Option<PathBuf>,
+        /// Emit the full `Summary` as JSON instead of plain text.
+        #[arg(long)]
+        json: bool,
     },
 
     /// Full end-to-end pipeline: record → transcribe → summarize.
@@ -348,14 +364,12 @@ async fn main() -> Result<()> {
             )
             .await
         }
-        Command::Summarize { input, template } => {
-            tracing::info!(
-                input = %input,
-                template = %template,
-                "summarize subcommand not yet wired (Sprint 0 day 7)"
-            );
-            Ok(())
-        }
+        Command::Summarize {
+            id_positional,
+            id_flag,
+            model,
+            json,
+        } => run_summarize(id_positional, id_flag, model, json).await,
         Command::Run { duration } => {
             tracing::info!(
                 duration_secs = duration,
@@ -765,6 +779,142 @@ async fn run_stream(
     }
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// `summarize` subcommand (Sprint 1 day 9)
+// ---------------------------------------------------------------------------
+
+/// Resolve the GGUF model path: `--model`, then `ECHO_LLM_MODEL`,
+/// then the first installed Qwen 2.5 GGUF under `models/llm/`. Mirrors
+/// the resolution order the Tauri shell uses.
+fn resolve_llm_model(explicit: Option<PathBuf>) -> Result<PathBuf> {
+    if let Some(p) = explicit {
+        if !p.exists() {
+            anyhow::bail!("LLM model not found at {}", p.display());
+        }
+        return Ok(p);
+    }
+    const CANDIDATES: &[&str] = &[
+        "./models/llm/qwen2.5-7b-instruct-q4_k_m.gguf",
+        "./models/llm/qwen2.5-3b-instruct-q4_k_m.gguf",
+    ];
+    for rel in CANDIDATES {
+        let p = PathBuf::from(rel);
+        if p.exists() {
+            return Ok(p);
+        }
+    }
+    anyhow::bail!(
+        "no GGUF LLM model found. Set --model or ECHO_LLM_MODEL, or run \
+         `scripts/download-models.sh llm` to fetch the default."
+    )
+}
+
+async fn run_summarize(
+    id_positional: Option<String>,
+    id_flag: Option<String>,
+    model: Option<PathBuf>,
+    json: bool,
+) -> Result<()> {
+    let meeting_id = resolve_meeting_id(id_positional, id_flag)?;
+    let model_path = resolve_llm_model(model)?;
+
+    // Load model on the blocking pool (mmap + ggml init are sync and
+    // expensive). The Tauri shell uses the exact same pattern.
+    println!("loading LLM: {}", model_path.display());
+    let load_started = std::time::Instant::now();
+    let llm = tokio::task::spawn_blocking({
+        let p = model_path.clone();
+        move || LlamaCppLlm::load_with(&p, LlamaLoadOptions::default())
+    })
+    .await
+    .context("LLM load task panicked")?
+    .map_err(anyhow::Error::from)
+    .with_context(|| format!("failed to load LLM at {}", model_path.display()))?;
+    tracing::info!(
+        model = %model_path.display(),
+        load_ms = load_started.elapsed().as_millis() as u64,
+        "llm ready"
+    );
+    let llm: Arc<dyn LlmModel> = Arc::new(llm);
+
+    let store: Arc<dyn MeetingStore> = Arc::new(open_cli_store().await?);
+    let use_case = SummarizeMeeting::new(llm, store);
+
+    let started = std::time::Instant::now();
+    let summary = use_case.execute(meeting_id).await.map_err(|e| match e {
+        SummarizeMeetingError::NotFound(id) => {
+            anyhow::anyhow!("meeting {id} not found")
+        }
+        SummarizeMeetingError::EmptyTranscript(id) => {
+            anyhow::anyhow!("meeting {id} has no segments to summarise")
+        }
+        SummarizeMeetingError::Llm(err) => anyhow::anyhow!("llm: {err}"),
+        SummarizeMeetingError::Storage(err) => anyhow::anyhow!("storage: {err}"),
+    })?;
+    let elapsed = started.elapsed();
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&summary)?);
+        return Ok(());
+    }
+
+    println!(
+        "\nsummary {} (model={} · {:.2}s)",
+        summary.id.0,
+        summary.model,
+        elapsed.as_secs_f64(),
+    );
+    if let Some(lang) = &summary.language {
+        println!("language: {lang}");
+    }
+    println!();
+
+    match &summary.content {
+        SummaryContent::General {
+            summary: text,
+            key_points,
+            decisions,
+            action_items,
+            open_questions,
+        } => {
+            println!("## Summary\n{text}\n");
+            print_section("Key points", key_points);
+            print_section("Decisions", decisions);
+            if !action_items.is_empty() {
+                println!("## Action items");
+                for it in action_items {
+                    let owner = it.owner.as_deref().unwrap_or("-");
+                    let due = it.due.as_deref().unwrap_or("-");
+                    println!("  · {} (owner={owner}, due={due})", it.task);
+                }
+                println!();
+            }
+            print_section("Open questions", open_questions);
+        }
+        SummaryContent::FreeText { text } => {
+            println!("## Summary (free text — JSON parse failed)\n{text}");
+        }
+        // SummaryContent is `#[non_exhaustive]`; future templates will
+        // need an explicit branch here, but for now we match all known
+        // variants and serde would have caught any unknown one earlier.
+        _ => {
+            println!("(unknown summary template — re-run with --json to inspect)");
+        }
+    }
+    Ok(())
+}
+
+fn print_section(title: &str, items: &[String]) {
+    if items.is_empty() {
+        return;
+    }
+    println!("## {title}");
+    for it in items {
+        println!("  · {it}");
+    }
+    println!();
 }
 
 // ---------------------------------------------------------------------------

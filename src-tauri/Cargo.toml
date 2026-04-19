@@ -28,6 +28,7 @@ echo-asr = { path = "../crates/echo-asr" }
 echo-audio = { path = "../crates/echo-audio" }
 echo-diarize = { path = "../crates/echo-diarize" }
 echo-domain = { path = "../crates/echo-domain" }
+echo-llm = { path = "../crates/echo-llm" }
 echo-storage = { path = "../crates/echo-storage" }
 echo-telemetry = { path = "../crates/echo-telemetry" }
 

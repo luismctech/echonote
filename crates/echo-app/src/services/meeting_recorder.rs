@@ -432,6 +432,17 @@ mod tests {
             // FakeStore is only used to test the recorder, not search.
             Ok(Vec::new())
         }
+        async fn upsert_summary(&self, _summary: &echo_domain::Summary) -> Result<(), DomainError> {
+            // The recorder never writes summaries; the SummarizeMeeting
+            // use case owns that path.
+            unreachable!("recorder tests don't persist summaries")
+        }
+        async fn get_summary(
+            &self,
+            _meeting_id: MeetingId,
+        ) -> Result<Option<echo_domain::Summary>, DomainError> {
+            unreachable!()
+        }
     }
 
     fn segment(start_ms: u32, end_ms: u32, text: &str) -> Segment {

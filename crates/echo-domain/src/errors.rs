@@ -64,6 +64,13 @@ pub enum DomainError {
     #[error("storage error: {0}")]
     Storage(String),
 
+    /// The local LLM adapter failed at runtime (load error, decoding
+    /// crash, context-window overflow, OOM). Mapped from
+    /// `llama-cpp-rs` errors at the infrastructure boundary so the
+    /// application layer can react to summary failures uniformly.
+    #[error("llm inference failed: {0}")]
+    LlmFailed(String),
+
     /// Generic invariant violation. Prefer adding a specific variant when
     /// the error recurs in multiple places.
     #[error("domain invariant violated: {0}")]

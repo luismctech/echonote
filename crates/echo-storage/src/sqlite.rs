@@ -13,7 +13,8 @@ use uuid::Uuid;
 
 use echo_domain::{
     AudioFormat, CreateMeeting, DomainError, FinalizeMeeting, Meeting, MeetingId, MeetingSearchHit,
-    MeetingStore, MeetingSummary, Segment, SegmentId, Speaker, SpeakerId,
+    MeetingStore, MeetingSummary, Segment, SegmentId, Speaker, SpeakerId, Summary, SummaryContent,
+    SummaryId,
 };
 
 /// Embedded migrations (`crates/echo-storage/migrations/`).
@@ -456,6 +457,109 @@ impl MeetingStore for SqliteMeetingStore {
         // from the shell's shutdown hook so SQLite has a chance to
         // checkpoint before `_exit` skips destructors.
         SqliteMeetingStore::close(self).await;
+    }
+
+    async fn upsert_summary(&self, summary: &Summary) -> Result<(), DomainError> {
+        // Persist a freshly-generated `Summary` to SQLite. The unique
+        // index on (meeting_id, template) means re-running the
+        // `SummarizeMeeting` use case on the same meeting REPLACES the
+        // previous row instead of accumulating drafts — that matches
+        // the use case contract (one current summary per template).
+        //
+        // We store the full `SummaryContent` as JSON in `payload`
+        // (with the `template` tag included) and denormalise the
+        // discriminator into its own column so we can index it. The
+        // round-trip in `get_summary` ignores the column and parses
+        // the payload back, which keeps the JSON the source of truth
+        // and the column purely a routing aid.
+        // Serialise the variant first, then read its `template`
+        // discriminator out of the resulting JSON. That way the
+        // column we index on is guaranteed to match what serde wrote
+        // — and the storage adapter does not have to be updated
+        // every time a new `SummaryContent` variant ships (the enum
+        // is `#[non_exhaustive]` for exactly this reason).
+        let payload_value = serde_json::to_value(&summary.content)
+            .map_err(|e| db_err(format!("encode summary payload: {e}")))?;
+        let template = payload_value
+            .get("template")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| db_err("summary payload missing `template` discriminator"))?
+            .to_owned();
+        let payload = serde_json::to_string(&payload_value)
+            .map_err(|e| db_err(format!("re-encode summary payload: {e}")))?;
+        let created_at = summary
+            .created_at
+            .format(&Rfc3339)
+            .map_err(|e| db_err(format!("format summary created_at: {e}")))?;
+
+        sqlx::query(
+            r#"INSERT INTO summaries
+                   (id, meeting_id, template, model, language, created_at, payload)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(meeting_id, template) DO UPDATE SET
+                   id         = excluded.id,
+                   model      = excluded.model,
+                   language   = excluded.language,
+                   created_at = excluded.created_at,
+                   payload    = excluded.payload"#,
+        )
+        .bind(summary.id.0.to_string())
+        .bind(summary.meeting_id.to_string())
+        .bind(&template)
+        .bind(&summary.model)
+        .bind(summary.language.as_deref())
+        .bind(&created_at)
+        .bind(&payload)
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx("upsert summary"))?;
+
+        debug!(
+            meeting.id = %summary.meeting_id,
+            summary.id = %summary.id.0,
+            template = %template,
+            "summary upserted"
+        );
+        Ok(())
+    }
+
+    async fn get_summary(&self, meeting_id: MeetingId) -> Result<Option<Summary>, DomainError> {
+        // `LIMIT 1` ordered by created_at DESC: the UI only ever asks
+        // for the *current* summary of a meeting (the use case
+        // upserts on (meeting_id, template), so today there is at
+        // most one row per template anyway, but ordering keeps us
+        // honest the day a second template ships).
+        let row = sqlx::query(
+            r#"SELECT id, model, language, created_at, payload
+                  FROM summaries
+                 WHERE meeting_id = ?
+              ORDER BY created_at DESC
+                 LIMIT 1"#,
+        )
+        .bind(meeting_id.to_string())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(map_sqlx("fetch summary"))?;
+
+        let Some(row) = row else { return Ok(None) };
+
+        let id_text: String = row.get(0);
+        let model: String = row.get(1);
+        let language: Option<String> = row.get(2);
+        let created_text: String = row.get(3);
+        let payload: String = row.get(4);
+
+        let content: SummaryContent = serde_json::from_str(&payload)
+            .map_err(|e| db_err(format!("decode summary payload: {e}")))?;
+
+        Ok(Some(Summary {
+            id: SummaryId(parse_uuid(&id_text, "summary")?),
+            meeting_id,
+            model,
+            language,
+            created_at: parse_rfc3339(&created_text, "summary created_at")?,
+            content,
+        }))
     }
 }
 
@@ -1011,6 +1115,170 @@ mod tests {
         assert_eq!(sanitize_fts_query(r#"*()^"#), None);
         assert_eq!(sanitize_fts_query(""), None);
         assert_eq!(sanitize_fts_query("   "), None);
+    }
+
+    // ---------- LLM summaries (Sprint 1 day 9) -----------------------------
+
+    fn general_summary(meeting: MeetingId, model: &str, language: Option<&str>) -> Summary {
+        Summary {
+            id: SummaryId::new(),
+            meeting_id: meeting,
+            model: model.into(),
+            language: language.map(str::to_owned),
+            created_at: OffsetDateTime::now_utc(),
+            content: SummaryContent::General {
+                summary: "Discussed Q4 launch.".into(),
+                key_points: vec!["Ship beta".into(), "Hire eng".into()],
+                decisions: vec!["Move launch to Nov".into()],
+                action_items: vec![echo_domain::ActionItem {
+                    task: "Draft press release".into(),
+                    owner: Some("Ana".into()),
+                    due: Some("2025-10-30".into()),
+                }],
+                open_questions: vec!["Who owns translation?".into()],
+            },
+        }
+    }
+
+    async fn make_meeting(store: &SqliteMeetingStore) -> MeetingId {
+        let id = MeetingId::new();
+        store
+            .create(CreateMeeting {
+                id,
+                title: "Standup".into(),
+                input_format: fmt(),
+            })
+            .await
+            .unwrap();
+        id
+    }
+
+    #[tokio::test]
+    async fn upsert_summary_round_trips_through_get_summary() {
+        let store = SqliteMeetingStore::open_in_memory().await.unwrap();
+        let mid = make_meeting(&store).await;
+
+        // Empty meeting → no summary yet.
+        assert!(store.get_summary(mid).await.unwrap().is_none());
+
+        let s = general_summary(mid, "qwen2.5-7b-instruct-q4_k_m", Some("es"));
+        store.upsert_summary(&s).await.unwrap();
+
+        let fetched = store.get_summary(mid).await.unwrap().expect("row exists");
+        assert_eq!(fetched.id, s.id);
+        assert_eq!(fetched.meeting_id, s.meeting_id);
+        assert_eq!(fetched.model, s.model);
+        assert_eq!(fetched.language.as_deref(), Some("es"));
+        // Same variant + payload survived the JSON round-trip.
+        match (&fetched.content, &s.content) {
+            (
+                SummaryContent::General {
+                    summary: a,
+                    key_points: ak,
+                    decisions: ad,
+                    action_items: aa,
+                    open_questions: aq,
+                },
+                SummaryContent::General {
+                    summary: b,
+                    key_points: bk,
+                    decisions: bd,
+                    action_items: ba,
+                    open_questions: bq,
+                },
+            ) => {
+                assert_eq!(a, b);
+                assert_eq!(ak, bk);
+                assert_eq!(ad, bd);
+                assert_eq!(aa, ba);
+                assert_eq!(aq, bq);
+            }
+            _ => panic!("variant mismatch"),
+        }
+    }
+
+    #[tokio::test]
+    async fn upsert_summary_replaces_previous_row_for_same_template() {
+        let store = SqliteMeetingStore::open_in_memory().await.unwrap();
+        let mid = make_meeting(&store).await;
+
+        let s1 = general_summary(mid, "qwen2.5-3b", None);
+        store.upsert_summary(&s1).await.unwrap();
+
+        // Re-generate with a different model + content. The unique
+        // index on (meeting_id, template) MUST replace, not duplicate.
+        let mut s2 = general_summary(mid, "qwen2.5-7b", Some("en"));
+        if let SummaryContent::General {
+            ref mut summary, ..
+        } = s2.content
+        {
+            *summary = "Replaced summary text".into();
+        }
+        store.upsert_summary(&s2).await.unwrap();
+
+        let row_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM summaries WHERE meeting_id = ?")
+                .bind(mid.to_string())
+                .fetch_one(&store.pool)
+                .await
+                .unwrap();
+        assert_eq!(row_count, 1, "second upsert must replace, not append");
+
+        let fetched = store.get_summary(mid).await.unwrap().unwrap();
+        assert_eq!(fetched.id, s2.id, "row id is the new one");
+        assert_eq!(fetched.model, "qwen2.5-7b");
+        assert_eq!(fetched.language.as_deref(), Some("en"));
+        if let SummaryContent::General { summary, .. } = fetched.content {
+            assert_eq!(summary, "Replaced summary text");
+        } else {
+            panic!("expected General after replace");
+        }
+    }
+
+    #[tokio::test]
+    async fn freetext_summary_round_trips() {
+        // The fallback path the use case takes when the LLM keeps
+        // returning malformed JSON: a `FreeText` payload must
+        // serialise/deserialise without losing its discriminator.
+        let store = SqliteMeetingStore::open_in_memory().await.unwrap();
+        let mid = make_meeting(&store).await;
+
+        let s = Summary {
+            id: SummaryId::new(),
+            meeting_id: mid,
+            model: "qwen2.5-7b".into(),
+            language: None,
+            created_at: OffsetDateTime::now_utc(),
+            content: SummaryContent::FreeText {
+                text: "raw model output that was not valid JSON".into(),
+            },
+        };
+        store.upsert_summary(&s).await.unwrap();
+
+        let fetched = store.get_summary(mid).await.unwrap().unwrap();
+        match fetched.content {
+            SummaryContent::FreeText { text } => {
+                assert_eq!(text, "raw model output that was not valid JSON");
+            }
+            _ => panic!("expected FreeText variant"),
+        }
+    }
+
+    #[tokio::test]
+    async fn deleting_meeting_cascades_to_summary() {
+        let store = SqliteMeetingStore::open_in_memory().await.unwrap();
+        let mid = make_meeting(&store).await;
+        store
+            .upsert_summary(&general_summary(mid, "qwen2.5-7b", Some("es")))
+            .await
+            .unwrap();
+        assert!(store.get_summary(mid).await.unwrap().is_some());
+
+        store.delete(mid).await.unwrap();
+        assert!(
+            store.get_summary(mid).await.unwrap().is_none(),
+            "ON DELETE CASCADE failed: stale summary leaked"
+        );
     }
 
     #[tokio::test]

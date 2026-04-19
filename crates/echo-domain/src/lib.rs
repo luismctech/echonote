@@ -26,6 +26,7 @@ pub use ports::audio::{
     Sample,
 };
 pub use ports::diarizer::Diarizer;
+pub use ports::llm::{GenerateOptions, LlmModel};
 pub use ports::resampler::Resampler;
 pub use ports::transcriber::{TranscribeOptions, Transcriber, Transcript};
 pub use ports::vad::{Vad, VoiceState};
@@ -34,4 +35,5 @@ pub use entities::meeting::{Meeting, MeetingId, MeetingSearchHit, MeetingSummary
 pub use entities::segment::{Segment, SegmentId};
 pub use entities::speaker::{Speaker, SpeakerId};
 pub use entities::streaming::{StreamingOptions, StreamingSessionId, TranscriptEvent};
+pub use entities::summary::{ActionItem, Summary, SummaryContent, SummaryId};
 pub use ports::storage::{CreateMeeting, FinalizeMeeting, MeetingStore};

@@ -27,6 +27,7 @@ import type {
   StreamingSessionId,
   TranscriptEvent,
 } from "../types/streaming";
+import type { Summary } from "../types/summary";
 
 // ---------------------------------------------------------------------------
 // Health
@@ -133,4 +134,39 @@ export async function searchMeetings(
   limit = 20,
 ): Promise<MeetingSearchHit[]> {
   return invoke<MeetingSearchHit[]>("search_meetings", { query, limit });
+}
+
+// ---------------------------------------------------------------------------
+// LLM summaries (Sprint 1 day 9)
+// ---------------------------------------------------------------------------
+
+/**
+ * Generate (or regenerate) the local-LLM summary for a meeting.
+ *
+ * Loads the LLM lazily on first call (the model file is ~4.4 GB for
+ * Qwen 2.5 7B Q4_K_M, so the first invocation in a session is the
+ * slow one). Subsequent calls reuse the cached model. The use case
+ * upserts on (meetingId, template), so re-running this command on
+ * the same meeting REPLACES the previous summary instead of
+ * appending — matches the `Generate again` UX.
+ *
+ * Backend errors surface as plain strings ready for the toast
+ * layer (`not found:`, `empty transcript:`, `llm:`, `storage:`).
+ */
+export async function summarizeMeeting(
+  meetingId: MeetingId,
+): Promise<Summary> {
+  return invoke<Summary>("summarize_meeting", { meetingId });
+}
+
+/**
+ * Fetch the most recent summary for a meeting, or `null` when none
+ * has been generated yet. Wired into `MeetingDetail` mount so the
+ * panel can decide between rendering an existing summary and the
+ * "Generate" affordance without paying for a regenerate.
+ */
+export async function getSummary(
+  meetingId: MeetingId,
+): Promise<Summary | null> {
+  return invoke<Summary | null>("get_summary", { meetingId });
 }
