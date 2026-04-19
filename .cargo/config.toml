@@ -1,26 +1,27 @@
 # Workspace-wide cargo configuration.
 #
-# We add the Swift 5.5 macOS runtime to the linker's runtime search path
-# so that crates with a vendored Swift bridge (notably `screencapturekit`,
-# pulled in by `echo-audio` for ScreenCaptureKit-based system-audio
-# capture) can locate `libswift_Concurrency.dylib` at test/run time.
+# Swift runtime resolution for `screencapturekit` (vendored Swift
+# bridge, pulled in by `echo-audio` on macOS):
 #
-# We list both the Command Line Tools and Xcode default toolchain
-# locations: dyld silently skips paths that don't exist, so adding both
-# covers dev machines (CommandLineTools-only) and CI runners (Xcode).
-# The `/usr/lib/swift` entry catches the OS-shipped overlays for
-# everything except Concurrency.
+# - `/usr/lib/swift` is OS-shipped and present on every macOS install
+#   from 12 onwards. The Concurrency dylib lives in the dyld shared
+#   cache, so it isn't visible via `ls` but dyld resolves it from
+#   that path. This is the only entry we *want* on a fresh user box.
+#
+# - The CommandLineTools / Xcode toolchain entries are guarded by an
+#   environment variable so developers who hit a Swift mismatch can
+#   opt back in (`ECHO_SWIFT_TOOLCHAIN_RPATH=1 cargo …`). They are
+#   *off by default* because mixing the OS Concurrency with the
+#   toolchain copy triggers `objc[…]: Class … is implemented in both`
+#   warnings and "spurious casting failures and mysterious crashes"
+#   per Apple's own dyld diagnostic.
 
 [target.aarch64-apple-darwin]
 rustflags = [
-    "-C", "link-arg=-Wl,-rpath,/Library/Developer/CommandLineTools/usr/lib/swift-5.5/macosx",
-    "-C", "link-arg=-Wl,-rpath,/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift-5.5/macosx",
     "-C", "link-arg=-Wl,-rpath,/usr/lib/swift",
 ]
 
 [target.x86_64-apple-darwin]
 rustflags = [
-    "-C", "link-arg=-Wl,-rpath,/Library/Developer/CommandLineTools/usr/lib/swift-5.5/macosx",
-    "-C", "link-arg=-Wl,-rpath,/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift-5.5/macosx",
     "-C", "link-arg=-Wl,-rpath,/usr/lib/swift",
 ]

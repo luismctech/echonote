@@ -17,7 +17,7 @@ use tokio::task::JoinHandle;
 
 use echo_app::{MeetingRecorder, StreamingHandle, StreamingPipeline};
 use echo_asr::WhisperCppTranscriber;
-use echo_audio::{CpalMicrophoneCapture, RubatoResamplerAdapter};
+use echo_audio::{RoutingAudioCapture, RubatoResamplerAdapter};
 use echo_domain::{
     AudioCapture, AudioFormat, AudioSource, CaptureSpec, Meeting, MeetingId, MeetingStore,
     MeetingSummary, Resampler, StreamingOptions, StreamingSessionId, Transcriber, TranscriptEvent,
@@ -101,7 +101,10 @@ impl AppState {
         let recorder = Arc::new(MeetingRecorder::with_default_title(store.clone()));
 
         Ok(Self {
-            capture: Arc::new(CpalMicrophoneCapture::new()),
+            // Single facade for both the cpal mic and the macOS
+            // ScreenCaptureKit loopback. The `source` field of
+            // `StartStreamingOptions` decides which one runs.
+            capture: Arc::new(RoutingAudioCapture::with_default_adapters()),
             resampler: Arc::new(RubatoResamplerAdapter),
             transcriber: AsyncMutex::new(None),
             model_path,
@@ -144,14 +147,40 @@ fn resolve_db_path() -> PathBuf {
     PathBuf::from("./echonote.db")
 }
 
+/// IPC mirror of [`echo_domain::AudioSource`] with camelCase naming
+/// so the frontend stays stylistically consistent (the domain enum
+/// uses snake_case for storage / CLI compatibility).
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum IpcAudioSource {
+    /// Default microphone via cpal.
+    Microphone,
+    /// System audio loopback (macOS 13+ via ScreenCaptureKit).
+    SystemOutput,
+}
+
+impl From<IpcAudioSource> for AudioSource {
+    fn from(value: IpcAudioSource) -> Self {
+        match value {
+            IpcAudioSource::Microphone => AudioSource::Microphone,
+            IpcAudioSource::SystemOutput => AudioSource::SystemOutput,
+        }
+    }
+}
+
 /// Options the frontend may pass when starting a streaming session.
 /// All fields optional; defaults match `StreamingOptions::default()`.
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StartStreamingOptions {
+    /// Capture source. `None` ⇒ microphone, preserving Sprint 0
+    /// behavior. `systemOutput` requires macOS 13+ with Screen
+    /// Recording permission (Sprint 1 day 2/3).
+    pub source: Option<IpcAudioSource>,
     /// ISO-639-1 language hint. `None` ⇒ auto-detect.
     pub language: Option<String>,
-    /// Capture device id. `None` ⇒ system default microphone.
+    /// Capture device id. `None` ⇒ system default microphone. Ignored
+    /// when `source = systemOutput`.
     pub device_id: Option<String>,
     /// Audio chunk size in milliseconds. `None` ⇒ 5000.
     pub chunk_ms: Option<u32>,
@@ -176,9 +205,27 @@ pub async fn start_streaming(
         chunk_ms: opts.chunk_ms.unwrap_or(5_000),
         silence_rms_threshold: opts.silence_rms_threshold.unwrap_or(0.005),
     };
+    let source: AudioSource = opts
+        .source
+        .map(AudioSource::from)
+        .unwrap_or(AudioSource::Microphone);
+    // System-output loopback identifies the target by display, not by
+    // a named device; surface a warning if the frontend forgets.
+    let device_id = match source {
+        AudioSource::Microphone => opts.device_id,
+        AudioSource::SystemOutput => {
+            if opts.device_id.is_some() {
+                tracing::warn!(
+                    "deviceId ignored when source = systemOutput \
+                     (ScreenCaptureKit selects the primary display)"
+                );
+            }
+            None
+        }
+    };
     let spec = CaptureSpec {
-        source: AudioSource::Microphone,
-        device_id: opts.device_id,
+        source,
+        device_id,
         preferred_format: AudioFormat::WHISPER,
     };
 

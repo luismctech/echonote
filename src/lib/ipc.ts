@@ -89,7 +89,20 @@ export type TranscriptEvent =
       message: string;
     };
 
+/**
+ * Where the backend should pull audio from.
+ *
+ * - `microphone`: default cpal input. Requires Microphone permission
+ *   on macOS the first time it runs.
+ * - `systemOutput`: the system audio mix (the "other side of the
+ *   call"). macOS 13+ only — uses ScreenCaptureKit and requires
+ *   Screen Recording permission. The backend ignores `deviceId` for
+ *   this source.
+ */
+export type AudioSourceKind = "microphone" | "systemOutput";
+
 export type StartStreamingOptions = {
+  source?: AudioSourceKind;
   language?: string;
   deviceId?: string;
   chunkMs?: number;

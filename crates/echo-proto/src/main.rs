@@ -25,15 +25,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 use echo_app::{
     compute_wer, FrameSink, MeetingRecorder, RecordToSink, StreamingPipeline, WerStats,
 };
 use echo_asr::WhisperCppTranscriber;
 use echo_audio::{
-    resample_to_whisper, CpalMicrophoneCapture, RubatoResamplerAdapter, WavSink, WriteOptions,
-    WHISPER_SAMPLE_RATE,
+    resample_to_whisper, CpalMicrophoneCapture, RoutingAudioCapture, RubatoResamplerAdapter,
+    WavSink, WriteOptions, WHISPER_SAMPLE_RATE,
 };
 use echo_domain::{
     AudioCapture, AudioFormat, AudioFrame, AudioSource, CaptureSpec, DomainError, MeetingId,
@@ -103,11 +103,13 @@ enum Command {
         json: bool,
     },
 
-    /// Live mic → resample → whisper streaming. Prints transcript
+    /// Live capture → resample → whisper streaming. Prints transcript
     /// events to stdout as they arrive.
     ///
     /// Useful as a head-less smoke test of the same pipeline that the
-    /// Tauri shell drives in the UI.
+    /// Tauri shell drives in the UI. With `--source system-output` it
+    /// captures the system audio mix on macOS via ScreenCaptureKit
+    /// (Sprint 1 day 3) — Screen Recording permission required.
     Stream {
         /// Capture duration, in seconds. The pipeline stops cleanly
         /// after the deadline.
@@ -117,7 +119,12 @@ enum Command {
         /// `ECHO_ASR_MODEL` env var or `./models/asr/ggml-base.en.bin`.
         #[arg(long, env = "ECHO_ASR_MODEL")]
         model: Option<PathBuf>,
+        /// Capture source. `microphone` is portable; `system-output`
+        /// requires macOS 13+ with Screen Recording permission.
+        #[arg(long, value_enum, default_value_t = SourceArg::Microphone)]
+        source: SourceArg,
         /// Optional input device name. Use `record-devices` to discover.
+        /// Ignored when `--source system-output`.
         #[arg(long)]
         device: Option<String>,
         /// ISO-639-1 language hint. Auto-detect if omitted.
@@ -160,6 +167,27 @@ enum Command {
         #[command(subcommand)]
         kind: MeetingsKind,
     },
+}
+
+/// CLI mirror of [`echo_domain::AudioSource`]. Kept separate so the
+/// `clap` value parser can derive friendly kebab-case names without
+/// coupling the domain enum to clap.
+#[derive(ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum SourceArg {
+    /// Default microphone input via cpal.
+    #[default]
+    Microphone,
+    /// System audio loopback. macOS 13+ only (ScreenCaptureKit).
+    SystemOutput,
+}
+
+impl From<SourceArg> for AudioSource {
+    fn from(value: SourceArg) -> Self {
+        match value {
+            SourceArg::Microphone => AudioSource::Microphone,
+            SourceArg::SystemOutput => AudioSource::SystemOutput,
+        }
+    }
 }
 
 #[derive(Subcommand, Debug)]
@@ -251,6 +279,7 @@ async fn main() -> Result<()> {
         Command::Stream {
             duration,
             model,
+            source,
             device,
             language,
             chunk_ms,
@@ -259,6 +288,7 @@ async fn main() -> Result<()> {
             run_stream(
                 duration,
                 model,
+                source,
                 device,
                 language,
                 chunk_ms,
@@ -473,9 +503,11 @@ async fn run_transcribe(
 // `stream` subcommand
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 async fn run_stream(
     duration_secs: u64,
     model: Option<PathBuf>,
+    source_arg: SourceArg,
     device: Option<String>,
     language: Option<String>,
     chunk_ms: u32,
@@ -501,13 +533,29 @@ async fn run_stream(
         "whisper context ready"
     );
 
-    let capture: Arc<dyn AudioCapture> = Arc::new(CpalMicrophoneCapture::new());
+    // The router holds both adapters and dispatches per source. Same
+    // facade serves the cpal mic and the macOS ScreenCaptureKit
+    // loopback adapter without any branching at the call site.
+    let capture: Arc<dyn AudioCapture> = Arc::new(RoutingAudioCapture::with_default_adapters());
     let resampler: Arc<dyn Resampler> = Arc::new(RubatoResamplerAdapter);
     let transcriber: Arc<dyn Transcriber> = Arc::new(transcriber);
 
+    let source: AudioSource = source_arg.into();
+    // ScreenCaptureKit identifies the loopback target by display, not
+    // by named device. Surfacing `--device` for it would be misleading.
+    let device_id = match source {
+        AudioSource::Microphone => device,
+        AudioSource::SystemOutput => {
+            if device.is_some() {
+                tracing::warn!("--device is ignored when --source system-output");
+            }
+            None
+        }
+    };
+
     let spec = CaptureSpec {
-        source: AudioSource::Microphone,
-        device_id: device,
+        source,
+        device_id,
         preferred_format: AudioFormat::WHISPER,
     };
     let options = StreamingOptions {
@@ -526,8 +574,9 @@ async fn run_stream(
         .context("failed to start streaming pipeline")?;
 
     println!(
-        "▶ streaming session {} — {}s window {}ms — Ctrl-C or wait to stop",
+        "▶ streaming session {} — source={:?} — {}s window {}ms — Ctrl-C or wait to stop",
         handle.session_id(),
+        source,
         duration_secs,
         chunk_ms
     );

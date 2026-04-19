@@ -11,8 +11,10 @@
 //! their respective issues land.
 
 pub mod cpal_microphone;
+pub mod routing;
 
 pub use cpal_microphone::CpalMicrophoneCapture;
+pub use routing::RoutingAudioCapture;
 
 #[cfg(target_os = "macos")]
 pub mod macos;
