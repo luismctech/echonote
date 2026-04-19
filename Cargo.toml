@@ -80,6 +80,12 @@ screencapturekit = "1.5"
 # diarization / TTS models if performance becomes an issue.
 tract-onnx = { version = "0.22", default-features = false }
 
+# Speaker-embedding feature extraction. Pure-Rust port of kaldi-native-fbank
+# providing 80-mel filterbank features compatible with the 3D-Speaker
+# preprocessing. Used by echo-diarize for the ERes2Net adapter
+# (Sprint 1 day 6).
+mel_spec = "0.3"
+
 # Storage
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "macros", "migrate"] }
 

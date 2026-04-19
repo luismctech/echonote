@@ -17,7 +17,10 @@ async-trait.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 serde.workspace = true
+tract-onnx.workspace = true
+mel_spec.workspace = true
 
 [dev-dependencies]
 pretty_assertions.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+hound.workspace = true

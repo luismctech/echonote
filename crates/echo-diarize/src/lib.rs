@@ -20,8 +20,13 @@
 
 pub mod cluster;
 pub mod embedding;
+pub mod eres2net;
 pub mod online_diarizer;
 
 pub use cluster::{OnlineCluster, OnlineClusterConfig};
 pub use embedding::{cosine_similarity, l2_normalize, SpeakerEmbedder};
+pub use eres2net::{
+    Eres2NetConfig, Eres2NetEmbedder, ERES2NET_EMBED_DIM, ERES2NET_FBANK_DIM, ERES2NET_MIN_SAMPLES,
+    ERES2NET_SAMPLE_RATE, ERES2NET_TARGET_FRAMES,
+};
 pub use online_diarizer::OnlineDiarizer;

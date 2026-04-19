@@ -8,10 +8,12 @@
 #   scripts/download-models.sh medium         # ~1.5 GB, multilingual
 #   scripts/download-models.sh large-v3       # ~3.0 GB
 #   scripts/download-models.sh vad            # Silero VAD v5 (~2 MB)
-#   scripts/download-models.sh --all          # base.en + small.en + vad
+#   scripts/download-models.sh embed          # 3D-Speaker ERes2Net (~26 MB)
+#   scripts/download-models.sh --all          # base.en + small.en + vad + embed
 #
 # ASR models are written to ./models/asr/ggml-<flavor>.bin
-# VAD model lives at  ./models/vad/silero_vad.onnx
+# VAD model lives at         ./models/vad/silero_vad.onnx
+# Embedder lives at          ./models/embedder/eres2net_en_voxceleb.onnx
 # Existing files are skipped if their size looks right.
 # -----------------------------------------------------------------------------
 set -Eeuo pipefail
@@ -19,7 +21,8 @@ set -Eeuo pipefail
 REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 ASR_DIR="${REPO_ROOT}/models/asr"
 VAD_DIR="${REPO_ROOT}/models/vad"
-mkdir -p "$ASR_DIR" "$VAD_DIR"
+EMBED_DIR="${REPO_ROOT}/models/embedder"
+mkdir -p "$ASR_DIR" "$VAD_DIR" "$EMBED_DIR"
 # Back-compat alias for code paths that still reference $MODELS_DIR.
 MODELS_DIR="$ASR_DIR"
 
@@ -28,6 +31,15 @@ HF_BASE="https://huggingface.co/ggerganov/whisper.cpp/resolve/main"
 # Silero VAD v5 lives in the upstream GitHub repo. Pinned to a commit
 # so we get reproducible downloads across machines and over time.
 SILERO_VAD_URL="https://github.com/snakers4/silero-vad/raw/v5.1.2/src/silero_vad/data/silero_vad.onnx"
+# 3D-Speaker ERes2Net (English VoxCeleb) — the speaker embedder used by
+# echo-diarize. Mirrored on Hugging Face by csukuangfj (sherpa-onnx
+# maintainer); upstream lives on ModelScope. ~26 MB, opset 13, outputs
+# a 192-dim embedding from 80-bin Kaldi fbank features.
+ERES2NET_URL="https://huggingface.co/csukuangfj/speaker-embedding-models/resolve/main/3dspeaker_speech_eres2net_sv_en_voxceleb_16k.onnx"
+# Two-speaker English fixture from the same HF mirror. Used by the
+# echo-diarize integration tests as ground-truth cross-speaker audio.
+ERES2NET_FIXTURE_URL="https://huggingface.co/csukuangfj/speaker-embedding-models/resolve/main/1-two-speakers-en.wav"
+ERES2NET_FIXTURE_DIR="${REPO_ROOT}/crates/echo-diarize/tests/fixtures"
 
 # --- cosmetics ---------------------------------------------------------------
 if [[ -t 1 ]]; then
@@ -122,6 +134,58 @@ download_silero_vad() {
   printf "  ${GRN}✓${RST} silero_vad.onnx (%d KiB)\n" "$got_kib"
 }
 
+download_eres2net() {
+  # ---- model -----------------------------------------------------------------
+  local out="${EMBED_DIR}/eres2net_en_voxceleb.onnx"
+  local need_model=1
+  if [[ -f "$out" ]]; then
+    local got_mib
+    got_mib=$(( $(wc -c < "$out") / 1048576 ))
+    if (( got_mib < 20 )); then
+      warn "eres2net_en_voxceleb.onnx present but truncated (${got_mib} MiB, expected ~26 MiB). Re-downloading."
+      rm -f "$out"
+    else
+      info "eres2net_en_voxceleb.onnx already present (${got_mib} MiB) — skipping."
+      need_model=0
+    fi
+  fi
+
+  if (( need_model )); then
+    info "Fetching ERes2Net (3D-Speaker, EN VoxCeleb) → ${out}"
+    if command -v curl >/dev/null 2>&1; then
+      curl --fail --location --progress-bar --output "$out" "$ERES2NET_URL"
+    elif command -v wget >/dev/null 2>&1; then
+      wget --show-progress --output-document="$out" "$ERES2NET_URL"
+    else
+      fail "Neither curl nor wget is installed."
+    fi
+    local got_mib
+    got_mib=$(( $(wc -c < "$out") / 1048576 ))
+    if (( got_mib < 20 )); then
+      fail "eres2net_en_voxceleb.onnx downloaded incompletely (${got_mib} MiB)"
+    fi
+    printf "  ${GRN}✓${RST} eres2net_en_voxceleb.onnx (%d MiB)\n" "$got_mib"
+  fi
+
+  # ---- companion test fixture ------------------------------------------------
+  mkdir -p "$ERES2NET_FIXTURE_DIR"
+  local fixture_out="${ERES2NET_FIXTURE_DIR}/two_speakers_en.wav"
+  if [[ -f "$fixture_out" && $(wc -c < "$fixture_out") -gt 400000 ]]; then
+    info "two_speakers_en.wav already present — skipping fixture."
+    return
+  fi
+
+  info "Fetching two-speaker fixture → ${fixture_out}"
+  if command -v curl >/dev/null 2>&1; then
+    curl --fail --location --progress-bar --output "$fixture_out" "$ERES2NET_FIXTURE_URL"
+  elif command -v wget >/dev/null 2>&1; then
+    wget --show-progress --output-document="$fixture_out" "$ERES2NET_FIXTURE_URL"
+  fi
+  local fix_kib
+  fix_kib=$(( $(wc -c < "$fixture_out") / 1024 ))
+  printf "  ${GRN}✓${RST} two_speakers_en.wav (%d KiB)\n" "$fix_kib"
+}
+
 main() {
   local choice="${1:-base.en}"
   case "$choice" in
@@ -129,14 +193,20 @@ main() {
       download_one base.en
       download_one small.en
       download_silero_vad
+      download_eres2net
       ;;
     --help|-h)
-      sed -n '4,15p' "$0"
+      sed -n '4,17p' "$0"
       exit 0
       ;;
     vad|silero|silero-vad)
       download_silero_vad
       info "VAD model in ${VAD_DIR}. Set ECHO_VAD_MODEL=${VAD_DIR}/silero_vad.onnx if you move it."
+      return
+      ;;
+    embed|embedder|eres2net)
+      download_eres2net
+      info "Embedder in ${EMBED_DIR}. Set ECHO_EMBED_MODEL=${EMBED_DIR}/eres2net_en_voxceleb.onnx if you move it."
       return
       ;;
     tiny|tiny.en|base|base.en|small|small.en|medium|medium.en|large-v3|large-v3-turbo)
@@ -147,7 +217,7 @@ main() {
       ;;
   esac
 
-  info "All requested models are in ${ASR_DIR}"
+  info "All requested models are in ${REPO_ROOT}/models/"
   info "Try: cargo run -p echo-proto -- transcribe /tmp/sample.wav --model ${ASR_DIR}/ggml-${choice%.en}.en.bin"
 }
 
