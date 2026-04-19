@@ -101,6 +101,57 @@ impl AppState {
         self.sessions.clone()
     }
 
+    /// Ordered shutdown sequence invoked from the Tauri `Exit` hook.
+    ///
+    /// Drains any in-flight streaming session (best-effort: each
+    /// drain task is bounded by a short timeout so we never hang the
+    /// quit) and then closes the SQLite pool so WAL frames are
+    /// checkpointed before the process exits. The shell follows this
+    /// with an `_exit(0)` to sidestep ggml's atexit destructor, which
+    /// would otherwise SIGABRT on macOS — but every Rust resource we
+    /// can flush in-process is flushed first.
+    pub async fn shutdown(&self) {
+        // Drain sessions first, before closing the pool, since the
+        // recorder writes the final `Stopped`/`Failed` rows from the
+        // drain task.
+        let entries: Vec<SessionEntry> = match self.sessions.lock() {
+            Ok(mut map) => map.drain().map(|(_, e)| e).collect(),
+            Err(poisoned) => {
+                tracing::warn!("shutdown: session map poisoned; recovering");
+                poisoned.into_inner().drain().map(|(_, e)| e).collect()
+            }
+        };
+        let pending = entries.len();
+        if pending > 0 {
+            tracing::info!(pending, "shutdown: stopping in-flight sessions");
+        }
+        for entry in entries {
+            // 1. Politely ask the streaming pipeline to stop. The
+            //    handle's `stop` returns once the pipeline has flushed
+            //    its tail audio + emitted the terminal event.
+            let mut handle = entry.handle.lock().await;
+            if let Err(e) = handle.stop().await {
+                tracing::warn!(error = %e, "shutdown: stop_streaming failed");
+            }
+            drop(handle);
+            // 2. Wait for the drain task to observe the terminal event,
+            //    persist it, and exit. Bounded so a wedged task can't
+            //    block app close indefinitely.
+            match tokio::time::timeout(std::time::Duration::from_secs(5), entry.join).await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => tracing::warn!(error = %e, "shutdown: drain task panicked"),
+                Err(_) => {
+                    tracing::warn!("shutdown: drain task did not finish within 5s; abandoning")
+                }
+            }
+        }
+        // 3. Close the storage pool now that no producer can still be
+        //    writing. Default impl is a no-op, the SQLite adapter
+        //    flushes WAL frames here.
+        self.store.close().await;
+        tracing::info!("shutdown: complete");
+    }
+
     /// Build the shared state. Async because opening the SQLite database
     /// runs migrations, which is I/O. The transcriber is *not* loaded
     /// eagerly — the first `start_streaming` call pays that cost.

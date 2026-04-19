@@ -449,6 +449,14 @@ impl MeetingStore for SqliteMeetingStore {
         }
         Ok(hits)
     }
+
+    async fn close(&self) {
+        // Forward to the inherent helper, which awaits any in-flight
+        // queries and flushes the WAL before the pool drops. Called
+        // from the shell's shutdown hook so SQLite has a chance to
+        // checkpoint before `_exit` skips destructors.
+        SqliteMeetingStore::close(self).await;
+    }
 }
 
 impl SqliteMeetingStore {

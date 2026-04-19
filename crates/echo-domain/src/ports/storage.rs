@@ -139,4 +139,13 @@ pub trait MeetingStore: Send + Sync {
     /// Delete a meeting and its segments. Returns `false` when the id
     /// did not exist.
     async fn delete(&self, meeting_id: MeetingId) -> Result<bool, DomainError>;
+
+    /// Release any expensive resources (database pool, file handles)
+    /// the adapter holds. Called once on app shutdown so the underlying
+    /// storage layer can checkpoint cleanly.
+    ///
+    /// Default impl is a no-op so in-memory or test-only implementations
+    /// don't need to care. The SQLite adapter overrides this to close
+    /// its connection pool and flush WAL frames.
+    async fn close(&self) {}
 }
