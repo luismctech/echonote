@@ -308,7 +308,10 @@ mod tests {
             let m = guard
                 .iter_mut()
                 .find(|m| m.summary.id == meeting_id)
-                .ok_or_else(|| DomainError::Invariant("not found".into()))?;
+                .ok_or_else(|| DomainError::NotFound {
+                    entity: "meeting",
+                    id: meeting_id.to_string(),
+                })?;
             for s in segments {
                 if !m.segments.iter().any(|x| x.id == s.id) {
                     m.segments.push(s.clone());
@@ -326,7 +329,10 @@ mod tests {
             let m = guard
                 .iter_mut()
                 .find(|m| m.summary.id == meeting_id)
-                .ok_or_else(|| DomainError::Invariant("not found".into()))?;
+                .ok_or_else(|| DomainError::NotFound {
+                    entity: "meeting",
+                    id: meeting_id.to_string(),
+                })?;
             // Mirror the SQLite COALESCE behaviour: keep the existing
             // SpeakerId on slot conflict, only refresh label when the
             // caller passed Some.
@@ -376,7 +382,10 @@ mod tests {
             let m = guard
                 .iter_mut()
                 .find(|m| m.summary.id == meeting_id)
-                .ok_or_else(|| DomainError::Invariant("not found".into()))?;
+                .ok_or_else(|| DomainError::NotFound {
+                    entity: "meeting",
+                    id: meeting_id.to_string(),
+                })?;
             if let Some(d) = patch.duration_ms {
                 m.summary.duration_ms = d;
             }

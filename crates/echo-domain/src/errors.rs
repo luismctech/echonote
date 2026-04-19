@@ -44,6 +44,26 @@ pub enum DomainError {
     #[error("invalid session state: {0}")]
     InvalidSessionState(String),
 
+    /// A persistent record (meeting, segment, speaker, …) was not found.
+    /// `entity` is a short noun ("meeting", "segment", …); `id` is the
+    /// stringified identifier the caller used. Adapters return this
+    /// from "get/delete/finalize" calls when the row is missing so the
+    /// caller can distinguish "not found" from a real storage failure.
+    #[error("{entity} {id} not found")]
+    NotFound {
+        /// Short noun naming the kind of record (e.g. "meeting").
+        entity: &'static str,
+        /// Stringified identifier the caller looked up.
+        id: String,
+    },
+
+    /// Persistent storage (database, filesystem) reported an error that
+    /// is not "not found". Use this for sqlx errors, I/O failures, or
+    /// migration issues — anything where the storage layer is the
+    /// source of the problem rather than invalid input.
+    #[error("storage error: {0}")]
+    Storage(String),
+
     /// Generic invariant violation. Prefer adding a specific variant when
     /// the error recurs in multiple places.
     #[error("domain invariant violated: {0}")]

@@ -95,7 +95,6 @@ sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio",
 whisper-rs = { version = "0.16", default-features = false, features = ["tracing_backend"] }
 
 # Testing
-mockall = "0.13"
 pretty_assertions = "1.4"
 tempfile = "3.10"
 

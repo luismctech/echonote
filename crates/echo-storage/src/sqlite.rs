@@ -19,12 +19,18 @@ use echo_domain::{
 /// Embedded migrations (`crates/echo-storage/migrations/`).
 static MIGRATIONS: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
+/// Wrap a free-form storage failure (parse, I/O, …) as a `DomainError`.
+///
+/// Use [`DomainError::NotFound`] directly for missing-row cases instead
+/// of routing them through here — callers (use cases, IPC commands)
+/// distinguish "missing" from "storage failed" and the noisy
+/// `Storage("...")` envelope obscures that.
 fn db_err(msg: impl Into<String>) -> DomainError {
-    DomainError::Invariant(msg.into())
+    DomainError::Storage(msg.into())
 }
 
 fn map_sqlx<E: std::fmt::Display>(prefix: &'static str) -> impl Fn(E) -> DomainError {
-    move |e| DomainError::Invariant(format!("{prefix}: {e}"))
+    move |e| DomainError::Storage(format!("{prefix}: {e}"))
 }
 
 /// SQLite-backed [`MeetingStore`]. Cheap to clone (`SqlitePool` wraps an
