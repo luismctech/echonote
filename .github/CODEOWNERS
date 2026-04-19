@@ -1,0 +1,24 @@
+# EchoNote — Code Owners
+#
+# These owners are automatically requested for review on PRs that touch
+# the listed paths. At least one approval from a matching owner is required.
+#
+# See: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+
+# Default — Tech Lead owns everything not covered below.
+*                       @AlbertoMZCruz
+
+# Rust backend crates
+crates/                 @AlbertoMZCruz
+
+# CI and toolchain
+.github/                @AlbertoMZCruz
+rust-toolchain.toml     @AlbertoMZCruz
+Cargo.toml              @AlbertoMZCruz
+Cargo.lock              @AlbertoMZCruz
+
+# Architecture decisions require explicit review
+docs/adr/               @AlbertoMZCruz
+
+# Security-sensitive paths
+SECURITY.md             @AlbertoMZCruz

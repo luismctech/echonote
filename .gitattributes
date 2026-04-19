@@ -1,0 +1,41 @@
+# EchoNote — Git attributes
+#
+# Enforce LF line endings everywhere. CRLF on Windows is a recurring source
+# of spurious diffs and broken shell scripts.
+
+* text=auto eol=lf
+
+# Rust
+*.rs         text diff=rust
+*.toml       text
+Cargo.lock   text -diff linguist-generated
+
+# Frontend (Sprint 0 day 4+)
+*.ts         text diff=typescript
+*.tsx        text diff=typescript
+*.js         text
+*.jsx        text
+*.json       text
+*.css        text
+*.html       text
+*.svg        text
+
+# Shell
+*.sh         text eol=lf
+
+# Config / docs
+*.md         text diff=markdown
+*.yml        text
+*.yaml       text
+.editorconfig text
+
+# Binary — never diff, always treat as binary
+*.gguf       binary
+*.onnx       binary
+*.bin        binary
+*.png        binary
+*.jpg        binary
+*.ico        binary
+*.icns       binary
+*.woff       binary
+*.woff2      binary

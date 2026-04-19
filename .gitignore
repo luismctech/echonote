@@ -18,6 +18,14 @@ dist-ssr/
 .npm/
 *.local
 
+# TypeScript build artifacts (composite project caches and emitted JS/D.TS)
+*.tsbuildinfo
+vite.config.js
+vite.config.d.ts
+tailwind.config.js
+tailwind.config.d.ts
+postcss.config.d.ts
+
 # Tauri build outputs
 src-tauri/target/
 src-tauri/gen/
@@ -96,3 +104,21 @@ cobertura.xml
 # Cursor / local agent artifacts (keep skills, ignore session state)
 # -----------------------------------------------------------------------------
 .cursor/projects/
+
+# -----------------------------------------------------------------------------
+# Runtime data (created by `pnpm tauri dev` / `echo-proto stream`)
+# -----------------------------------------------------------------------------
+echonote.db
+echonote.db-shm
+echonote.db-wal
+
+# -----------------------------------------------------------------------------
+# Bench fixtures: WAVs are regenerated locally via scripts/build-fixtures.sh
+# (transcripts under fixtures/transcripts/ ARE checked in).
+# -----------------------------------------------------------------------------
+fixtures/audio/
+
+# -----------------------------------------------------------------------------
+# Bench reports
+# -----------------------------------------------------------------------------
+target/bench-reports/

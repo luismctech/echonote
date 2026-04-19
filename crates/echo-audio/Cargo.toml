@@ -1,0 +1,35 @@
+[package]
+name = "echo-audio"
+description = "Dual audio capture (mic + system) with preprocessing and VAD. Per-OS adapters."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+
+[dependencies]
+echo-domain.workspace = true
+
+tokio.workspace = true
+async-trait.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+serde.workspace = true
+
+# Cross-platform PCM capture. cpal owns its own real-time audio thread per
+# stream; we wrap it behind the AudioStream port so callers do not have to
+# care.
+cpal.workspace = true
+
+# WAV reader/writer used by the file-sink and integration tests.
+hound.workspace = true
+
+# Sample-rate conversion (any rate -> 16 kHz mono for Whisper).
+rubato.workspace = true
+
+[dev-dependencies]
+pretty_assertions.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }

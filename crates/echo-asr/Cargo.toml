@@ -1,0 +1,35 @@
+[package]
+name = "echo-asr"
+description = "Automatic Speech Recognition adapter around whisper.cpp via whisper-rs."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+
+[dependencies]
+echo-domain.workspace = true
+
+tokio.workspace = true
+async-trait.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+serde.workspace = true
+
+# whisper-rs builds whisper.cpp from source via cmake. The default,
+# CPU-only build works everywhere. We additively enable hardware
+# acceleration per host below.
+whisper-rs.workspace = true
+
+# Apple Silicon / Intel Mac: enable Metal so whisper.cpp uses the GPU.
+[target.'cfg(target_os = "macos")'.dependencies]
+whisper-rs = { workspace = true, features = ["metal"] }
+
+[dev-dependencies]
+echo-audio.workspace = true
+hound.workspace = true
+pretty_assertions.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

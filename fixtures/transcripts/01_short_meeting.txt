@@ -1,0 +1,1 @@
+Good morning team. Let's start the standup. Yesterday I finished the authentication module and opened a pull request for review. Today I will work on the database migrations and the integration tests. I have no blockers right now.

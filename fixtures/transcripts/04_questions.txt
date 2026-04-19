@@ -1,0 +1,1 @@
+Could you walk me through the deployment pipeline? How does the rollback strategy work if something fails in production? Who owns the on call rotation this week? When is the next sync with the platform team scheduled?

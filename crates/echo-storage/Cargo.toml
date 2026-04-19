@@ -1,0 +1,31 @@
+[package]
+name = "echo-storage"
+description = "SQLite + FTS5 persistence adapter with optional SQLCipher encryption."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+
+[dependencies]
+echo-domain.workspace = true
+
+tokio.workspace = true
+async-trait.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+serde.workspace = true
+uuid.workspace = true
+time = { workspace = true, features = ["formatting", "parsing"] }
+
+# sqlx with the SQLite driver. Native TLS is irrelevant here so we ship
+# the smallest possible feature set; SQLCipher (for at-rest encryption)
+# is wired in Sprint 3 behind a cargo feature flag.
+sqlx.workspace = true
+
+[dev-dependencies]
+pretty_assertions.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

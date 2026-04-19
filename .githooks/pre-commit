@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# -----------------------------------------------------------------------------
+# EchoNote pre-commit hook
+#
+# Runs the cheapest checks that CI will run, so broken commits never leave
+# the dev machine. Kept under ~5 s on a warm cache so the feedback loop
+# stays fast.
+#
+# Bypass with --no-verify only if you know what you are doing.
+# -----------------------------------------------------------------------------
+set -Eeuo pipefail
+
+STAGED_RS=$(git diff --cached --name-only --diff-filter=ACMR -- '*.rs' || true)
+STAGED_TS=$(git diff --cached --name-only --diff-filter=ACMR -- '*.ts' '*.tsx' || true)
+
+# --- Rust gate ---------------------------------------------------------------
+if [[ -n "$STAGED_RS" ]]; then
+  echo "==> pre-commit: cargo fmt --all --check"
+  if ! cargo fmt --all --check; then
+    echo "!! rustfmt found issues. Run 'cargo fmt --all' and re-stage." >&2
+    exit 1
+  fi
+
+  echo "==> pre-commit: cargo clippy (workspace, -D warnings)"
+  if ! cargo clippy --workspace --all-targets --quiet -- -D warnings; then
+    echo "!! clippy failed. Fix warnings or prove they are intentional before committing." >&2
+    exit 1
+  fi
+fi
+
+# --- Frontend gate -----------------------------------------------------------
+if [[ -n "$STAGED_TS" && -f "package.json" && -d "node_modules" ]]; then
+  echo "==> pre-commit: pnpm typecheck"
+  if ! pnpm -s typecheck; then
+    echo "!! TypeScript typecheck failed." >&2
+    exit 1
+  fi
+fi
+
+exit 0

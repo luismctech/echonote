@@ -1,0 +1,48 @@
+[package]
+name = "echo-shell"
+description = "EchoNote Tauri host shell — wires the application and infrastructure crates to the React frontend."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "../README.md"
+
+# Two outputs:
+#  - `echo-shell` binary launched by `cargo run` and the Tauri bundler.
+#  - `echo_shell_lib` staticlib/cdylib consumed by mobile targets later.
+[lib]
+name = "echo_shell_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+
+# Workspace-level crates — the application and its adapters.
+echo-app = { path = "../crates/echo-app" }
+echo-asr = { path = "../crates/echo-asr" }
+echo-audio = { path = "../crates/echo-audio" }
+echo-domain = { path = "../crates/echo-domain" }
+echo-storage = { path = "../crates/echo-storage" }
+echo-telemetry = { path = "../crates/echo-telemetry" }
+
+# Workspace dependencies already pinned at the root.
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+time = { workspace = true, features = ["formatting"] }
+thiserror = { workspace = true }
+
+[features]
+# Default features are left empty; the shell opts in to platform backends
+# per build.
+default = []
+
+# Debug-only — lints we want turned up inside this crate without blocking
+# the rest of the workspace. Clippy treats this section via Cargo profile
+# inheritance.

@@ -1,0 +1,87 @@
+# -----------------------------------------------------------------------------
+# EchoNote — Phase-0 benchmarks
+# -----------------------------------------------------------------------------
+# Runs `echo-proto bench wer` on the synthetic ASR fixtures and uploads
+# the JSON report as an artifact. Opt-in only (workflow_dispatch) so we
+# don't pay for whisper.cpp + model download on every PR.
+#
+# Trigger from the GitHub UI (Actions → Phase-0 benchmarks → Run workflow)
+# or via `gh workflow run bench.yml`.
+# -----------------------------------------------------------------------------
+
+name: Phase-0 benchmarks
+
+on:
+  workflow_dispatch:
+    inputs:
+      max_wer:
+        description: "Fail the run if global WER exceeds this fraction (0..=1)."
+        required: false
+        default: "0.30"
+      whisper_model:
+        description: "Whisper model id (e.g. base.en, small.en, medium.en)."
+        required: false
+        default: "base.en"
+
+concurrency:
+  group: bench-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: 1
+
+jobs:
+  wer:
+    name: bench wer (macOS)
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: macos-14-bench
+
+      - name: Build echo-proto (release)
+        run: cargo build --release -p echo-proto --locked
+
+      - name: Generate synthetic fixtures (macOS `say` + `afconvert`)
+        run: ./scripts/build-fixtures.sh
+
+      - name: Download whisper model (${{ inputs.whisper_model }})
+        env:
+          MODEL: ${{ inputs.whisper_model }}
+        run: |
+          mkdir -p models/asr
+          curl -L --fail \
+            "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-${MODEL}.bin" \
+            -o "models/asr/ggml-${MODEL}.bin"
+          ls -lh models/asr
+
+      - name: Run WER benchmark
+        env:
+          MODEL: ${{ inputs.whisper_model }}
+          MAX_WER: ${{ inputs.max_wer }}
+        run: |
+          mkdir -p target/bench-reports
+          ./target/release/echo-proto bench wer \
+            --model "models/asr/ggml-${MODEL}.bin" \
+            --max-wer "${MAX_WER}" \
+            --report target/bench-reports/wer-${MODEL}.json
+
+      - name: Run LLM benchmark scaffolding (no-op until Sprint 1)
+        run: ./target/release/echo-proto bench llm
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-report-${{ inputs.whisper_model }}
+          path: target/bench-reports/
+          retention-days: 30
