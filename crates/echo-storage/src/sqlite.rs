@@ -160,6 +160,26 @@ impl MeetingStore for SqliteMeetingStore {
         Ok(())
     }
 
+    async fn rename_speaker(
+        &self,
+        meeting_id: MeetingId,
+        speaker_id: SpeakerId,
+        label: Option<&str>,
+    ) -> Result<bool, DomainError> {
+        // Targeted UPDATE WHERE id=?: lets the caller clear the
+        // label back to NULL (impossible via the COALESCE upsert) and
+        // identifies the row by its stable SpeakerId, so the UI can
+        // rename without knowing the arrival-order slot.
+        let result = sqlx::query("UPDATE speakers SET label = ? WHERE id = ? AND meeting_id = ?")
+            .bind(label)
+            .bind(speaker_id.0.to_string())
+            .bind(meeting_id.to_string())
+            .execute(&self.pool)
+            .await
+            .map_err(map_sqlx("rename speaker"))?;
+        Ok(result.rows_affected() > 0)
+    }
+
     async fn list_speakers(&self, meeting_id: MeetingId) -> Result<Vec<Speaker>, DomainError> {
         let id_str = meeting_id.to_string();
         let rows = sqlx::query(
@@ -620,6 +640,51 @@ mod tests {
         assert_eq!(full.speakers[0].id, alice.id);
         assert_eq!(full.speakers[0].slot, 0);
         assert!(full.speakers[0].label.is_none());
+    }
+
+    #[tokio::test]
+    async fn rename_speaker_updates_label_and_can_clear_back_to_null() {
+        let store = SqliteMeetingStore::open_in_memory().await.unwrap();
+        let id = MeetingId::new();
+        store
+            .create(CreateMeeting {
+                id,
+                title: "T".into(),
+                input_format: fmt(),
+            })
+            .await
+            .unwrap();
+        let s = Speaker::anonymous(0);
+        store.upsert_speaker(id, &s).await.unwrap();
+
+        // Set label.
+        let renamed = store.rename_speaker(id, s.id, Some("Alice")).await.unwrap();
+        assert!(renamed);
+        assert_eq!(
+            store.list_speakers(id).await.unwrap()[0].label.as_deref(),
+            Some("Alice")
+        );
+
+        // Clear it — impossible via the COALESCE upsert, but the
+        // rename method must be able to express this.
+        let cleared = store.rename_speaker(id, s.id, None).await.unwrap();
+        assert!(cleared);
+        assert!(store.list_speakers(id).await.unwrap()[0].label.is_none());
+
+        // Unknown speaker id → false (so the use case can 404 the UI).
+        let missing = store
+            .rename_speaker(id, SpeakerId::new(), Some("ghost"))
+            .await
+            .unwrap();
+        assert!(!missing);
+
+        // Wrong meeting id → also false (scoping check).
+        let other_meeting = MeetingId::new();
+        let wrong_meeting = store
+            .rename_speaker(other_meeting, s.id, Some("nope"))
+            .await
+            .unwrap();
+        assert!(!wrong_meeting);
     }
 
     #[tokio::test]

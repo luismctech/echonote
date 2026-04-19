@@ -12,14 +12,23 @@ import {
   healthCheck,
   isTauri,
   listMeetings,
+  renameSpeaker,
   startStreaming,
   stopStreaming,
   type HealthStatus,
   type Meeting,
   type MeetingId,
   type MeetingSummary,
+  type Speaker,
+  type SpeakerId,
   type TranscriptEvent,
 } from "./lib/ipc";
+import {
+  displayName,
+  indexSpeakers,
+  paletteFor,
+  shortTag,
+} from "./lib/speakers";
 import {
   canStart as selectCanStart,
   canStop as selectCanStop,
@@ -44,6 +53,8 @@ type StreamLine =
       text: string;
       language: string | null;
       rtf: number;
+      /** 0-based slot of the diarized speaker, or undefined if diarization is off. */
+      speakerSlot?: number | undefined;
     }
   | {
       kind: "skipped";
@@ -78,6 +89,10 @@ export function App() {
   const [meetings, setMeetings] = useState<MeetingSummary[]>([]);
   const [meetingsError, setMeetingsError] = useState<string | null>(null);
   const [view, setView] = useState<MainView>({ kind: "live" });
+  // Diarize is opt-in to keep the existing whisper-only path unchanged
+  // for users who haven't downloaded the embedder yet. Persists across
+  // session restarts within a tab; resets on reload.
+  const [diarize, setDiarize] = useState(false);
 
   const refreshMeetings = useCallback(async () => {
     if (!isTauri()) return;
@@ -190,6 +205,7 @@ export function App() {
               text: text || "[no speech]",
               language: evt.language,
               rtf: evt.rtf,
+              speakerSlot: evt.speakerSlot,
             },
           ]);
           break;
@@ -237,7 +253,7 @@ export function App() {
     dispatch({ type: "START_REQUESTED" });
     try {
       await startStreaming(
-        { chunkMs: 5_000, silenceRmsThreshold: 0.005 },
+        { chunkMs: 5_000, silenceRmsThreshold: 0.005, diarize },
         handleEvent,
       );
     } catch (err) {
@@ -295,6 +311,31 @@ export function App() {
       }
     },
     [toast],
+  );
+
+  const onRenameSpeaker = useCallback(
+    async (speakerId: SpeakerId, label: string | null) => {
+      if (view.kind !== "meeting" || !view.meeting) return;
+      const meetingId = view.id;
+      try {
+        const updated = await renameSpeaker(meetingId, speakerId, label);
+        // Re-render from the canonical post-rename meeting returned by
+        // the backend so we don't drift from disk on the optimistic path.
+        setView((prev) =>
+          prev.kind === "meeting" && prev.id === meetingId
+            ? { kind: "meeting", id: meetingId, meeting: updated, loading: false }
+            : prev,
+        );
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        toast.push({
+          kind: "error",
+          message: "Couldn't rename speaker.",
+          detail: message,
+        });
+      }
+    },
+    [view, toast],
   );
 
   const onDeleteMeeting = useCallback(
@@ -375,12 +416,14 @@ export function App() {
               listRef={listRef}
               canStart={canStart}
               canStop={canStop}
+              diarize={diarize}
+              onToggleDiarize={setDiarize}
               onStart={onStart}
               onStop={onStop}
               onDismissError={() => dispatch({ type: "ACKNOWLEDGE" })}
             />
           ) : (
-            <MeetingDetail view={view} />
+            <MeetingDetail view={view} onRenameSpeaker={onRenameSpeaker} />
           )}
         </section>
       </div>
@@ -470,6 +513,8 @@ function LivePane({
   listRef,
   canStart,
   canStop,
+  diarize,
+  onToggleDiarize,
   onStart,
   onStop,
   onDismissError,
@@ -480,10 +525,19 @@ function LivePane({
   listRef: React.RefObject<HTMLDivElement>;
   canStart: boolean;
   canStop: boolean;
+  diarize: boolean;
+  onToggleDiarize: (next: boolean) => void;
   onStart: () => void;
   onStop: () => void;
   onDismissError: () => void;
 }) {
+  // Toggle is locked once a session is in flight: changing the
+  // diarize flag mid-recording would make half the chunks have
+  // speakers and half not, which is confusing to render.
+  const toggleLocked =
+    stream.kind === "starting" ||
+    stream.kind === "recording" ||
+    stream.kind === "stopping";
   return (
     <>
       <header className="flex items-center justify-between gap-4">
@@ -493,7 +547,21 @@ function LivePane({
             5-second windows · whisper.cpp · {modelLabel(stream)}
           </p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex items-center gap-3">
+          <label
+            className={`flex select-none items-center gap-2 text-xs ${
+              toggleLocked ? "opacity-60" : "cursor-pointer"
+            }`}
+          >
+            <input
+              type="checkbox"
+              checked={diarize}
+              disabled={toggleLocked}
+              onChange={(e) => onToggleDiarize(e.target.checked)}
+              className="h-3.5 w-3.5 accent-emerald-600"
+            />
+            <span className="text-zinc-600 dark:text-zinc-300">Diarize</span>
+          </label>
           <button
             type="button"
             onClick={onStart}
@@ -561,8 +629,10 @@ function LivePane({
 
 function MeetingDetail({
   view,
+  onRenameSpeaker,
 }: {
   view: Extract<MainView, { kind: "meeting" }>;
+  onRenameSpeaker: (speakerId: SpeakerId, label: string | null) => Promise<void>;
 }) {
   if (view.loading) {
     return <p className="text-sm text-zinc-500">Loading meeting…</p>;
@@ -575,6 +645,7 @@ function MeetingDetail({
     );
   }
   const m = view.meeting;
+  const speakerIndex = indexSpeakers(m.speakers);
   return (
     <>
       <header className="flex flex-col gap-1">
@@ -586,23 +657,117 @@ function MeetingDetail({
         <p className="font-mono text-[10px] text-zinc-400">{m.id}</p>
       </header>
 
+      {m.speakers.length > 0 && (
+        <SpeakersPanel speakers={m.speakers} onRename={onRenameSpeaker} />
+      )}
+
       <div className="h-[60vh] overflow-y-auto rounded-md border border-zinc-100 bg-zinc-50 p-3 text-sm leading-relaxed dark:border-zinc-900 dark:bg-zinc-900/60">
         {m.segments.length === 0 ? (
           <p className="text-zinc-400">No segments persisted for this meeting.</p>
         ) : (
           <ol className="flex flex-col gap-2">
-            {m.segments.map((seg) => (
-              <li key={seg.id} className="flex gap-3">
-                <span className="w-12 shrink-0 font-mono text-xs tabular-nums text-zinc-500">
-                  {formatTimestamp(seg.startMs)}
-                </span>
-                <span className="flex-1">{seg.text.trim() || "[no speech]"}</span>
-              </li>
-            ))}
+            {m.segments.map((seg) => {
+              const speaker = seg.speakerId
+                ? speakerIndex.get(seg.speakerId)
+                : undefined;
+              return (
+                <li key={seg.id} className="flex items-baseline gap-3">
+                  <span className="w-12 shrink-0 font-mono text-xs tabular-nums text-zinc-500">
+                    {formatTimestamp(seg.startMs)}
+                  </span>
+                  {speaker && (
+                    <SpeakerChip
+                      slot={speaker.slot}
+                      label={shortTag(speaker.slot)}
+                      compact
+                    />
+                  )}
+                  <span className="flex-1">
+                    {seg.text.trim() || "[no speech]"}
+                  </span>
+                </li>
+              );
+            })}
           </ol>
         )}
       </div>
     </>
+  );
+}
+
+/**
+ * List of diarized speakers with an inline rename input. Saves on
+ * Enter or blur; clearing the input reverts to anonymous.
+ */
+function SpeakersPanel({
+  speakers,
+  onRename,
+}: {
+  speakers: Speaker[];
+  onRename: (speakerId: SpeakerId, label: string | null) => Promise<void>;
+}) {
+  return (
+    <section
+      aria-label="Speakers"
+      className="flex flex-wrap gap-2 rounded-md border border-zinc-100 bg-zinc-50 p-2 dark:border-zinc-900 dark:bg-zinc-900/40"
+    >
+      {speakers.map((sp) => (
+        <SpeakerEditor key={sp.id} speaker={sp} onRename={onRename} />
+      ))}
+    </section>
+  );
+}
+
+function SpeakerEditor({
+  speaker,
+  onRename,
+}: {
+  speaker: Speaker;
+  onRename: (speakerId: SpeakerId, label: string | null) => Promise<void>;
+}) {
+  // Local input state so the user can keep typing without every
+  // keystroke triggering an IPC round-trip. We commit on Enter or
+  // blur; the canonical state still flows from props (the post-rename
+  // meeting) so an external refresh would override stale local input.
+  const [draft, setDraft] = useState(speaker.label ?? "");
+  // Re-sync local draft whenever the upstream speaker label changes
+  // (e.g. after renameSpeaker resolves with the canonical row), so
+  // the input does not show stale text after a successful save.
+  useEffect(() => {
+    setDraft(speaker.label ?? "");
+  }, [speaker.label]);
+
+  const palette = paletteFor(speaker.slot);
+  const placeholder = `Speaker ${speaker.slot + 1}`;
+  const commit = () => {
+    const next = draft.trim();
+    const current = speaker.label ?? "";
+    if (next === current) return;
+    void onRename(speaker.id, next.length > 0 ? next : null);
+  };
+  return (
+    <div
+      className={`flex items-center gap-1.5 rounded-full px-2 py-0.5 text-xs ring-1 ring-inset ${palette.bg} ${palette.text} ${palette.ring}`}
+    >
+      <span className="font-semibold tabular-nums">{shortTag(speaker.slot)}</span>
+      <input
+        type="text"
+        value={draft}
+        placeholder={placeholder}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") {
+            e.currentTarget.blur();
+          } else if (e.key === "Escape") {
+            setDraft(speaker.label ?? "");
+            e.currentTarget.blur();
+          }
+        }}
+        aria-label={`Rename ${displayName(speaker)}`}
+        className="w-28 bg-transparent outline-none placeholder:text-current placeholder:opacity-60"
+      />
+    </div>
   );
 }
 
@@ -683,13 +848,42 @@ function TranscriptRow({ line }: { line: StreamLine }) {
     );
   }
   return (
-    <li className="flex gap-3">
+    <li className="flex items-baseline gap-3">
       <span className="w-12 shrink-0 tabular-nums text-zinc-500">{ts}</span>
+      {line.speakerSlot !== undefined && (
+        <SpeakerChip slot={line.speakerSlot} label={shortTag(line.speakerSlot)} compact />
+      )}
       <span className="flex-1">{line.text}</span>
       <span className="shrink-0 text-zinc-400">
         {line.language ?? "?"} · rtf {line.rtf.toFixed(2)}
       </span>
     </li>
+  );
+}
+
+/**
+ * Coloured pill identifying a speaker. `compact` halves the padding
+ * for dense rows (live transcript); the meeting-detail view uses the
+ * full size in the speakers list.
+ */
+function SpeakerChip({
+  slot,
+  label,
+  compact,
+}: {
+  slot: number;
+  label: string;
+  compact?: boolean;
+}) {
+  const palette = paletteFor(slot);
+  const sizing = compact ? "px-1.5 py-0 text-[10px]" : "px-2 py-0.5 text-xs";
+  return (
+    <span
+      className={`inline-flex shrink-0 items-center rounded-full font-medium tabular-nums ring-1 ring-inset ${palette.bg} ${palette.text} ${palette.ring} ${sizing}`}
+      title={`Speaker slot ${slot + 1}`}
+    >
+      {label}
+    </span>
   );
 }
 

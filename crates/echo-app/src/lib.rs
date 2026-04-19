@@ -17,5 +17,6 @@ pub mod use_cases;
 
 pub use services::meeting_recorder::MeetingRecorder;
 pub use services::wer::{compute as compute_wer, normalize as normalize_for_wer, WerStats};
+pub use use_cases::rename_speaker::{RenameSpeaker, RenameSpeakerError, MAX_LABEL_CHARS};
 pub use use_cases::start_recording::{FrameSink, RecordToSink, RecordingReport};
 pub use use_cases::streaming::{StreamingError, StreamingHandle, StreamingPipeline};

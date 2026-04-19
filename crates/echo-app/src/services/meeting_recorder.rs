@@ -327,6 +327,22 @@ mod tests {
             }
             Ok(())
         }
+        async fn rename_speaker(
+            &self,
+            meeting_id: MeetingId,
+            speaker_id: SpeakerId,
+            label: Option<&str>,
+        ) -> Result<bool, DomainError> {
+            let mut guard = self.meetings.lock().unwrap();
+            let Some(m) = guard.iter_mut().find(|m| m.summary.id == meeting_id) else {
+                return Ok(false);
+            };
+            let Some(s) = m.speakers.iter_mut().find(|s| s.id == speaker_id) else {
+                return Ok(false);
+            };
+            s.label = label.map(|l| l.to_string());
+            Ok(true)
+        }
         async fn list_speakers(&self, meeting_id: MeetingId) -> Result<Vec<Speaker>, DomainError> {
             let guard = self.meetings.lock().unwrap();
             Ok(guard

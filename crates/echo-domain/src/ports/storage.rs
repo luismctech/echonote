@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::entities::meeting::{Meeting, MeetingId, MeetingSummary};
 use crate::entities::segment::Segment;
-use crate::entities::speaker::Speaker;
+use crate::entities::speaker::{Speaker, SpeakerId};
 use crate::ports::audio::AudioFormat;
 use crate::DomainError;
 
@@ -86,6 +86,20 @@ pub trait MeetingStore: Send + Sync {
     /// `slot` ascending. Returns an empty vec when the meeting is
     /// unknown or has no diarized speakers yet.
     async fn list_speakers(&self, meeting_id: MeetingId) -> Result<Vec<Speaker>, DomainError>;
+
+    /// Set or clear a speaker's user-visible label. Distinct from
+    /// [`MeetingStore::upsert_speaker`] because the rename flow needs
+    /// to address the row by `SpeakerId` (so the UI can rename a
+    /// speaker without knowing its slot) and must be able to clear
+    /// the label back to `None` (which the COALESCE upsert cannot
+    /// express). Returns `false` when the (meeting, speaker) pair
+    /// was not found, so the use case can surface a 404 to the UI.
+    async fn rename_speaker(
+        &self,
+        meeting_id: MeetingId,
+        speaker_id: SpeakerId,
+        label: Option<&str>,
+    ) -> Result<bool, DomainError>;
 
     /// Update the meeting header. Used by `stop_recording` to mark a
     /// session as ended.

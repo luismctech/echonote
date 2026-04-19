@@ -15,12 +15,16 @@ use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::task::JoinHandle;
 
-use echo_app::{MeetingRecorder, StreamingHandle, StreamingPipeline};
+use echo_app::{
+    MeetingRecorder, RenameSpeaker, RenameSpeakerError, StreamingHandle, StreamingPipeline,
+};
 use echo_asr::WhisperCppTranscriber;
 use echo_audio::{RoutingAudioCapture, RubatoResamplerAdapter};
+use echo_diarize::{Eres2NetEmbedder, OnlineDiarizer};
 use echo_domain::{
-    AudioCapture, AudioFormat, AudioSource, CaptureSpec, Meeting, MeetingId, MeetingStore,
-    MeetingSummary, Resampler, StreamingOptions, StreamingSessionId, Transcriber, TranscriptEvent,
+    AudioCapture, AudioFormat, AudioSource, CaptureSpec, Diarizer, Meeting, MeetingId,
+    MeetingStore, MeetingSummary, Resampler, SpeakerId, StreamingOptions, StreamingSessionId,
+    Transcriber, TranscriptEvent,
 };
 use echo_storage::SqliteMeetingStore;
 
@@ -72,8 +76,13 @@ pub struct AppState {
     /// on first use.
     transcriber: AsyncMutex<Option<Arc<dyn Transcriber>>>,
     model_path: PathBuf,
+    /// Where to find the speaker embedder ONNX. The diarizer is opt-in
+    /// per-session (`StartStreamingOptions::diarize`); this just
+    /// records the default location so the UI does not have to know it.
+    embed_model_path: PathBuf,
     store: Arc<dyn MeetingStore>,
     recorder: Arc<MeetingRecorder>,
+    rename_speaker: Arc<RenameSpeaker>,
     sessions: Mutex<HashMap<StreamingSessionId, SessionEntry>>,
 }
 
@@ -90,6 +99,11 @@ impl AppState {
         let model_path = std::env::var("ECHO_ASR_MODEL")
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from("./models/asr/ggml-base.en.bin"));
+        let embed_model_path = std::env::var("ECHO_EMBED_MODEL")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| {
+                PathBuf::from("./models/embedder/3dspeaker_speech_eres2net_sv_en_voxceleb_16k.onnx")
+            });
 
         let db_path = resolve_db_path();
         let store = SqliteMeetingStore::open(&db_path)
@@ -99,19 +113,46 @@ impl AppState {
 
         let store: Arc<dyn MeetingStore> = Arc::new(store);
         let recorder = Arc::new(MeetingRecorder::with_default_title(store.clone()));
+        let rename_speaker = Arc::new(RenameSpeaker::new(store.clone()));
 
         Ok(Self {
-            // Single facade for both the cpal mic and the macOS
-            // ScreenCaptureKit loopback. The `source` field of
-            // `StartStreamingOptions` decides which one runs.
             capture: Arc::new(RoutingAudioCapture::with_default_adapters()),
             resampler: Arc::new(RubatoResamplerAdapter),
             transcriber: AsyncMutex::new(None),
             model_path,
+            embed_model_path,
             store,
             recorder,
+            rename_speaker,
             sessions: Mutex::new(HashMap::new()),
         })
+    }
+
+    /// Build a fresh diarizer for the upcoming session. Each session
+    /// gets its own `OnlineDiarizer` because the trait is stateful
+    /// (the cluster centroids belong to a single recording). The
+    /// embedder is reloaded from disk per session — the ONNX load is
+    /// O(100ms), well under the user-perceptible threshold for a
+    /// "Start" click — but cached `tract` graphs could be wired in if
+    /// this ever shows up in profiling.
+    fn build_diarizer(&self, override_path: Option<PathBuf>) -> Result<Box<dyn Diarizer>, String> {
+        let path = override_path.unwrap_or_else(|| self.embed_model_path.clone());
+        if !path.exists() {
+            return Err(format!(
+                "speaker embedder not found at {}. Run `scripts/download-models.sh embed` \
+                 or set ECHO_EMBED_MODEL.",
+                path.display()
+            ));
+        }
+        let started = std::time::Instant::now();
+        let embedder = Eres2NetEmbedder::new(&path)
+            .map_err(|e| format!("load speaker embedder at {}: {e}", path.display()))?;
+        tracing::info!(
+            model = %path.display(),
+            load_ms = started.elapsed().as_millis() as u64,
+            "speaker embedder ready"
+        );
+        Ok(Box::new(OnlineDiarizer::with_defaults(Box::new(embedder))))
     }
 
     async fn ensure_transcriber(&self) -> Result<Arc<dyn Transcriber>, String> {
@@ -187,6 +228,17 @@ pub struct StartStreamingOptions {
     /// RMS threshold below which a chunk is reported as `Skipped`
     /// instead of being sent to the ASR. `None` ⇒ 0.005.
     pub silence_rms_threshold: Option<f32>,
+    /// Enable speaker diarization for this session. `None`/`false` ⇒
+    /// disabled (keeps Sprint 0 behaviour). When enabled the backend
+    /// loads the speaker embedder named by `ECHO_EMBED_MODEL` (or the
+    /// default path) and attaches an `OnlineDiarizer` to the pipeline,
+    /// so every emitted `Chunk` event carries `speakerId` +
+    /// `speakerSlot` and the meeting persists its speakers.
+    pub diarize: Option<bool>,
+    /// Override path to the speaker-embedder ONNX. `None` ⇒ use the
+    /// path resolved at app start. Mostly useful for tests / power
+    /// users; the UI does not surface it.
+    pub embed_model_path: Option<PathBuf>,
 }
 
 /// Start a streaming transcription session. Events are pushed through
@@ -230,8 +282,12 @@ pub async fn start_streaming(
     };
 
     let transcriber = state.ensure_transcriber().await?;
-    let pipeline =
+    let mut pipeline =
         StreamingPipeline::new(state.capture.clone(), state.resampler.clone(), transcriber);
+    if opts.diarize.unwrap_or(false) {
+        let diarizer = state.build_diarizer(opts.embed_model_path)?;
+        pipeline = pipeline.with_diarizer(diarizer);
+    }
 
     let handle = pipeline
         .start_with_spec(spec, streaming_options)
@@ -355,4 +411,34 @@ pub async fn delete_meeting(state: State<'_, AppState>, id: MeetingId) -> Result
         .delete(id)
         .await
         .map_err(|e| format!("delete meeting: {e}"))
+}
+
+/// Rename a diarized speaker (or clear the label back to anonymous
+/// by passing `null`/empty). Returns the freshly-loaded meeting so
+/// the frontend can re-render speakers + segment chips from a single
+/// source of truth without an extra `get_meeting` round-trip.
+#[tauri::command]
+pub async fn rename_speaker(
+    state: State<'_, AppState>,
+    meeting_id: MeetingId,
+    speaker_id: SpeakerId,
+    label: Option<String>,
+) -> Result<Meeting, String> {
+    state
+        .rename_speaker
+        .execute(meeting_id, speaker_id, label)
+        .await
+        .map_err(|e| match e {
+            RenameSpeakerError::NotFound { .. } => format!("not found: {e}"),
+            RenameSpeakerError::Invalid(msg) => format!("invalid: {msg}"),
+            RenameSpeakerError::Storage(err) => format!("storage: {err}"),
+        })?;
+    // Re-fetch so the UI sees the canonical post-rename state
+    // (including speakers with refreshed labels and segments).
+    state
+        .store
+        .get(meeting_id)
+        .await
+        .map_err(|e| format!("reload meeting: {e}"))?
+        .ok_or_else(|| format!("meeting {meeting_id} disappeared after rename"))
 }

@@ -53,6 +53,22 @@ export type Segment = {
   confidence: number | null;
 };
 
+/** UUIDv7 string identifying a diarized speaker within a meeting. */
+export type SpeakerId = string;
+
+/**
+ * One clustered voice within a meeting.
+ *
+ * `slot` is the 0-based arrival order; the UI palette is indexed by
+ * it so the colour stays stable across renames and reloads. `label`
+ * is `null` for anonymous speakers; render `Speaker {slot+1}` then.
+ */
+export type Speaker = {
+  id: SpeakerId;
+  slot: number;
+  label: string | null;
+};
+
 /** Discriminated union of every event the backend may emit. */
 export type TranscriptEvent =
   | {
@@ -68,6 +84,19 @@ export type TranscriptEvent =
       segments: Segment[];
       language: string | null;
       rtf: number;
+      /**
+       * Speaker the diarizer assigned to every segment in this chunk.
+       * `undefined` (omitted on the wire) when no diarizer is wired
+       * into the pipeline OR when the chunk was too short to embed.
+       */
+      speakerId?: SpeakerId;
+      /**
+       * Arrival-order slot of {@link speakerId}, mirrored so the UI
+       * palette can colour the chip without round-tripping through
+       * the speakers list. `undefined` whenever `speakerId` is
+       * `undefined`.
+       */
+      speakerSlot?: number;
     }
   | {
       type: "skipped";
@@ -107,6 +136,18 @@ export type StartStreamingOptions = {
   deviceId?: string;
   chunkMs?: number;
   silenceRmsThreshold?: number;
+  /**
+   * Enable speaker diarization. When `true`, the backend loads the
+   * speaker embedder and attaches an online diarizer to the pipeline,
+   * so every chunk event carries a `speakerId` + `speakerSlot` and
+   * the meeting persists its speakers. Defaults to `false`.
+   */
+  diarize?: boolean;
+  /**
+   * Override path to the speaker-embedder ONNX. Most callers should
+   * leave this unset so the backend uses its configured default.
+   */
+  embedModelPath?: string;
 };
 
 /**
@@ -158,10 +199,12 @@ export type MeetingSummary = {
   segmentCount: number;
 };
 
-/** Full meeting aggregate (header + segments). */
+/** Full meeting aggregate (header + segments + speakers). */
 export type Meeting = MeetingSummary & {
   inputFormat: AudioFormat;
   segments: Segment[];
+  /** Diarized speakers, ordered by `slot` ascending. May be empty. */
+  speakers: Speaker[];
 };
 
 /**
@@ -181,4 +224,23 @@ export async function getMeeting(id: MeetingId): Promise<Meeting | null> {
 /** Delete a meeting and its segments. Resolves to `true` when deleted. */
 export async function deleteMeeting(id: MeetingId): Promise<boolean> {
   return invoke<boolean>("delete_meeting", { id });
+}
+
+/**
+ * Set or clear a speaker's user-visible label. Pass `null` (or an
+ * empty string) to revert the speaker to anonymous so the UI renders
+ * `Speaker N` again. Returns the freshly-loaded meeting so the caller
+ * can re-render speakers + segment chips from a single source of
+ * truth without an extra `getMeeting` round-trip.
+ */
+export async function renameSpeaker(
+  meetingId: MeetingId,
+  speakerId: SpeakerId,
+  label: string | null,
+): Promise<Meeting> {
+  return invoke<Meeting>("rename_speaker", {
+    meetingId,
+    speakerId,
+    label,
+  });
 }
