@@ -27,7 +27,9 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
-use echo_app::{FrameSink, MeetingRecorder, RecordToSink, StreamingPipeline};
+use echo_app::{
+    compute_wer, FrameSink, MeetingRecorder, RecordToSink, StreamingPipeline, WerStats,
+};
 use echo_asr::WhisperCppTranscriber;
 use echo_audio::{
     resample_to_whisper, CpalMicrophoneCapture, RubatoResamplerAdapter, WavSink, WriteOptions,
@@ -189,9 +191,42 @@ enum MeetingsKind {
 #[derive(Subcommand, Debug)]
 enum BenchKind {
     /// Word Error Rate benchmark over fixture audios.
-    Wer,
+    ///
+    /// Discovers `<fixtures>/audio/<name>.wav` paired with
+    /// `<fixtures>/transcripts/<name>.txt`, runs Whisper on each, and
+    /// reports per-clip + global WER along with RTF stats. Exits non-zero
+    /// when global WER exceeds `--max-wer`.
+    Wer {
+        /// Path to the fixtures root (must contain `audio/` and `transcripts/`).
+        #[arg(long, default_value = "./fixtures")]
+        fixtures: PathBuf,
+        /// Path to a `ggml-*.bin` Whisper model. Defaults to the
+        /// `ECHO_ASR_MODEL` env var or `./models/asr/ggml-base.en.bin`.
+        #[arg(long, env = "ECHO_ASR_MODEL")]
+        model: Option<PathBuf>,
+        /// ISO-639-1 hint passed to whisper.
+        #[arg(long, default_value = "en")]
+        language: String,
+        /// Fail the run if global WER exceeds this fraction (0..=1).
+        #[arg(long, default_value_t = 0.25)]
+        max_wer: f64,
+        /// Optional path to write a JSON report. Parent dirs created.
+        #[arg(long)]
+        report: Option<PathBuf>,
+    },
     /// LLM summary benchmark over gold transcripts.
-    Llm,
+    ///
+    /// Scaffolding only — wires the contract (input set, prompt
+    /// template, tokens/s + latency reporting). Exits with a clear
+    /// message until the `echo-llm` adapter lands in Sprint 1.
+    Llm {
+        /// Path to the fixtures root (uses `transcripts/`).
+        #[arg(long, default_value = "./fixtures")]
+        fixtures: PathBuf,
+        /// Optional path to a GGUF model (Qwen2.5-3B etc.).
+        #[arg(long, env = "ECHO_LLM_MODEL")]
+        model: Option<PathBuf>,
+    },
 }
 
 #[tokio::main]
@@ -246,10 +281,16 @@ async fn main() -> Result<()> {
             );
             Ok(())
         }
-        Command::Bench { kind } => {
-            tracing::info!(?kind, "bench subcommand not yet wired (Sprint 0 day 9-10)");
-            Ok(())
-        }
+        Command::Bench { kind } => match kind {
+            BenchKind::Wer {
+                fixtures,
+                model,
+                language,
+                max_wer,
+                report,
+            } => run_bench_wer(fixtures, model, language, max_wer, report).await,
+            BenchKind::Llm { fixtures, model } => run_bench_llm(fixtures, model).await,
+        },
         Command::Meetings { kind } => run_meetings(kind).await,
     }
 }
@@ -663,6 +704,285 @@ async fn run_meetings(kind: MeetingsKind) -> Result<()> {
 fn parse_meeting_id(s: &str) -> Result<MeetingId> {
     let uuid = uuid::Uuid::parse_str(s).with_context(|| format!("invalid meeting id: {s:?}"))?;
     Ok(MeetingId(uuid))
+}
+
+// ---------------------------------------------------------------------------
+// `bench wer` subcommand
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, serde::Serialize)]
+struct WerClipReport {
+    name: String,
+    reference_words: u32,
+    hypothesis_words: u32,
+    substitutions: u32,
+    deletions: u32,
+    insertions: u32,
+    wer: f64,
+    audio_seconds: f64,
+    elapsed_seconds: f64,
+    rtf: f64,
+    detected_language: Option<String>,
+    hypothesis: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct WerBenchReport {
+    model: String,
+    language: String,
+    clips: Vec<WerClipReport>,
+    global_wer: f64,
+    rtf_p50: f64,
+    rtf_p95: f64,
+    total_audio_seconds: f64,
+    total_elapsed_seconds: f64,
+    max_wer_threshold: f64,
+}
+
+async fn run_bench_wer(
+    fixtures: PathBuf,
+    model: Option<PathBuf>,
+    language: String,
+    max_wer: f64,
+    report_path: Option<PathBuf>,
+) -> Result<()> {
+    if !(0.0..=1.0).contains(&max_wer) {
+        anyhow::bail!("--max-wer must be in [0, 1], got {max_wer}");
+    }
+
+    let model_path = model
+        .or_else(|| Some(PathBuf::from("./models/asr/ggml-base.en.bin")))
+        .filter(|p| p.exists())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "no model found. Set --model or ECHO_ASR_MODEL, or run \
+                 `scripts/download-models.sh base.en` to fetch the default."
+            )
+        })?;
+
+    let pairs = discover_fixture_pairs(&fixtures)?;
+    if pairs.is_empty() {
+        anyhow::bail!(
+            "no fixtures found under {}. Run scripts/build-fixtures.sh first.",
+            fixtures.display()
+        );
+    }
+
+    println!(
+        "loading whisper model: {} ({} fixture pairs)",
+        model_path.display(),
+        pairs.len()
+    );
+    let load_started = std::time::Instant::now();
+    let transcriber = WhisperCppTranscriber::load(&model_path)
+        .map_err(anyhow::Error::from)
+        .context("failed to load whisper model")?;
+    tracing::info!(
+        load_ms = load_started.elapsed().as_millis() as u64,
+        "whisper context ready"
+    );
+
+    let mut clips = Vec::with_capacity(pairs.len());
+    for (name, wav, txt) in pairs {
+        let reference = std::fs::read_to_string(&txt)
+            .with_context(|| format!("read reference {}", txt.display()))?;
+        let (samples, source_format) =
+            load_wav_as_pcm(&wav).with_context(|| format!("read wav {}", wav.display()))?;
+
+        let pcm16k = resample_to_whisper(&samples, source_format)
+            .map_err(DomainError::from)
+            .context("resample to 16 kHz failed")?;
+        let audio_seconds = pcm16k.len() as f64 / f64::from(WHISPER_SAMPLE_RATE);
+
+        let opts = TranscribeOptions {
+            language: Some(language.clone()),
+            initial_prompt: None,
+            translate: false,
+            threads: None,
+        };
+        let started = std::time::Instant::now();
+        let transcript = transcriber.transcribe(&pcm16k, &opts).await?;
+        let elapsed = started.elapsed();
+        let elapsed_seconds = elapsed.as_secs_f64();
+        let rtf = elapsed_seconds / audio_seconds.max(1e-6);
+
+        let hypothesis = transcript.full_text();
+        let stats = compute_wer(&reference, &hypothesis);
+
+        println!(
+            "  {name:<28}  ref={ref_w:>4}  hyp={hyp_w:>4}  S={s:>2} D={d:>2} I={i:>2}  WER={wer:>6.2}%  rtf={rtf:.2}",
+            name = name,
+            ref_w = stats.reference_words,
+            hyp_w = stats.hypothesis_words,
+            s = stats.substitutions,
+            d = stats.deletions,
+            i = stats.insertions,
+            wer = stats.wer() * 100.0,
+            rtf = rtf,
+        );
+
+        clips.push(WerClipReport {
+            name,
+            reference_words: stats.reference_words,
+            hypothesis_words: stats.hypothesis_words,
+            substitutions: stats.substitutions,
+            deletions: stats.deletions,
+            insertions: stats.insertions,
+            wer: stats.wer(),
+            audio_seconds,
+            elapsed_seconds,
+            rtf,
+            detected_language: transcript.language.clone(),
+            hypothesis,
+        });
+    }
+
+    // Aggregate across clips.
+    let global_stats = clips
+        .iter()
+        .map(|c| WerStats {
+            reference_words: c.reference_words,
+            hypothesis_words: c.hypothesis_words,
+            substitutions: c.substitutions,
+            deletions: c.deletions,
+            insertions: c.insertions,
+        })
+        .fold(WerStats::default(), |a, b| a.merge(b));
+    let global_wer = global_stats.wer();
+    let total_audio: f64 = clips.iter().map(|c| c.audio_seconds).sum();
+    let total_elapsed: f64 = clips.iter().map(|c| c.elapsed_seconds).sum();
+    let mut rtfs: Vec<f64> = clips.iter().map(|c| c.rtf).collect();
+    rtfs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let rtf_p50 = percentile(&rtfs, 0.50);
+    let rtf_p95 = percentile(&rtfs, 0.95);
+
+    println!();
+    println!(
+        "global  WER={:.2}%  ({} clips, {:.1}s audio, {:.1}s elapsed, rtf p50={:.2} p95={:.2})",
+        global_wer * 100.0,
+        clips.len(),
+        total_audio,
+        total_elapsed,
+        rtf_p50,
+        rtf_p95,
+    );
+    println!("threshold: {:.2}%", max_wer * 100.0);
+
+    let report = WerBenchReport {
+        model: model_path.display().to_string(),
+        language: language.clone(),
+        clips,
+        global_wer,
+        rtf_p50,
+        rtf_p95,
+        total_audio_seconds: total_audio,
+        total_elapsed_seconds: total_elapsed,
+        max_wer_threshold: max_wer,
+    };
+
+    if let Some(path) = report_path {
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("create report parent dir {}", parent.display()))?;
+            }
+        }
+        std::fs::write(&path, serde_json::to_vec_pretty(&report)?)
+            .with_context(|| format!("write report {}", path.display()))?;
+        println!("wrote report → {}", path.display());
+    }
+
+    if global_wer > max_wer {
+        anyhow::bail!(
+            "global WER {:.2}% exceeds gate {:.2}%",
+            global_wer * 100.0,
+            max_wer * 100.0
+        );
+    }
+
+    Ok(())
+}
+
+// Discover (basename, audio_path, transcript_path) triples. Skips
+// transcripts without a matching audio (common after pulling new
+// fixtures.txt without regenerating WAVs).
+fn discover_fixture_pairs(root: &Path) -> Result<Vec<(String, PathBuf, PathBuf)>> {
+    let txt_dir = root.join("transcripts");
+    let wav_dir = root.join("audio");
+    if !txt_dir.is_dir() {
+        anyhow::bail!("missing fixtures dir: {}", txt_dir.display());
+    }
+    if !wav_dir.is_dir() {
+        anyhow::bail!(
+            "missing fixtures dir: {} (run scripts/build-fixtures.sh)",
+            wav_dir.display()
+        );
+    }
+    let mut pairs = Vec::new();
+    for entry in std::fs::read_dir(&txt_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("txt") {
+            continue;
+        }
+        let stem = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .ok_or_else(|| anyhow::anyhow!("invalid filename: {}", path.display()))?
+            .to_string();
+        let wav = wav_dir.join(format!("{stem}.wav"));
+        if !wav.exists() {
+            tracing::warn!(
+                fixture = %stem,
+                "skipping fixture: matching wav not found at {}",
+                wav.display()
+            );
+            continue;
+        }
+        pairs.push((stem, wav, path));
+    }
+    pairs.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(pairs)
+}
+
+fn percentile(sorted: &[f64], p: f64) -> f64 {
+    if sorted.is_empty() {
+        return 0.0;
+    }
+    let idx = ((sorted.len() as f64 - 1.0) * p).round() as usize;
+    sorted[idx.min(sorted.len() - 1)]
+}
+
+// ---------------------------------------------------------------------------
+// `bench llm` subcommand (scaffolding)
+// ---------------------------------------------------------------------------
+
+async fn run_bench_llm(fixtures: PathBuf, model: Option<PathBuf>) -> Result<()> {
+    let txt_dir = fixtures.join("transcripts");
+    if !txt_dir.is_dir() {
+        anyhow::bail!("missing fixtures dir: {}", txt_dir.display());
+    }
+    let mut transcripts = Vec::new();
+    for entry in std::fs::read_dir(&txt_dir)? {
+        let path = entry?.path();
+        if path.extension().and_then(|s| s.to_str()) == Some("txt") {
+            transcripts.push(path);
+        }
+    }
+    transcripts.sort();
+    println!("bench llm contract:");
+    println!("  · would summarize {} transcripts", transcripts.len());
+    println!(
+        "  · model: {}",
+        model
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "<unset>".into())
+    );
+    println!("  · metrics: tokens/s, time-to-first-token, total latency");
+    println!();
+    println!("  not yet runnable — `echo-llm` adapter lands in Sprint 1 (chat use case).");
+    println!("  this subcommand intentionally exits 0 so CI can wire the job ahead of time.");
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

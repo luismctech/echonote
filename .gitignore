@@ -111,3 +111,14 @@ cobertura.xml
 echonote.db
 echonote.db-shm
 echonote.db-wal
+
+# -----------------------------------------------------------------------------
+# Bench fixtures: WAVs are regenerated locally via scripts/build-fixtures.sh
+# (transcripts under fixtures/transcripts/ ARE checked in).
+# -----------------------------------------------------------------------------
+fixtures/audio/
+
+# -----------------------------------------------------------------------------
+# Bench reports
+# -----------------------------------------------------------------------------
+target/bench-reports/
