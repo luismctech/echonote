@@ -2,6 +2,19 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Tauri runs in a single fixed window, so the app should fit the
+ * viewport rather than scroll the body. We pin html/body/#root to
+ * 100% height and disable overflow; the inner panes own their own
+ * scroll regions instead. Without this, a too-tall right pane forces
+ * the whole window to scroll vertically *and* the toaster (fixed to
+ * the bottom-right) to drift out of view. */
+html,
+body,
+#root {
+  height: 100%;
+  overflow: hidden;
+}
+
 /* Selection: editorial, subtle. Final palette lands in Sprint 1. */
 ::selection {
   background-color: rgb(24 24 27 / 0.1);

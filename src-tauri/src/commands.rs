@@ -96,10 +96,15 @@ impl AppState {
     /// runs migrations, which is I/O. The transcriber is *not* loaded
     /// eagerly — the first `start_streaming` call pays that cost.
     pub async fn initialize() -> Result<Self, String> {
-        let model_path = resolve_asset_path(
-            std::env::var("ECHO_ASR_MODEL").ok(),
-            "models/asr/ggml-base.en.bin",
-        );
+        // Prefer the multilingual `ggml-base.bin` when it's installed
+        // (the user may have downloaded it for Spanish / pt / fr / …),
+        // and only fall back to the `.en`-only base if that's all that
+        // exists. This keeps Sprint 0 setups working without forcing a
+        // re-download, while making non-English audio actually
+        // transcribe out of the box for users who ran
+        // `scripts/download-models.sh base`.
+        let model_path =
+            resolve_asset_path(std::env::var("ECHO_ASR_MODEL").ok(), preferred_asr_model());
         let embed_model_path = resolve_asset_path(
             std::env::var("ECHO_EMBED_MODEL").ok(),
             // Matches what `scripts/download-models.sh embed` writes.
@@ -190,6 +195,35 @@ impl AppState {
 /// that's deferred until Sprint 1 when the installer lands.
 fn resolve_db_path() -> PathBuf {
     resolve_asset_path(std::env::var("ECHO_DB_PATH").ok(), "echonote.db")
+}
+
+/// Pick the ASR model to load by default, in priority order:
+/// the largest installed multilingual ggml model first (so non-English
+/// users get a working transcript without env overrides), then
+/// English-only fallbacks for backwards compatibility with Sprint 0
+/// setups. Resolution against the workspace happens later in
+/// [`resolve_asset_path`]; here we only pick a *relative* path that
+/// the resolver checks for existence.
+fn preferred_asr_model() -> &'static str {
+    const CANDIDATES: &[&str] = &[
+        "models/asr/ggml-large-v3.bin",
+        "models/asr/ggml-medium.bin",
+        "models/asr/ggml-small.bin",
+        "models/asr/ggml-base.bin",
+        "models/asr/ggml-tiny.bin",
+        "models/asr/ggml-base.en.bin",
+        "models/asr/ggml-small.en.bin",
+        "models/asr/ggml-tiny.en.bin",
+    ];
+    let root = workspace_root();
+    for rel in CANDIDATES {
+        if root.join(rel).exists() {
+            return rel;
+        }
+    }
+    // Nothing installed yet — default to multilingual base so the
+    // error message points the user at the right download command.
+    "models/asr/ggml-base.bin"
 }
 
 /// Resolve an asset path with sensible dev-vs-prod fallbacks.

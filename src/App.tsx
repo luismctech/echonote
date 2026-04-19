@@ -96,6 +96,14 @@ export function App() {
   // for users who haven't downloaded the embedder yet. Persists across
   // session restarts within a tab; resets on reload.
   const [diarize, setDiarize] = useState(false);
+  // Language hint passed to whisper. `""` means "let the model auto-detect"
+  // and is mapped to `undefined` in the IPC payload. We default to Spanish
+  // because that's the primary target language for this build, but the
+  // user can switch on the fly. The `.en`-only model will report any
+  // non-English audio as "(speaking in foreign language)" — that's a
+  // model-capability issue, not a UI bug; surfacing the picker makes the
+  // dependency on a multilingual model obvious.
+  const [language, setLanguage] = useState<string>("es");
 
   // Sidebar search (Sprint 1 day 8). `searchInput` mirrors the text
   // box character-by-character; `searchQuery` is the debounced value
@@ -302,8 +310,14 @@ export function App() {
     setView({ kind: "live" });
     dispatch({ type: "START_REQUESTED" });
     try {
+      const langHint = language.trim();
       await startStreaming(
-        { chunkMs: 5_000, silenceRmsThreshold: 0.005, diarize },
+        {
+          chunkMs: 5_000,
+          silenceRmsThreshold: 0.005,
+          diarize,
+          ...(langHint.length > 0 ? { language: langHint } : {}),
+        },
         handleEvent,
       );
     } catch (err) {
@@ -413,32 +427,43 @@ export function App() {
   const canStart = probe.kind === "ok" && selectCanStart(stream);
   const canStop = selectCanStop(stream);
 
+  // Switching to the live pane after a session finished should also
+  // clear the previous transcript and reset the state machine to
+  // idle, otherwise the user sees stale lines + a "✓ saved" status
+  // and wonders why the Start button is "disabled" (it isn't, but
+  // the visual context implies the recording is still in flight).
+  const goLive = useCallback(() => {
+    setView({ kind: "live" });
+    if (stream.kind === "persisted" || stream.kind === "error") {
+      dispatch({ type: "ACKNOWLEDGE" });
+      setLines([]);
+      setStats({ chunks: 0, skipped: 0, audioMs: 0 });
+    }
+  }, [stream.kind]);
+
   return (
-    <main className="mx-auto flex min-h-screen max-w-6xl flex-col gap-6 px-6 py-10">
-      <header className="flex flex-col items-start gap-1">
-        <h1 className="text-3xl font-semibold tracking-tight">EchoNote</h1>
-        <p className="text-sm text-zinc-500 dark:text-zinc-400">
-          Private, local-first meeting transcription and AI summaries.
-        </p>
+    <main className="flex h-full w-full flex-col gap-3 overflow-hidden px-4 py-3 sm:px-6 sm:py-4">
+      <header className="flex flex-shrink-0 items-end justify-between gap-4">
+        <div className="flex flex-col">
+          <h1 className="text-xl font-semibold tracking-tight sm:text-2xl">
+            EchoNote
+          </h1>
+          <p className="hidden text-xs text-zinc-500 dark:text-zinc-400 sm:block">
+            Private, local-first meeting transcription and AI summaries.
+          </p>
+        </div>
+        <HealthProbe probe={probe} />
       </header>
 
-      <section
-        aria-label="Backend probe"
-        aria-live="polite"
-        className="rounded-lg border border-zinc-200 bg-zinc-50 p-3 font-mono text-xs leading-relaxed dark:border-zinc-800 dark:bg-zinc-900"
-      >
-        <HealthProbe probe={probe} />
-      </section>
-
-      <div className="grid grid-cols-1 gap-6 md:grid-cols-[280px_1fr]">
-        <aside className="flex flex-col gap-3 rounded-lg border border-zinc-200 bg-white p-4 shadow-sm dark:border-zinc-800 dark:bg-zinc-950">
+      <div className="grid min-h-0 flex-1 grid-cols-1 gap-4 md:grid-cols-[260px_1fr]">
+        <aside className="flex min-h-0 flex-col gap-2 overflow-hidden rounded-lg border border-zinc-200 bg-white p-3 shadow-sm dark:border-zinc-800 dark:bg-zinc-950">
           <header className="flex items-center justify-between">
             <h2 className="text-sm font-semibold tracking-wide text-zinc-700 dark:text-zinc-200">
               Meetings
             </h2>
             <button
               type="button"
-              onClick={() => setView({ kind: "live" })}
+              onClick={goLive}
               className="rounded-md border border-zinc-200 px-2 py-0.5 text-xs text-zinc-600 hover:bg-zinc-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
             >
               + Live
@@ -454,26 +479,28 @@ export function App() {
             onChange={setSearchInput}
             loading={searchLoading}
           />
-          {isSearching ? (
-            <SearchResults
-              query={searchQuery.trim()}
-              hits={searchHits}
-              loading={searchLoading}
-              error={searchError}
-              activeId={view.kind === "meeting" ? view.id : null}
-              onSelect={(m) => void openMeeting(m.id)}
-            />
-          ) : (
-            <MeetingsList
-              meetings={meetings}
-              activeId={view.kind === "meeting" ? view.id : null}
-              onSelect={(m) => void openMeeting(m.id)}
-              onDelete={(m) => void onDeleteMeeting(m.id)}
-            />
-          )}
+          <div className="min-h-0 flex-1 overflow-y-auto">
+            {isSearching ? (
+              <SearchResults
+                query={searchQuery.trim()}
+                hits={searchHits}
+                loading={searchLoading}
+                error={searchError}
+                activeId={view.kind === "meeting" ? view.id : null}
+                onSelect={(m) => void openMeeting(m.id)}
+              />
+            ) : (
+              <MeetingsList
+                meetings={meetings}
+                activeId={view.kind === "meeting" ? view.id : null}
+                onSelect={(m) => void openMeeting(m.id)}
+                onDelete={(m) => void onDeleteMeeting(m.id)}
+              />
+            )}
+          </div>
         </aside>
 
-        <section className="flex flex-col gap-4 rounded-lg border border-zinc-200 bg-white p-5 shadow-sm dark:border-zinc-800 dark:bg-zinc-950">
+        <section className="flex min-h-0 min-w-0 flex-col gap-3 overflow-hidden rounded-lg border border-zinc-200 bg-white p-4 shadow-sm dark:border-zinc-800 dark:bg-zinc-950">
           {view.kind === "live" ? (
             <LivePane
               stream={stream}
@@ -484,6 +511,8 @@ export function App() {
               canStop={canStop}
               diarize={diarize}
               onToggleDiarize={setDiarize}
+              language={language}
+              onChangeLanguage={setLanguage}
               onStart={onStart}
               onStop={onStop}
               onDismissError={() => dispatch({ type: "ACKNOWLEDGE" })}
@@ -493,10 +522,6 @@ export function App() {
           )}
         </section>
       </div>
-
-      <footer className="text-xs text-zinc-400 dark:text-zinc-600">
-        Sprint 1 · day 8 · FTS5 search
-      </footer>
     </main>
   );
 }
@@ -524,7 +549,7 @@ function MeetingsList({
     );
   }
   return (
-    <ul className="flex flex-col gap-1 overflow-y-auto" style={{ maxHeight: "60vh" }}>
+    <ul className="flex flex-col gap-1">
       {meetings.map((m) => {
         const active = m.id === activeId;
         return (
@@ -696,6 +721,8 @@ function LivePane({
   canStop,
   diarize,
   onToggleDiarize,
+  language,
+  onChangeLanguage,
   onStart,
   onStop,
   onDismissError,
@@ -708,27 +735,52 @@ function LivePane({
   canStop: boolean;
   diarize: boolean;
   onToggleDiarize: (next: boolean) => void;
+  language: string;
+  onChangeLanguage: (next: string) => void;
   onStart: () => void;
   onStop: () => void;
   onDismissError: () => void;
 }) {
   // Toggle is locked once a session is in flight: changing the
-  // diarize flag mid-recording would make half the chunks have
-  // speakers and half not, which is confusing to render.
+  // diarize flag (or language hint) mid-recording would mix
+  // half-and-half results and is confusing to render.
   const toggleLocked =
     stream.kind === "starting" ||
     stream.kind === "recording" ||
     stream.kind === "stopping";
   return (
     <>
-      <header className="flex items-center justify-between gap-4">
+      <header className="flex flex-shrink-0 flex-wrap items-center justify-between gap-3">
         <div>
-          <h2 className="text-lg font-medium">Live transcript</h2>
+          <h2 className="text-base font-medium sm:text-lg">Live transcript</h2>
           <p className="text-xs text-zinc-500 dark:text-zinc-400">
             5-second windows · whisper.cpp · {modelLabel(stream)}
           </p>
         </div>
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center gap-3">
+          <label
+            className={`flex select-none items-center gap-1.5 text-xs ${
+              toggleLocked ? "opacity-60" : "cursor-pointer"
+            }`}
+            title="Hint passed to whisper. 'auto' lets the model detect."
+          >
+            <span className="text-zinc-500 dark:text-zinc-400">Lang</span>
+            <select
+              value={language}
+              disabled={toggleLocked}
+              onChange={(e) => onChangeLanguage(e.target.value)}
+              className="rounded border border-zinc-200 bg-white px-1.5 py-0.5 text-xs dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200"
+              aria-label="Transcription language"
+            >
+              <option value="">auto</option>
+              <option value="es">es</option>
+              <option value="en">en</option>
+              <option value="pt">pt</option>
+              <option value="fr">fr</option>
+              <option value="de">de</option>
+              <option value="it">it</option>
+            </select>
+          </label>
           <label
             className={`flex select-none items-center gap-2 text-xs ${
               toggleLocked ? "opacity-60" : "cursor-pointer"
@@ -784,7 +836,7 @@ function LivePane({
 
       <div
         ref={listRef}
-        className="h-[60vh] overflow-y-auto rounded-md border border-zinc-100 bg-zinc-50 p-3 font-mono text-xs leading-relaxed dark:border-zinc-900 dark:bg-zinc-900/60"
+        className="min-h-0 flex-1 overflow-y-auto rounded-md border border-zinc-100 bg-zinc-50 p-3 font-mono text-xs leading-relaxed dark:border-zinc-900 dark:bg-zinc-900/60"
       >
         {lines.length === 0 ? (
           <p className="text-zinc-400">
@@ -829,8 +881,8 @@ function MeetingDetail({
   const speakerIndex = indexSpeakers(m.speakers);
   return (
     <>
-      <header className="flex flex-col gap-1">
-        <h2 className="text-lg font-medium">{m.title}</h2>
+      <header className="flex flex-shrink-0 flex-col gap-1">
+        <h2 className="text-base font-medium sm:text-lg">{m.title}</h2>
         <p className="text-xs text-zinc-500 dark:text-zinc-400">
           {formatDate(m.startedAt)} · {formatDurationMs(m.durationMs)} ·{" "}
           {m.language ?? "?"} · {m.segmentCount} segments
@@ -842,7 +894,7 @@ function MeetingDetail({
         <SpeakersPanel speakers={m.speakers} onRename={onRenameSpeaker} />
       )}
 
-      <div className="h-[60vh] overflow-y-auto rounded-md border border-zinc-100 bg-zinc-50 p-3 text-sm leading-relaxed dark:border-zinc-900 dark:bg-zinc-900/60">
+      <div className="min-h-0 flex-1 overflow-y-auto rounded-md border border-zinc-100 bg-zinc-50 p-3 text-sm leading-relaxed dark:border-zinc-900 dark:bg-zinc-900/60">
         {m.segments.length === 0 ? (
           <p className="text-zinc-400">No segments persisted for this meeting.</p>
         ) : (
@@ -965,29 +1017,49 @@ function modelLabel(stream: RecordingState): string {
 }
 
 function HealthProbe({ probe }: { probe: Probe }) {
+  // Single-line, font-mono pill that fits in the top-right of the header.
+  // The full health payload (target, commit, …) is exposed via a tooltip
+  // so it stays inspectable without consuming chrome real estate.
+  const base =
+    "flex items-center gap-1.5 rounded-md border px-2 py-1 font-mono text-[11px] leading-none whitespace-nowrap";
   switch (probe.kind) {
     case "idle":
-      return <p className="text-zinc-500">Warming up…</p>;
+      return (
+        <span
+          className={`${base} border-zinc-200 bg-zinc-50 text-zinc-500 dark:border-zinc-800 dark:bg-zinc-900`}
+        >
+          <span className="h-1.5 w-1.5 rounded-full bg-zinc-400" />
+          warming up…
+        </span>
+      );
     case "loading":
-      return <p className="text-zinc-500">Calling backend health_check…</p>;
+      return (
+        <span
+          className={`${base} border-zinc-200 bg-zinc-50 text-zinc-500 dark:border-zinc-800 dark:bg-zinc-900`}
+        >
+          <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-amber-400" />
+          probing backend…
+        </span>
+      );
     case "error":
       return (
-        <p className="text-amber-700 dark:text-amber-400">
-          <span className="font-semibold">offline:</span> {probe.message}
-        </p>
+        <span
+          className={`${base} border-amber-300 bg-amber-50 text-amber-800 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-300`}
+          title={probe.message}
+        >
+          <span className="h-1.5 w-1.5 rounded-full bg-amber-500" />
+          offline
+        </span>
       );
     case "ok":
       return (
-        <dl className="grid grid-cols-[max-content_1fr] gap-x-4 gap-y-0.5">
-          <dt className="text-zinc-500">backend</dt>
-          <dd className="text-emerald-700 dark:text-emerald-400">ok</dd>
-          <dt className="text-zinc-500">version</dt>
-          <dd>{probe.status.version}</dd>
-          <dt className="text-zinc-500">target</dt>
-          <dd>{probe.status.target}</dd>
-          <dt className="text-zinc-500">commit</dt>
-          <dd>{probe.status.commit}</dd>
-        </dl>
+        <span
+          className={`${base} border-emerald-300 bg-emerald-50 text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950/40 dark:text-emerald-300`}
+          title={`v${probe.status.version} · ${probe.status.target} · ${probe.status.commit}`}
+        >
+          <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
+          backend ok · v{probe.status.version}
+        </span>
       );
   }
 }

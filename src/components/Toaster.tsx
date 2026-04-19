@@ -67,22 +67,50 @@ function reducer(state: Toast[], action: ToastAction): Toast[] {
 // ---------------------------------------------------------------------------
 // Context + hook
 // ---------------------------------------------------------------------------
+//
+// Two separate contexts on purpose:
+//   - `ToastApiContext` is the *write* surface (`push` / `dismiss` / `clear`).
+//     Its value reference is stable across renders because all callbacks come
+//     from `useReducer`'s dispatch, which React guarantees is identity-stable.
+//   - `ToastListContext` is the *read* surface (the `Toast[]`). This changes
+//     every time a toast is pushed or dismissed.
+//
+// We split them because consumers should be able to depend on the *api*
+// (e.g. `useEffect(..., [toast])` to fire a one-shot notification) without
+// re-running every time the toast list mutates. A combined context bit us
+// in Sprint 1 day 8: pushing one toast caused effects keyed on `toast` to
+// re-fire, which pushed *another* toast — infinite loop until the reducer's
+// 5-toast cap clamped it, plus the auto-dismiss timer kept resetting because
+// `<ToastCard>` was re-rendered on every state change.
 
-type ToastContextValue = {
-  toasts: Toast[];
+type ToastApi = {
   push: (toast: ToastInput) => string;
   dismiss: (id: string) => void;
   clear: () => void;
 };
 
-const ToastContext = createContext<ToastContextValue | null>(null);
+const ToastApiContext = createContext<ToastApi | null>(null);
+const ToastListContext = createContext<Toast[]>([]);
 
-export function useToast(): ToastContextValue {
-  const ctx = useContext(ToastContext);
+/**
+ * Stable handle to push, dismiss, and clear toasts. The returned object is
+ * referentially stable across renders, so it is safe to put in `useEffect`
+ * dependency arrays without causing re-runs.
+ */
+export function useToast(): ToastApi {
+  const ctx = useContext(ToastApiContext);
   if (!ctx) {
     throw new Error("useToast must be used inside <ToastProvider>");
   }
   return ctx;
+}
+
+/**
+ * Read-only view of the current toast stack. Only `<Toaster />` should need
+ * this; expose it for tests too.
+ */
+export function useToastList(): Toast[] {
+  return useContext(ToastListContext);
 }
 
 let _toastCounter = 0;
@@ -94,6 +122,9 @@ function nextToastId(): string {
 export function ToastProvider({ children }: { children: ReactNode }) {
   const [toasts, dispatch] = useReducer(reducer, []);
 
+  // All three callbacks are wrapped in `useCallback` with no dependencies on
+  // changing values, so `api` itself never changes identity. That's the whole
+  // point of the API/list split — see the long comment above.
   const push = useCallback((input: ToastInput): string => {
     const id = nextToastId();
     const toast: Toast = {
@@ -115,16 +146,18 @@ export function ToastProvider({ children }: { children: ReactNode }) {
 
   const clear = useCallback(() => dispatch({ type: "CLEAR" }), []);
 
-  const value = useMemo(
-    () => ({ toasts, push, dismiss, clear }),
-    [toasts, push, dismiss, clear],
+  const api = useMemo<ToastApi>(
+    () => ({ push, dismiss, clear }),
+    [push, dismiss, clear],
   );
 
   return (
-    <ToastContext.Provider value={value}>
-      {children}
-      <Toaster />
-    </ToastContext.Provider>
+    <ToastApiContext.Provider value={api}>
+      <ToastListContext.Provider value={toasts}>
+        {children}
+        <Toaster />
+      </ToastListContext.Provider>
+    </ToastApiContext.Provider>
   );
 }
 
@@ -133,7 +166,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
 // ---------------------------------------------------------------------------
 
 function Toaster() {
-  const { toasts, dismiss } = useToast();
+  const toasts = useToastList();
   return (
     <div
       aria-live="polite"
@@ -141,25 +174,25 @@ function Toaster() {
       className="pointer-events-none fixed bottom-4 right-4 z-50 flex w-full max-w-sm flex-col gap-2"
     >
       {toasts.map((t) => (
-        <ToastCard key={t.id} toast={t} onDismiss={() => dismiss(t.id)} />
+        <ToastCard key={t.id} toast={t} />
       ))}
     </div>
   );
 }
 
-function ToastCard({
-  toast,
-  onDismiss,
-}: {
-  toast: Toast;
-  onDismiss: () => void;
-}) {
-  // Auto-dismiss timer (only for non-sticky toasts).
+function ToastCard({ toast }: { toast: Toast }) {
+  // Pull `dismiss` from context instead of receiving it as a prop. That way
+  // the auto-dismiss `useEffect` below depends only on values that are
+  // intrinsic to this toast (id, durationMs) plus the stable `dismiss`
+  // reference — so the timer is set up exactly once per toast and won't be
+  // torn down + reinstalled when a sibling toast is added or removed.
+  const { dismiss } = useToast();
+
   useEffect(() => {
     if (toast.durationMs <= 0) return;
-    const t = setTimeout(onDismiss, toast.durationMs);
+    const t = setTimeout(() => dismiss(toast.id), toast.durationMs);
     return () => clearTimeout(t);
-  }, [toast.durationMs, onDismiss]);
+  }, [toast.id, toast.durationMs, dismiss]);
 
   const copyRef = useRef<HTMLButtonElement>(null);
   const onCopy = async () => {
@@ -210,7 +243,7 @@ function ToastCard({
         </div>
         <button
           type="button"
-          onClick={onDismiss}
+          onClick={() => dismiss(toast.id)}
           aria-label="Dismiss notification"
           className="-m-1 rounded p-1 opacity-60 hover:opacity-100"
         >
