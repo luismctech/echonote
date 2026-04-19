@@ -25,6 +25,8 @@ pub mod preprocess;
 pub mod sink;
 
 pub use capture::CpalMicrophoneCapture;
+#[cfg(target_os = "macos")]
+pub use capture::{ScreenCaptureKitCapture, SYSTEM_OUTPUT_DEVICE_ID};
 pub use preprocess::resample::{
     resample_to_whisper, ResampleError, RubatoResamplerAdapter, WHISPER_SAMPLE_RATE,
 };

@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!--
+        TCC (Transparency, Consent, and Control) usage descriptions.
+        Tauri merges this file into the generated bundle Info.plist on
+        macOS, so we only need to declare the keys EchoNote uses.
+
+        These strings are shown to the user in the system permission
+        prompt the first time the corresponding capture engine runs.
+    -->
+
+    <!-- Microphone capture (cpal). Triggered by the live mic stream. -->
+    <key>NSMicrophoneUsageDescription</key>
+    <string>EchoNote needs microphone access to transcribe your voice during meetings. Audio is processed locally and never leaves your Mac.</string>
+
+    <!-- System audio capture (ScreenCaptureKit). Triggered by the
+         loopback adapter when the user enables "system output" in the
+         live recorder. -->
+    <key>NSScreenCaptureUsageDescription</key>
+    <string>EchoNote needs screen recording permission to capture system audio (the other side of your call). Only the audio mix is read; no video frames are stored.</string>
+</dict>
+</plist>

@@ -69,6 +69,9 @@ clap = { version = "4.5", features = ["derive", "env"] }
 cpal = "0.15"
 hound = "3.5"
 rubato = "0.16"
+# macOS-only system audio capture (ScreenCaptureKit). Pulled in conditionally
+# by echo-audio via [target.'cfg(target_os = "macos")'.dependencies].
+screencapturekit = "1.5"
 
 # Storage
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "macros", "migrate"] }

@@ -1,0 +1,26 @@
+# Workspace-wide cargo configuration.
+#
+# We add the Swift 5.5 macOS runtime to the linker's runtime search path
+# so that crates with a vendored Swift bridge (notably `screencapturekit`,
+# pulled in by `echo-audio` for ScreenCaptureKit-based system-audio
+# capture) can locate `libswift_Concurrency.dylib` at test/run time.
+#
+# We list both the Command Line Tools and Xcode default toolchain
+# locations: dyld silently skips paths that don't exist, so adding both
+# covers dev machines (CommandLineTools-only) and CI runners (Xcode).
+# The `/usr/lib/swift` entry catches the OS-shipped overlays for
+# everything except Concurrency.
+
+[target.aarch64-apple-darwin]
+rustflags = [
+    "-C", "link-arg=-Wl,-rpath,/Library/Developer/CommandLineTools/usr/lib/swift-5.5/macosx",
+    "-C", "link-arg=-Wl,-rpath,/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift-5.5/macosx",
+    "-C", "link-arg=-Wl,-rpath,/usr/lib/swift",
+]
+
+[target.x86_64-apple-darwin]
+rustflags = [
+    "-C", "link-arg=-Wl,-rpath,/Library/Developer/CommandLineTools/usr/lib/swift-5.5/macosx",
+    "-C", "link-arg=-Wl,-rpath,/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift-5.5/macosx",
+    "-C", "link-arg=-Wl,-rpath,/usr/lib/swift",
+]

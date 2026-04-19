@@ -67,6 +67,9 @@ logs/
 !.env.example
 config.toml
 !config.example.toml
+# Cargo workspace config is checked in (rpath setup for the Swift
+# runtime needed by screencapturekit on macOS).
+!.cargo/config.toml
 
 # -----------------------------------------------------------------------------
 # IDE / editor
