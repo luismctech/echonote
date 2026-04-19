@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useReducer,
+  useRef,
+  useState,
+} from "react";
+import { useToast } from "./components/Toaster";
 import {
   deleteMeeting,
   getMeeting,
@@ -11,9 +18,16 @@ import {
   type Meeting,
   type MeetingId,
   type MeetingSummary,
-  type StreamingSessionId,
   type TranscriptEvent,
 } from "./lib/ipc";
+import {
+  canStart as selectCanStart,
+  canStop as selectCanStop,
+  initialRecordingState,
+  recordingReducer,
+  statusLabel,
+  type RecordingState,
+} from "./state/recording";
 
 type Probe =
   | { kind: "idle" }
@@ -40,25 +54,19 @@ type StreamLine =
       rms: number;
     };
 
-type StreamState =
-  | { kind: "idle" }
-  | { kind: "starting" }
-  | {
-      kind: "running";
-      sessionId: StreamingSessionId;
-      inputFormat?: { sampleRateHz: number; channels: number };
-    }
-  | { kind: "stopping" }
-  | { kind: "error"; message: string };
-
 /** Right-pane mode: live transcription or replay of a stored meeting. */
 type MainView =
   | { kind: "live" }
   | { kind: "meeting"; id: MeetingId; meeting: Meeting | null; loading: boolean; error?: string };
 
 export function App() {
+  const toast = useToast();
+
   const [probe, setProbe] = useState<Probe>({ kind: "idle" });
-  const [stream, setStream] = useState<StreamState>({ kind: "idle" });
+  const [stream, dispatch] = useReducer(
+    recordingReducer,
+    initialRecordingState,
+  );
   const [lines, setLines] = useState<StreamLine[]>([]);
   const [stats, setStats] = useState<{
     chunks: number;
@@ -78,9 +86,15 @@ export function App() {
       setMeetings(rows);
       setMeetingsError(null);
     } catch (err) {
-      setMeetingsError(err instanceof Error ? err.message : String(err));
+      const message = err instanceof Error ? err.message : String(err);
+      setMeetingsError(message);
+      toast.push({
+        kind: "warning",
+        message: "Couldn't refresh meetings list.",
+        detail: message,
+      });
     }
-  }, []);
+  }, [toast]);
 
   useEffect(() => {
     if (!isTauri()) {
@@ -94,14 +108,17 @@ export function App() {
     setProbe({ kind: "loading" });
     healthCheck()
       .then((status) => setProbe({ kind: "ok", status }))
-      .catch((err: unknown) =>
-        setProbe({
+      .catch((err: unknown) => {
+        const message = err instanceof Error ? err.message : String(err);
+        setProbe({ kind: "error", message });
+        toast.push({
           kind: "error",
-          message: err instanceof Error ? err.message : String(err),
-        }),
-      );
+          message: "Backend health check failed.",
+          detail: message,
+        });
+      });
     void refreshMeetings();
-  }, [refreshMeetings]);
+  }, [refreshMeetings, toast]);
 
   // Auto-scroll the live transcript list as new lines arrive.
   useEffect(() => {
@@ -109,12 +126,43 @@ export function App() {
     if (el) el.scrollTop = el.scrollHeight;
   }, [lines]);
 
+  // Surface state-machine errors as toasts (single source of truth).
+  // The reducer is the only place that decides "this is an error";
+  // here we just translate that into a notification. Recoverable errors
+  // get the standard error toast; non-recoverable ones get an extra hint.
+  const lastReportedErrorRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (stream.kind === "error") {
+      const signature = `${stream.recoverable}|${stream.message}`;
+      if (lastReportedErrorRef.current === signature) return;
+      lastReportedErrorRef.current = signature;
+      toast.push({
+        kind: "error",
+        message: stream.recoverable
+          ? "Streaming failed — you can retry."
+          : "Streaming failed mid-stop. Some audio may not have been persisted.",
+        detail: stream.message,
+      });
+    } else if (stream.kind === "persisted") {
+      lastReportedErrorRef.current = null;
+      toast.push({
+        kind: "success",
+        message: "Meeting saved",
+        detail: `${stream.lastTotalSegments} segments · ${(
+          stream.lastTotalAudioMs / 1000
+        ).toFixed(1)} s`,
+      });
+    } else if (stream.kind !== "starting" && stream.kind !== "stopping") {
+      lastReportedErrorRef.current = null;
+    }
+  }, [stream, toast]);
+
   const handleEvent = useCallback(
     (evt: TranscriptEvent) => {
       switch (evt.type) {
         case "started":
-          setStream({
-            kind: "running",
+          dispatch({
+            type: "STREAMING_STARTED",
             sessionId: evt.sessionId,
             inputFormat: evt.inputFormat,
           });
@@ -165,17 +213,16 @@ export function App() {
           ]);
           break;
         case "stopped":
-          setStats({
-            chunks: 0,
-            skipped: 0,
-            audioMs: evt.totalAudioMs,
+          dispatch({
+            type: "STREAMING_STOPPED",
+            totalSegments: evt.totalSegments,
+            totalAudioMs: evt.totalAudioMs,
           });
-          setStream({ kind: "idle" });
           // Pipeline finalized the meeting in the DB — refresh sidebar.
           void refreshMeetings();
           break;
         case "failed":
-          setStream({ kind: "error", message: evt.message });
+          dispatch({ type: "STREAMING_FAILED", message: evt.message });
           void refreshMeetings();
           break;
       }
@@ -186,60 +233,69 @@ export function App() {
   const onStart = async () => {
     setLines([]);
     setStats({ chunks: 0, skipped: 0, audioMs: 0 });
-    setStream({ kind: "starting" });
     setView({ kind: "live" });
+    dispatch({ type: "START_REQUESTED" });
     try {
       await startStreaming(
         { chunkMs: 5_000, silenceRmsThreshold: 0.005 },
         handleEvent,
       );
     } catch (err) {
-      setStream({
-        kind: "error",
+      dispatch({
+        type: "BACKEND_ERROR",
         message: err instanceof Error ? err.message : String(err),
       });
     }
   };
 
   const onStop = async () => {
-    if (stream.kind !== "running") return;
+    if (stream.kind !== "recording") return;
     const id = stream.sessionId;
-    setStream({ kind: "stopping" });
+    dispatch({ type: "STOP_REQUESTED" });
     try {
       await stopStreaming(id);
     } catch (err) {
-      setStream({
-        kind: "error",
+      dispatch({
+        type: "BACKEND_ERROR",
         message: err instanceof Error ? err.message : String(err),
       });
     }
   };
 
-  const openMeeting = useCallback(async (id: MeetingId) => {
-    setView({ kind: "meeting", id, meeting: null, loading: true });
-    try {
-      const meeting = await getMeeting(id);
-      if (!meeting) {
+  const openMeeting = useCallback(
+    async (id: MeetingId) => {
+      setView({ kind: "meeting", id, meeting: null, loading: true });
+      try {
+        const meeting = await getMeeting(id);
+        if (!meeting) {
+          setView({
+            kind: "meeting",
+            id,
+            meeting: null,
+            loading: false,
+            error: "Meeting not found",
+          });
+        } else {
+          setView({ kind: "meeting", id, meeting, loading: false });
+        }
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
         setView({
           kind: "meeting",
           id,
           meeting: null,
           loading: false,
-          error: "Meeting not found",
+          error: message,
         });
-      } else {
-        setView({ kind: "meeting", id, meeting, loading: false });
+        toast.push({
+          kind: "error",
+          message: "Couldn't load meeting.",
+          detail: message,
+        });
       }
-    } catch (err) {
-      setView({
-        kind: "meeting",
-        id,
-        meeting: null,
-        loading: false,
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
-  }, []);
+    },
+    [toast],
+  );
 
   const onDeleteMeeting = useCallback(
     async (id: MeetingId) => {
@@ -249,16 +305,22 @@ export function App() {
         if (view.kind === "meeting" && view.id === id) {
           setView({ kind: "live" });
         }
+        toast.push({ kind: "info", message: "Meeting deleted" });
       } catch (err) {
-        setMeetingsError(err instanceof Error ? err.message : String(err));
+        const message = err instanceof Error ? err.message : String(err);
+        setMeetingsError(message);
+        toast.push({
+          kind: "error",
+          message: "Couldn't delete meeting.",
+          detail: message,
+        });
       }
     },
-    [refreshMeetings, view],
+    [refreshMeetings, view, toast],
   );
 
-  const canStart =
-    probe.kind === "ok" && (stream.kind === "idle" || stream.kind === "error");
-  const canStop = stream.kind === "running";
+  const canStart = probe.kind === "ok" && selectCanStart(stream);
+  const canStop = selectCanStop(stream);
 
   return (
     <main className="mx-auto flex min-h-screen max-w-6xl flex-col gap-6 px-6 py-10">
@@ -315,6 +377,7 @@ export function App() {
               canStop={canStop}
               onStart={onStart}
               onStop={onStop}
+              onDismissError={() => dispatch({ type: "ACKNOWLEDGE" })}
             />
           ) : (
             <MeetingDetail view={view} />
@@ -323,7 +386,7 @@ export function App() {
       </div>
 
       <footer className="text-xs text-zinc-400 dark:text-zinc-600">
-        Sprint 0 · day 8 · streaming + persistence
+        Sprint 1 · day 1 · frontend hardening
       </footer>
     </main>
   );
@@ -409,8 +472,9 @@ function LivePane({
   canStop,
   onStart,
   onStop,
+  onDismissError,
 }: {
-  stream: StreamState;
+  stream: RecordingState;
   stats: { chunks: number; skipped: number; audioMs: number };
   lines: StreamLine[];
   listRef: React.RefObject<HTMLDivElement>;
@@ -418,6 +482,7 @@ function LivePane({
   canStop: boolean;
   onStart: () => void;
   onStop: () => void;
+  onDismissError: () => void;
 }) {
   return (
     <>
@@ -449,9 +514,21 @@ function LivePane({
       </header>
 
       {stream.kind === "error" && (
-        <p className="rounded-md bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:bg-amber-950/40 dark:text-amber-300">
-          <strong className="font-semibold">error:</strong> {stream.message}
-        </p>
+        <div className="flex items-start justify-between gap-3 rounded-md bg-rose-50 px-3 py-2 text-xs text-rose-900 dark:bg-rose-950/40 dark:text-rose-200">
+          <p>
+            <strong className="font-semibold">
+              {stream.recoverable ? "error:" : "fatal:"}
+            </strong>{" "}
+            {stream.message}
+          </p>
+          <button
+            type="button"
+            onClick={onDismissError}
+            className="text-xs underline opacity-80 hover:opacity-100"
+          >
+            dismiss
+          </button>
+        </div>
       )}
 
       <StatsBar stats={stats} stream={stream} />
@@ -462,7 +539,7 @@ function LivePane({
       >
         {lines.length === 0 ? (
           <p className="text-zinc-400">
-            {stream.kind === "running"
+            {stream.kind === "recording"
               ? "Listening… speak into the microphone."
               : "Press Start to begin a session."}
           </p>
@@ -533,8 +610,8 @@ function MeetingDetail({
 // Misc helpers / small components
 // ---------------------------------------------------------------------------
 
-function modelLabel(stream: StreamState): string {
-  if (stream.kind === "running" && stream.inputFormat) {
+function modelLabel(stream: RecordingState): string {
+  if (stream.kind === "recording" && stream.inputFormat) {
     const { sampleRateHz, channels } = stream.inputFormat;
     return `${sampleRateHz} Hz · ${channels} ch`;
   }
@@ -574,19 +651,11 @@ function StatsBar({
   stream,
 }: {
   stats: { chunks: number; skipped: number; audioMs: number };
-  stream: StreamState;
+  stream: RecordingState;
 }) {
-  const status =
-    stream.kind === "running"
-      ? "● recording"
-      : stream.kind === "starting"
-        ? "○ starting"
-        : stream.kind === "stopping"
-          ? "○ stopping"
-          : "○ idle";
   return (
     <dl className="grid grid-cols-4 gap-x-4 text-xs">
-      <Stat label="status" value={status} />
+      <Stat label="status" value={statusLabel(stream)} />
       <Stat label="chunks" value={String(stats.chunks)} />
       <Stat label="skipped" value={String(stats.skipped)} />
       <Stat label="audio" value={`${(stats.audioMs / 1000).toFixed(1)} s`} />
