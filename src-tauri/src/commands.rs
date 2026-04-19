@@ -23,8 +23,8 @@ use echo_audio::{RoutingAudioCapture, RubatoResamplerAdapter};
 use echo_diarize::{Eres2NetEmbedder, OnlineDiarizer};
 use echo_domain::{
     AudioCapture, AudioFormat, AudioSource, CaptureSpec, Diarizer, Meeting, MeetingId,
-    MeetingStore, MeetingSummary, Resampler, SpeakerId, StreamingOptions, StreamingSessionId,
-    Transcriber, TranscriptEvent,
+    MeetingSearchHit, MeetingStore, MeetingSummary, Resampler, SpeakerId, StreamingOptions,
+    StreamingSessionId, Transcriber, TranscriptEvent,
 };
 use echo_storage::SqliteMeetingStore;
 
@@ -462,6 +462,28 @@ pub async fn delete_meeting(state: State<'_, AppState>, id: MeetingId) -> Result
         .delete(id)
         .await
         .map_err(|e| format!("delete meeting: {e}"))
+}
+
+/// Full-text search over segment text. Returns one hit per meeting,
+/// ordered by FTS5 BM25 rank (best match first). Empty / whitespace-
+/// only queries return an empty vec — the frontend wires this to
+/// `onChange` debounced, so the initial empty state never errors.
+///
+/// `limit` defaults to 20 (a comfortable sidebar page); `0` means no
+/// cap. The query is sanitised inside the storage layer, so the
+/// frontend can pass raw user input without worrying about FTS5
+/// syntax characters.
+#[tauri::command]
+pub async fn search_meetings(
+    state: State<'_, AppState>,
+    query: String,
+    limit: Option<u32>,
+) -> Result<Vec<MeetingSearchHit>, String> {
+    state
+        .store
+        .search(&query, limit.unwrap_or(20))
+        .await
+        .map_err(|e| format!("search meetings: {e}"))
 }
 
 /// Rename a diarized speaker (or clear the label back to anonymous

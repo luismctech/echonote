@@ -46,6 +46,7 @@ pub fn run() {
             commands::get_meeting,
             commands::delete_meeting,
             commands::rename_speaker,
+            commands::search_meetings,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

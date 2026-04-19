@@ -244,3 +244,44 @@ export async function renameSpeaker(
     label,
   });
 }
+
+// ---------------------------------------------------------------------------
+// Meeting search (Sprint 1 day 8)
+// ---------------------------------------------------------------------------
+
+/**
+ * One hit returned by {@link searchMeetings}.
+ *
+ * The backend collapses results to one row per meeting and sorts by
+ * FTS5 BM25 rank ascending — *smaller is better* (negative numbers
+ * are the strongest matches). The UI should preserve that ordering.
+ *
+ * `snippet` is pre-rendered with `<mark>...</mark>` markers around
+ * the matched terms. Render it with `dangerouslySetInnerHTML` — the
+ * markers are emitted by SQLite over our own indexed text, so the
+ * XSS surface is the same as showing the segment body raw, which the
+ * rest of the UI already does.
+ */
+export type MeetingSearchHit = {
+  meeting: MeetingSummary;
+  snippet: string;
+  rank: number;
+};
+
+/**
+ * Full-text search over segment text. Empty / whitespace-only queries
+ * resolve to `[]` without hitting the backend index, so it's safe to
+ * wire this up to a debounced `onChange`.
+ *
+ * @param query Raw user input. FTS5 syntax characters (`"`, `*`,
+ *   `(`, `)`, `^`, `:`, `+`, `-`, `~`) are stripped server-side, so
+ *   the caller does not need to escape anything.
+ * @param limit Maximum hits to return. Defaults to 20 (a comfortable
+ *   sidebar page); pass `0` for no cap.
+ */
+export async function searchMeetings(
+  query: string,
+  limit = 20,
+): Promise<MeetingSearchHit[]> {
+  return invoke<MeetingSearchHit[]>("search_meetings", { query, limit });
+}

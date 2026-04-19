@@ -13,16 +13,19 @@ import {
   isTauri,
   listMeetings,
   renameSpeaker,
+  searchMeetings,
   startStreaming,
   stopStreaming,
   type HealthStatus,
   type Meeting,
   type MeetingId,
+  type MeetingSearchHit,
   type MeetingSummary,
   type Speaker,
   type SpeakerId,
   type TranscriptEvent,
 } from "./lib/ipc";
+import { useDebouncedValue } from "./lib/useDebouncedValue";
 import {
   displayName,
   indexSpeakers,
@@ -94,6 +97,18 @@ export function App() {
   // session restarts within a tab; resets on reload.
   const [diarize, setDiarize] = useState(false);
 
+  // Sidebar search (Sprint 1 day 8). `searchInput` mirrors the text
+  // box character-by-character; `searchQuery` is the debounced value
+  // we actually send to the backend so we don't fire an FTS query on
+  // every keystroke. 200 ms is short enough to feel instant and long
+  // enough to skip the long tail of wasted requests during fast typing.
+  const [searchInput, setSearchInput] = useState("");
+  const searchQuery = useDebouncedValue(searchInput, 200);
+  const [searchHits, setSearchHits] = useState<MeetingSearchHit[]>([]);
+  const [searchLoading, setSearchLoading] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
+  const isSearching = searchQuery.trim().length > 0;
+
   const refreshMeetings = useCallback(async () => {
     if (!isTauri()) return;
     try {
@@ -110,6 +125,41 @@ export function App() {
       });
     }
   }, [toast]);
+
+  // Run the FTS5 query whenever the debounced input changes. The
+  // `cancelled` flag protects against out-of-order responses (the user
+  // can type fast enough that a slow request returns *after* a faster
+  // one for a newer query, which would otherwise overwrite the fresh
+  // hits with stale ones).
+  useEffect(() => {
+    if (!isTauri()) return;
+    const query = searchQuery.trim();
+    if (query.length === 0) {
+      setSearchHits([]);
+      setSearchError(null);
+      setSearchLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setSearchLoading(true);
+    setSearchError(null);
+    searchMeetings(query)
+      .then((hits) => {
+        if (cancelled) return;
+        setSearchHits(hits);
+        setSearchLoading(false);
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return;
+        const message = err instanceof Error ? err.message : String(err);
+        setSearchError(message);
+        setSearchHits([]);
+        setSearchLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [searchQuery]);
 
   useEffect(() => {
     if (!isTauri()) {
@@ -399,12 +449,28 @@ export function App() {
               {meetingsError}
             </p>
           )}
-          <MeetingsList
-            meetings={meetings}
-            activeId={view.kind === "meeting" ? view.id : null}
-            onSelect={(m) => void openMeeting(m.id)}
-            onDelete={(m) => void onDeleteMeeting(m.id)}
+          <MeetingsSearchBox
+            value={searchInput}
+            onChange={setSearchInput}
+            loading={searchLoading}
           />
+          {isSearching ? (
+            <SearchResults
+              query={searchQuery.trim()}
+              hits={searchHits}
+              loading={searchLoading}
+              error={searchError}
+              activeId={view.kind === "meeting" ? view.id : null}
+              onSelect={(m) => void openMeeting(m.id)}
+            />
+          ) : (
+            <MeetingsList
+              meetings={meetings}
+              activeId={view.kind === "meeting" ? view.id : null}
+              onSelect={(m) => void openMeeting(m.id)}
+              onDelete={(m) => void onDeleteMeeting(m.id)}
+            />
+          )}
         </aside>
 
         <section className="flex flex-col gap-4 rounded-lg border border-zinc-200 bg-white p-5 shadow-sm dark:border-zinc-800 dark:bg-zinc-950">
@@ -429,7 +495,7 @@ export function App() {
       </div>
 
       <footer className="text-xs text-zinc-400 dark:text-zinc-600">
-        Sprint 1 · day 7 · diarization end-to-end
+        Sprint 1 · day 8 · FTS5 search
       </footer>
     </main>
   );
@@ -495,6 +561,121 @@ function MeetingsList({
                 ×
               </button>
             </div>
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
+
+function MeetingsSearchBox({
+  value,
+  onChange,
+  loading,
+}: {
+  value: string;
+  onChange: (next: string) => void;
+  loading: boolean;
+}) {
+  return (
+    <div className="relative">
+      <input
+        type="search"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder="Search transcripts…"
+        aria-label="Search meeting transcripts"
+        className="w-full rounded-md border border-zinc-200 bg-zinc-50 px-2.5 py-1.5 pr-7 text-xs text-zinc-800 placeholder:text-zinc-400 focus:border-emerald-400 focus:outline-none focus:ring-1 focus:ring-emerald-300 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
+      />
+      {value && (
+        <button
+          type="button"
+          onClick={() => onChange("")}
+          aria-label="Clear search"
+          className="absolute right-1.5 top-1/2 -translate-y-1/2 rounded text-xs text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200"
+        >
+          ×
+        </button>
+      )}
+      {loading && (
+        <span
+          aria-live="polite"
+          className="pointer-events-none absolute right-6 top-1/2 -translate-y-1/2 text-[10px] text-zinc-400"
+        >
+          …
+        </span>
+      )}
+    </div>
+  );
+}
+
+function SearchResults({
+  query,
+  hits,
+  loading,
+  error,
+  activeId,
+  onSelect,
+}: {
+  query: string;
+  hits: MeetingSearchHit[];
+  loading: boolean;
+  error: string | null;
+  activeId: MeetingId | null;
+  onSelect: (m: MeetingSummary) => void;
+}) {
+  if (error) {
+    return (
+      <p className="rounded bg-rose-50 px-2 py-1 text-xs text-rose-700 dark:bg-rose-950/40 dark:text-rose-300">
+        Search failed: {error}
+      </p>
+    );
+  }
+  if (loading && hits.length === 0) {
+    return <p className="text-xs text-zinc-400">Searching…</p>;
+  }
+  if (hits.length === 0) {
+    return (
+      <p className="text-xs text-zinc-400">
+        No matches for <span className="font-medium">{query}</span>.
+      </p>
+    );
+  }
+  return (
+    <ul className="flex flex-col gap-1 overflow-y-auto" style={{ maxHeight: "60vh" }}>
+      {hits.map((hit) => {
+        const m = hit.meeting;
+        const active = m.id === activeId;
+        return (
+          <li key={m.id}>
+            <button
+              type="button"
+              onClick={() => onSelect(m)}
+              className={`flex w-full flex-col items-start gap-1 rounded-md border px-2.5 py-2 text-left text-xs ${
+                active
+                  ? "border-emerald-300 bg-emerald-50 dark:border-emerald-800 dark:bg-emerald-950/40"
+                  : "border-transparent hover:bg-zinc-50 dark:hover:bg-zinc-900"
+              }`}
+            >
+              <span className="line-clamp-1 font-medium text-zinc-800 dark:text-zinc-100">
+                {m.title}
+              </span>
+              {/*
+                Snippet markers (`<mark>...</mark>`) are emitted by
+                SQLite over text we ourselves indexed. The XSS surface
+                is therefore identical to rendering the raw segment
+                text, which the rest of the UI already does in plain
+                strings — so `dangerouslySetInnerHTML` here is no more
+                dangerous than e.g. a transcript line.
+              */}
+              <span
+                className="line-clamp-2 text-[11px] leading-snug text-zinc-600 [&_mark]:rounded [&_mark]:bg-amber-200/60 [&_mark]:px-0.5 [&_mark]:text-zinc-900 dark:text-zinc-300 dark:[&_mark]:bg-amber-500/30 dark:[&_mark]:text-zinc-50"
+                dangerouslySetInnerHTML={{ __html: hit.snippet }}
+              />
+              <span className="text-[10px] tabular-nums text-zinc-400">
+                {formatDate(m.startedAt)} · rank {hit.rank.toFixed(2)}
+              </span>
+            </button>
           </li>
         );
       })}
