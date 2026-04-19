@@ -199,7 +199,8 @@ impl MeetingRecorder {
                     let now = OffsetDateTime::now_utc()
                         .format(&Rfc3339)
                         .map_err(|e| DomainError::Invariant(format!("format ended_at: {e}")))?;
-                    self.store
+                    if let Err(e) = self
+                        .store
                         .finalize(
                             stats.meeting_id,
                             FinalizeMeeting {
@@ -210,7 +211,18 @@ impl MeetingRecorder {
                             },
                         )
                         .await
-                        .ok();
+                    {
+                        // The session already failed upstream — surfacing
+                        // a second error to the caller would mask the
+                        // original cause. Log loudly so the operator can
+                        // still see we couldn't even mark the meeting
+                        // ended; the meeting will appear as "in flight"
+                        // in the sidebar until manually cleaned up.
+                        warn!(
+                            %session_id, meeting_id = %stats.meeting_id, error = %e,
+                            "recorder: failed to mark failed meeting as ended"
+                        );
+                    }
                     warn!(%session_id, meeting_id = %stats.meeting_id, %message, "recorder: meeting failed");
                     Ok(Some(stats.meeting_id))
                 } else {

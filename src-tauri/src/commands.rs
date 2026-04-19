@@ -83,7 +83,10 @@ pub struct AppState {
     store: Arc<dyn MeetingStore>,
     recorder: Arc<MeetingRecorder>,
     rename_speaker: Arc<RenameSpeaker>,
-    sessions: Mutex<HashMap<StreamingSessionId, SessionEntry>>,
+    /// In-flight streaming sessions. Wrapped in `Arc` so the drain
+    /// task spawned by `start_streaming` can self-cleanup its own
+    /// entry on terminal events without going through `tauri::State`.
+    sessions: Arc<Mutex<HashMap<StreamingSessionId, SessionEntry>>>,
 }
 
 struct SessionEntry {
@@ -92,6 +95,12 @@ struct SessionEntry {
 }
 
 impl AppState {
+    /// Cheap clone of the session-map handle, intended for background
+    /// tasks that need to remove their own entry on exit.
+    fn sessions_handle(&self) -> Arc<Mutex<HashMap<StreamingSessionId, SessionEntry>>> {
+        self.sessions.clone()
+    }
+
     /// Build the shared state. Async because opening the SQLite database
     /// runs migrations, which is I/O. The transcriber is *not* loaded
     /// eagerly — the first `start_streaming` call pays that cost.
@@ -136,7 +145,7 @@ impl AppState {
             store,
             recorder,
             rename_speaker,
-            sessions: Mutex::new(HashMap::new()),
+            sessions: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -384,9 +393,17 @@ pub async fn start_streaming(
     // first persisted (recorder.record) and then forwarded to the IPC
     // channel; if persistence fails, we log and keep the UI responsive
     // — losing a row is preferable to crashing the live transcript.
+    //
+    // When the task exits — whether via a Stopped/Failed terminal
+    // event, an upstream channel close, or a frontend disconnect — we
+    // remove our entry from the session registry so the HashMap doesn't
+    // accumulate orphans. If the user then calls `stop_streaming` for
+    // the same id, it correctly resolves to `Ok(false)` ("already
+    // stopped") instead of trying to drive a half-dead pipeline.
     let handle_arc = Arc::new(AsyncMutex::new(handle));
     let drain_handle = handle_arc.clone();
     let recorder = state.recorder.clone();
+    let sessions_for_drain = state.sessions_handle();
     let join = tokio::spawn(async move {
         loop {
             let mut guard = drain_handle.lock().await;
@@ -411,6 +428,12 @@ pub async fn start_streaming(
                 }
                 None => break,
             }
+        }
+        // Self-cleanup: the session is over (terminal event, channel
+        // close, or frontend gone). The `stop_streaming` path already
+        // removes its own entry — this branch covers every other exit.
+        if let Ok(mut map) = sessions_for_drain.lock() {
+            map.remove(&session_id);
         }
     });
 
