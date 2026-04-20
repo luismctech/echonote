@@ -2,16 +2,30 @@
 # -----------------------------------------------------------------------------
 # EchoNote — download Whisper / VAD / LLM models from their canonical sources.
 #
+# EchoNote targets Spanish-first meetings, so the defaults below favour
+# multilingual ASR and a Spanish-capable LLM. English-only Whisper variants
+# remain available for benchmarking and Sprint-0 reproducibility, but they
+# are NOT installed by default any more.
+#
 # Usage:
-#   scripts/download-models.sh                # default: ggml-base.en
-#   scripts/download-models.sh small.en       # ~466 MB
+#   scripts/download-models.sh                # default: ggml-large-v3-turbo (multilingual)
+#   scripts/download-models.sh large-v3-turbo # ~1.5 GB, multilingual, recommended
+#   scripts/download-models.sh large-v3       # ~3.0 GB, multilingual, top quality
 #   scripts/download-models.sh medium         # ~1.5 GB, multilingual
-#   scripts/download-models.sh large-v3       # ~3.0 GB
-#   scripts/download-models.sh vad            # Silero VAD v5 (~2 MB)
+#   scripts/download-models.sh small          # ~466 MB, multilingual
+#   scripts/download-models.sh base           # ~142 MB, multilingual
+#   scripts/download-models.sh base.en        # ~142 MB, English-only (dev / benchmarks)
+#   scripts/download-models.sh small.en       # ~466 MB, English-only
+#   scripts/download-models.sh asr-es         # whisper-large-v3-turbo Spanish fine-tune
+#                                             # (requires Python; see Pack C below)
+#   scripts/download-models.sh vad            # Silero VAD v6 (~2 MB)
 #   scripts/download-models.sh embed          # 3D-Speaker ERes2Net (~26 MB)
-#   scripts/download-models.sh llm            # Qwen 2.5 7B Instruct Q4_K_M (~4.4 GB)
-#   scripts/download-models.sh llm-small      # Qwen 2.5 3B Instruct Q4_K_M (~1.9 GB)
-#   scripts/download-models.sh --all          # base.en + small.en + vad + embed (no LLM)
+#   scripts/download-models.sh llm            # Qwen 3 14B Instruct Q4_K_M (~9 GB)
+#   scripts/download-models.sh llm-small      # Qwen 3 8B Instruct Q4_K_M (~5 GB)
+#   scripts/download-models.sh llm-moe        # Qwen 3 30B-A3B Instruct Q4_K_M (~18 GB)
+#   scripts/download-models.sh llm-legacy-7b  # Qwen 2.5 7B (back-compat, ~4.4 GB)
+#   scripts/download-models.sh llm-legacy-3b  # Qwen 2.5 3B (back-compat, ~1.9 GB)
+#   scripts/download-models.sh --all          # large-v3-turbo + vad + embed (no LLM)
 #
 # ASR models are written to ./models/asr/ggml-<flavor>.bin
 # VAD model lives at         ./models/vad/silero_vad.onnx
@@ -32,9 +46,12 @@ MODELS_DIR="$ASR_DIR"
 
 # Hugging Face repository that mirrors the ggerganov/whisper.cpp models.
 HF_BASE="https://huggingface.co/ggerganov/whisper.cpp/resolve/main"
-# Silero VAD v5 lives in the upstream GitHub repo. Pinned to a commit
-# so we get reproducible downloads across machines and over time.
-SILERO_VAD_URL="https://github.com/snakers4/silero-vad/raw/v5.1.2/src/silero_vad/data/silero_vad.onnx"
+# Silero VAD v6 lives in the upstream GitHub repo. Pinned to a tagged
+# release so we get reproducible downloads across machines and over time.
+# v6 (vs v5.1.2) reports −16% errors on noisy real-life audio and −11%
+# multi-domain, plus better handling of unusual / child / phone-quality
+# voices — relevant for real meetings (Silero release notes, 2025-08).
+SILERO_VAD_URL="https://github.com/snakers4/silero-vad/raw/v6.2.1/src/silero_vad/data/silero_vad.onnx"
 # 3D-Speaker ERes2Net (English VoxCeleb) — the speaker embedder used by
 # echo-diarize. Mirrored on Hugging Face by csukuangfj (sherpa-onnx
 # maintainer); upstream lives on ModelScope. ~26 MB, opset 13, outputs
@@ -45,17 +62,37 @@ ERES2NET_URL="https://huggingface.co/csukuangfj/speaker-embedding-models/resolve
 ERES2NET_FIXTURE_URL="https://huggingface.co/csukuangfj/speaker-embedding-models/resolve/main/1-two-speakers-en.wav"
 ERES2NET_FIXTURE_DIR="${REPO_ROOT}/crates/echo-diarize/tests/fixtures"
 
-# Default LLM for summaries. Qwen 2.5 7B Instruct is multilingual (good
-# Spanish quality), permissively licensed (Apache 2.0), and the Q4_K_M
-# quantization fits in ~5 GB of RAM with ~6-8 t/s on Apple Silicon —
-# right inside the < 45 s/30 min target from DEVELOPMENT_PLAN.md §3.1
-# CU-04. The mirror is the official Qwen team's HF repo.
+# Default LLM for summaries. Qwen 3 14B Instruct is multilingual (119+
+# languages including native-level Spanish vs Qwen 2.5's 29), Apache 2.0,
+# and pre-trained on 36 T tokens (vs 18 T in 2.5). Same `<|im_start|>`
+# chat template as Qwen 2.5, so our `SummarizeMeeting` prompt and stop
+# tokens stay unchanged. Q4_K_M is ~9 GB on disk (~10 GB RAM with KV
+# cache at our 4 k context), comfortably inside our < 45 s/30 min target
+# from DEVELOPMENT_PLAN.md §3.1 CU-04 on Apple Silicon ≥16 GB.
+QWEN3_14B_URL="https://huggingface.co/Qwen/Qwen3-14B-Instruct-GGUF/resolve/main/qwen3-14b-instruct-q4_k_m.gguf"
+QWEN3_14B_NAME="qwen3-14b-instruct-q4_k_m.gguf"
+# Smaller dense variant for laptops with 8-16 GB RAM. Drop-in upgrade
+# over Qwen 2.5 7B (better multilingual coverage, more recent training)
+# at almost the same footprint (~5 GB Q4_K_M).
+QWEN3_8B_URL="https://huggingface.co/Qwen/Qwen3-8B-Instruct-GGUF/resolve/main/qwen3-8b-instruct-q4_k_m.gguf"
+QWEN3_8B_NAME="qwen3-8b-instruct-q4_k_m.gguf"
+# MoE variant for Macs ≥32 GB. 30 B total / 3 B active per token —
+# higher quality than the dense 32 B at a fraction of the inference
+# cost. Recommended when the user runs the Quality profile.
+QWEN3_MOE_URL="https://huggingface.co/Qwen/Qwen3-30B-A3B-Instruct-GGUF/resolve/main/qwen3-30b-a3b-instruct-q4_k_m.gguf"
+QWEN3_MOE_NAME="qwen3-30b-a3b-instruct-q4_k_m.gguf"
+# Legacy Qwen 2.5 GGUFs kept for back-compat with Sprint 1 day 9 setups
+# and as a fallback when the Qwen 3 mirrors are unavailable.
 QWEN_7B_URL="https://huggingface.co/Qwen/Qwen2.5-7B-Instruct-GGUF/resolve/main/qwen2.5-7b-instruct-q4_k_m.gguf"
 QWEN_7B_NAME="qwen2.5-7b-instruct-q4_k_m.gguf"
-# Smaller variant for laptops with limited RAM and faster iteration in
-# development. Same family + license, just fewer parameters.
 QWEN_3B_URL="https://huggingface.co/Qwen/Qwen2.5-3B-Instruct-GGUF/resolve/main/qwen2.5-3b-instruct-q4_k_m.gguf"
 QWEN_3B_NAME="qwen2.5-3b-instruct-q4_k_m.gguf"
+
+# Spanish fine-tune of whisper-large-v3-turbo (5.34 % WER on Common
+# Voice 17 ES vs 6.91 % for the upstream turbo) is built by the
+# companion script `scripts/build-spanish-asr.sh` since the upstream
+# only ships safetensors and we need ggml. The asr-es flavour below
+# delegates to that helper instead of reimplementing the Python flow.
 
 # --- cosmetics ---------------------------------------------------------------
 if [[ -t 1 ]]; then
@@ -78,6 +115,7 @@ expected_size_mib() {
     medium|medium.en)         echo 1500 ;;
     large-v3)                 echo 2900 ;;
     large-v3-turbo)           echo 1500 ;;
+    large-v3-turbo-q5_0)      echo  550 ;;
     *)                        echo 0 ;;
   esac
 }
@@ -238,16 +276,18 @@ download_llm() {
 }
 
 main() {
-  local choice="${1:-base.en}"
+  # Default to the multilingual large-v3-turbo since EchoNote is a
+  # Spanish-first product; the English-only `base.en` legacy default
+  # is still reachable via `scripts/download-models.sh base.en`.
+  local choice="${1:-large-v3-turbo}"
   case "$choice" in
     --all)
-      download_one base.en
-      download_one small.en
+      download_one large-v3-turbo
       download_silero_vad
       download_eres2net
       ;;
     --help|-h)
-      sed -n '4,20p' "$0"
+      sed -n '4,35p' "$0"
       exit 0
       ;;
     vad|silero|silero-vad)
@@ -260,17 +300,49 @@ main() {
       info "Embedder in ${EMBED_DIR}. Set ECHO_EMBED_MODEL=${EMBED_DIR}/eres2net_en_voxceleb.onnx if you move it."
       return
       ;;
-    llm|llm-7b|qwen-7b|qwen2.5-7b)
-      # Default summary model (DEVELOPMENT_PLAN.md §3.1 CU-04 +
-      # ARCHITECTURE.md profile "Balanced"). ~4.4 GB on disk.
+    llm|llm-14b|qwen3-14b)
+      # Default summary model (Spanish-first, DEVELOPMENT_PLAN.md §3.1
+      # CU-04 + ARCHITECTURE.md profile "Balanced"). ~9 GB on disk.
+      download_llm "$QWEN3_14B_URL" "$QWEN3_14B_NAME" 8800
+      info "LLM in ${LLM_DIR}. Set ECHO_LLM_MODEL=${LLM_DIR}/${QWEN3_14B_NAME} if you move it."
+      return
+      ;;
+    llm-small|llm-8b|qwen3-8b)
+      # Lighter alternative for 8-16 GB RAM hosts and dev iteration.
+      download_llm "$QWEN3_8B_URL" "$QWEN3_8B_NAME" 5000
+      info "LLM in ${LLM_DIR}. Set ECHO_LLM_MODEL=${LLM_DIR}/${QWEN3_8B_NAME} if you move it."
+      return
+      ;;
+    llm-moe|llm-30b|qwen3-30b|qwen3-30b-a3b)
+      # MoE variant for ≥32 GB RAM hosts (Quality profile). 30 B total
+      # / 3 B active per token: higher quality than dense 32 B at
+      # comparable inference latency.
+      download_llm "$QWEN3_MOE_URL" "$QWEN3_MOE_NAME" 18000
+      info "LLM in ${LLM_DIR}. Set ECHO_LLM_MODEL=${LLM_DIR}/${QWEN3_MOE_NAME} if you move it."
+      return
+      ;;
+    llm-legacy-7b|qwen-7b|qwen2.5-7b)
+      # Legacy Qwen 2.5 7B for back-compat with Sprint 1 day 9 setups.
       download_llm "$QWEN_7B_URL" "$QWEN_7B_NAME" 4400
       info "LLM in ${LLM_DIR}. Set ECHO_LLM_MODEL=${LLM_DIR}/${QWEN_7B_NAME} if you move it."
       return
       ;;
-    llm-small|llm-3b|qwen-3b|qwen2.5-3b)
-      # Lighter alternative for low-RAM hosts and dev iteration.
+    llm-legacy-3b|qwen-3b|qwen2.5-3b)
+      # Legacy Qwen 2.5 3B for back-compat.
       download_llm "$QWEN_3B_URL" "$QWEN_3B_NAME" 1900
       info "LLM in ${LLM_DIR}. Set ECHO_LLM_MODEL=${LLM_DIR}/${QWEN_3B_NAME} if you move it."
+      return
+      ;;
+    asr-es|spanish|whisper-es)
+      # Spanish fine-tune of whisper-large-v3-turbo. The model is only
+      # distributed as safetensors, so the actual conversion to ggml
+      # (and Q5_0 quantization) lives in the companion script. We
+      # delegate without re-implementing the Python toolchain checks.
+      local helper="${REPO_ROOT}/scripts/build-spanish-asr.sh"
+      if [[ ! -x "$helper" ]]; then
+        fail "Helper script not found or not executable: ${helper}"
+      fi
+      "$helper"
       return
       ;;
     tiny|tiny.en|base|base.en|small|small.en|medium|medium.en|large-v3|large-v3-turbo)
@@ -282,7 +354,7 @@ main() {
   esac
 
   info "All requested models are in ${REPO_ROOT}/models/"
-  info "Try: cargo run -p echo-proto -- transcribe /tmp/sample.wav --model ${ASR_DIR}/ggml-${choice%.en}.en.bin"
+  info "Try: cargo run -p echo-proto -- transcribe /tmp/sample.wav --language es --model ${ASR_DIR}/ggml-${choice}.bin"
 }
 
 main "$@"

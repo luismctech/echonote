@@ -98,7 +98,8 @@ enum Command {
         /// Path to any RIFF/WAV file (mono or stereo, any sample rate).
         input: PathBuf,
         /// Path to a `ggml-*.bin` Whisper model. Defaults to the
-        /// `ECHO_ASR_MODEL` env var or `./models/asr/ggml-base.en.bin`.
+        /// `ECHO_ASR_MODEL` env var, then the largest installed
+        /// multilingual ggml model under `./models/asr/`.
         #[arg(long, env = "ECHO_ASR_MODEL")]
         model: Option<PathBuf>,
         /// ISO-639-1 language hint (e.g. `en`, `es`). Auto-detect if
@@ -126,7 +127,8 @@ enum Command {
         #[arg(long, default_value_t = 30)]
         duration: u64,
         /// Path to a `ggml-*.bin` Whisper model. Defaults to the
-        /// `ECHO_ASR_MODEL` env var or `./models/asr/ggml-base.en.bin`.
+        /// `ECHO_ASR_MODEL` env var, then the largest installed
+        /// multilingual ggml model under `./models/asr/`.
         #[arg(long, env = "ECHO_ASR_MODEL")]
         model: Option<PathBuf>,
         /// Capture source. `microphone` is portable; `system-output`
@@ -176,7 +178,8 @@ enum Command {
         #[arg(long = "id", value_name = "ID", conflicts_with = "id_positional")]
         id_flag: Option<String>,
         /// Path to the GGUF LLM model. Defaults to `ECHO_LLM_MODEL`
-        /// or the first installed Qwen 2.5 GGUF under `models/llm/`.
+        /// or the highest-priority installed Qwen GGUF under
+        /// `models/llm/` (Qwen 3 first, Qwen 2.5 as legacy fallback).
         #[arg(long, env = "ECHO_LLM_MODEL")]
         model: Option<PathBuf>,
         /// Emit the full `Summary` as JSON instead of plain text.
@@ -293,7 +296,8 @@ enum BenchKind {
         #[arg(long, default_value = "./fixtures")]
         fixtures: PathBuf,
         /// Path to a `ggml-*.bin` Whisper model. Defaults to the
-        /// `ECHO_ASR_MODEL` env var or `./models/asr/ggml-base.en.bin`.
+        /// `ECHO_ASR_MODEL` env var, then the largest installed
+        /// multilingual ggml model under `./models/asr/`.
         #[arg(long, env = "ECHO_ASR_MODEL")]
         model: Option<PathBuf>,
         /// ISO-639-1 hint passed to whisper.
@@ -496,15 +500,7 @@ async fn run_transcribe(
     translate: bool,
     json: bool,
 ) -> Result<()> {
-    let model_path = model
-        .or_else(|| Some(PathBuf::from("./models/asr/ggml-base.en.bin")))
-        .filter(|p| p.exists())
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "no model found. Set --model or ECHO_ASR_MODEL, or run \
-                 `scripts/download-models.sh base.en` to fetch the default."
-            )
-        })?;
+    let model_path = resolve_asr_model(model)?;
 
     let (samples, source_format) = load_wav_as_pcm(&input)
         .with_context(|| format!("failed to read wav: {}", input.display()))?;
@@ -581,15 +577,7 @@ async fn run_stream(
     diarize: bool,
     embed_model: Option<PathBuf>,
 ) -> Result<()> {
-    let model_path = model
-        .or_else(|| Some(PathBuf::from("./models/asr/ggml-base.en.bin")))
-        .filter(|p| p.exists())
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "no model found. Set --model or ECHO_ASR_MODEL, or run \
-                 `scripts/download-models.sh base.en` to fetch the default."
-            )
-        })?;
+    let model_path = resolve_asr_model(model)?;
 
     let load_started = std::time::Instant::now();
     let transcriber = WhisperCppTranscriber::load(&model_path)
@@ -786,8 +774,9 @@ async fn run_stream(
 // ---------------------------------------------------------------------------
 
 /// Resolve the GGUF model path: `--model`, then `ECHO_LLM_MODEL`,
-/// then the first installed Qwen 2.5 GGUF under `models/llm/`. Mirrors
-/// the resolution order the Tauri shell uses.
+/// then the highest-priority installed Qwen GGUF under `models/llm/`.
+/// Mirrors the resolution order the Tauri shell uses (Qwen 3 first,
+/// Qwen 2.5 as legacy fallback).
 fn resolve_llm_model(explicit: Option<PathBuf>) -> Result<PathBuf> {
     if let Some(p) = explicit {
         if !p.exists() {
@@ -796,6 +785,9 @@ fn resolve_llm_model(explicit: Option<PathBuf>) -> Result<PathBuf> {
         return Ok(p);
     }
     const CANDIDATES: &[&str] = &[
+        "./models/llm/qwen3-30b-a3b-instruct-q4_k_m.gguf",
+        "./models/llm/qwen3-14b-instruct-q4_k_m.gguf",
+        "./models/llm/qwen3-8b-instruct-q4_k_m.gguf",
         "./models/llm/qwen2.5-7b-instruct-q4_k_m.gguf",
         "./models/llm/qwen2.5-3b-instruct-q4_k_m.gguf",
     ];
@@ -807,7 +799,44 @@ fn resolve_llm_model(explicit: Option<PathBuf>) -> Result<PathBuf> {
     }
     anyhow::bail!(
         "no GGUF LLM model found. Set --model or ECHO_LLM_MODEL, or run \
-         `scripts/download-models.sh llm` to fetch the default."
+         `scripts/download-models.sh llm` to fetch the default Qwen 3 14B."
+    )
+}
+
+/// Resolve the Whisper ggml model path used by `transcribe`, `stream`
+/// and `bench wer`. Same priority as the Tauri shell's
+/// `preferred_asr_model`: Spanish fine-tune > multilingual (turbo →
+/// large → medium → small → base → tiny) > English-only fallbacks.
+/// Returning `Result` (instead of falling back silently) keeps the
+/// CLI honest about missing setup.
+fn resolve_asr_model(explicit: Option<PathBuf>) -> Result<PathBuf> {
+    if let Some(p) = explicit {
+        if !p.exists() {
+            anyhow::bail!("ASR model not found at {}", p.display());
+        }
+        return Ok(p);
+    }
+    const CANDIDATES: &[&str] = &[
+        "./models/asr/ggml-large-v3-turbo-es.bin",
+        "./models/asr/ggml-large-v3-turbo.bin",
+        "./models/asr/ggml-large-v3.bin",
+        "./models/asr/ggml-medium.bin",
+        "./models/asr/ggml-small.bin",
+        "./models/asr/ggml-base.bin",
+        "./models/asr/ggml-tiny.bin",
+        "./models/asr/ggml-base.en.bin",
+        "./models/asr/ggml-small.en.bin",
+        "./models/asr/ggml-tiny.en.bin",
+    ];
+    for rel in CANDIDATES {
+        let p = PathBuf::from(rel);
+        if p.exists() {
+            return Ok(p);
+        }
+    }
+    anyhow::bail!(
+        "no Whisper ggml model found. Set --model or ECHO_ASR_MODEL, or run \
+         `scripts/download-models.sh` to fetch the default multilingual large-v3-turbo."
     )
 }
 
@@ -1122,15 +1151,7 @@ async fn run_bench_wer(
         anyhow::bail!("--max-wer must be in [0, 1], got {max_wer}");
     }
 
-    let model_path = model
-        .or_else(|| Some(PathBuf::from("./models/asr/ggml-base.en.bin")))
-        .filter(|p| p.exists())
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "no model found. Set --model or ECHO_ASR_MODEL, or run \
-                 `scripts/download-models.sh base.en` to fetch the default."
-            )
-        })?;
+    let model_path = resolve_asr_model(model)?;
 
     let pairs = discover_fixture_pairs(&fixtures)?;
     if pairs.is_empty() {

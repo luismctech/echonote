@@ -15,8 +15,10 @@ cloud-based tools like Granola.
 **Status:** 🚧 Pre-alpha — Sprint 1 in progress. Sprint 0 (`v0.1.0-sprint0`)
 shipped end-to-end live streaming, SQLite persistence and a Phase-0 WER bench
 on macOS. Sprint 1 has so far added per-track diarization, FTS5 search, a
-refactored React frontend that follows clean-architecture layering, and an
-ordered shutdown path. Local LLM summaries and chat land next.
+refactored React frontend that follows clean-architecture layering, an ordered
+shutdown path, on-demand local LLM summaries (Qwen 3 14B by default), and
+moved the default ASR to multilingual `large-v3-turbo` for Spanish-first
+recordings. Conversational chat with citations lands next.
 
 **What works today (`develop`):**
 
@@ -72,11 +74,18 @@ Full rationale is documented in [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md).
 
 ## Default models (Balanced profile)
 
+EchoNote targets **Spanish-first** meetings, so the defaults below favour
+multilingual ASR and Spanish-capable LLMs out of the box. English-only Whisper
+variants and Qwen 2.5 fallbacks remain reachable for benchmarks and back-compat.
+
 | Component | Model | Size on disk |
 |---|---|---|
-| ASR | Whisper medium q5_0 | ~1.5 GB |
-| LLM | Qwen 2.5 7B Instruct Q4_K_M | ~4.4 GB |
-| VAD | Silero VAD v5 | ~2 MB |
+| ASR | Whisper large-v3-turbo (multilingual) | ~1.6 GB |
+| ASR (optional, Spanish fine-tune) | whisper-large-v3-turbo-es | ~1.6 GB |
+| LLM | Qwen 3 14B Instruct Q4_K_M | ~9 GB |
+| LLM (lighter) | Qwen 3 8B Instruct Q4_K_M | ~5 GB |
+| LLM (Quality, MoE) | Qwen 3 30B-A3B Instruct Q4_K_M | ~18 GB |
+| VAD | Silero VAD v6.2.1 | ~2 MB |
 | Diarization | 3D-Speaker ERes2Net | ~15 MB |
 
 Lite and Quality profiles, plus benchmarks of alternative models, are tracked
@@ -206,13 +215,24 @@ Files are resampled to Whisper-native 16 kHz mono on the fly inside the
 On macOS the build uses the Metal backend; on Linux it falls back to a
 CPU build (acceleration features land in Phase 1).
 
-Fetch a Whisper model (default: `base.en`, ~142 MiB):
+Fetch a Whisper model (default: `large-v3-turbo`, multilingual, ~1.6 GiB):
 
 ```sh
-./scripts/download-models.sh             # base.en
-./scripts/download-models.sh small.en    # ~466 MiB, slightly better quality
-./scripts/download-models.sh medium      # ~1.5 GiB, multilingual
-./scripts/download-models.sh --all       # base.en + small.en
+./scripts/download-models.sh                 # large-v3-turbo (recommended)
+./scripts/download-models.sh medium          # ~1.5 GiB, multilingual
+./scripts/download-models.sh small           # ~466 MiB, multilingual
+./scripts/download-models.sh base.en         # ~142 MiB, English-only (Sprint 0 default)
+./scripts/download-models.sh asr-es          # Spanish fine-tune (needs Python; see below)
+./scripts/download-models.sh --all           # large-v3-turbo + vad + embed
+```
+
+For Spanish-first deployments you can also build the
+`whisper-large-v3-turbo-es` fine-tune (5.34 % WER on Common Voice 17 ES vs
+6.91 % for upstream turbo). It needs Python ≥ 3.10 the first time:
+
+```sh
+./scripts/build-spanish-asr.sh
+# Resulting model: ./models/asr/ggml-large-v3-turbo-es.bin
 ```
 
 Transcribe a WAV (any sample rate, any channel count — it gets
@@ -234,8 +254,9 @@ cargo run -p echo-proto -- transcribe /tmp/sample.wav --translate
 
 The plain-text output ends with a footer reporting the detected
 language, segment count, audio duration and the **real-time factor**
-(`elapsed / audio`). On an Apple M1 Pro with `ggml-base.en` and Metal,
-expect RTF ≈ 0.03 (≈ 30× realtime).
+(`elapsed / audio`). On an Apple M1 Pro with `ggml-large-v3-turbo`
+and Metal, expect RTF ≈ 0.08 (≈ 12× realtime). The English-only
+`ggml-base.en` is faster (RTF ≈ 0.03) but cannot transcribe Spanish.
 
 #### Streaming pipeline (Sprint 0 day 7)
 

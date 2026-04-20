@@ -143,9 +143,9 @@ export async function searchMeetings(
 /**
  * Generate (or regenerate) the local-LLM summary for a meeting.
  *
- * Loads the LLM lazily on first call (the model file is ~4.4 GB for
- * Qwen 2.5 7B Q4_K_M, so the first invocation in a session is the
- * slow one). Subsequent calls reuse the cached model. The use case
+ * Loads the LLM lazily on first call (the model file is ~9 GB for
+ * the default Qwen 3 14B Q4_K_M, so the first invocation in a session
+ * is the slow one). Subsequent calls reuse the cached model. The use case
  * upserts on (meetingId, template), so re-running this command on
  * the same meeting REPLACES the previous summary instead of
  * appending — matches the `Generate again` UX.

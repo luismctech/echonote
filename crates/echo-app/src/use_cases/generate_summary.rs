@@ -41,12 +41,13 @@ use echo_domain::{
     SummaryContent, SummaryId,
 };
 
-/// Maximum characters of transcript text fed to the model. Qwen 2.5 7B
-/// has a 32 k context but the KV cache cost scales with it; ~6 k
-/// characters fits ~30 minutes of speech and stays well within a 4 k
-/// token budget after Qwen's BPE tokenization (~3.5 chars/token in
-/// Spanish text). Longer meetings are summarised on a head + tail
-/// window — see [`render_transcript`].
+/// Maximum characters of transcript text fed to the model. Qwen 3
+/// (and Qwen 2.5 as legacy fallback) ship with 32 k+ context but the
+/// KV cache cost scales linearly with it; ~6 k characters fits ~30
+/// minutes of speech and stays well within a 4 k token budget after
+/// Qwen's BPE tokenization (~3.5 chars/token in Spanish text). Longer
+/// meetings are summarised on a head + tail window — see
+/// [`render_transcript`].
 const MAX_TRANSCRIPT_CHARS: usize = 6_000;
 
 /// Token budget for the model's response. Generous enough for a full
@@ -257,11 +258,12 @@ fn language_instruction(language: Option<&str>) -> String {
     }
 }
 
-/// Build the chat-template-wrapped prompt. The Qwen 2.5 family is the
-/// default model for the MVP, so we use its `<|im_start|>` template;
-/// most other modern instruct GGUFs (Llama 3, Mistral, Phi 3) tolerate
-/// it as a literal user message and still produce reasonable output,
-/// which is good enough for the day-9 single-template scope.
+/// Build the chat-template-wrapped prompt. The Qwen 3 family is the
+/// default model for the MVP (Qwen 2.5 is a legacy fallback), and both
+/// share the same `<|im_start|>` template, so a single prompt covers
+/// both. Most other modern instruct GGUFs (Llama 3, Mistral, Phi 3)
+/// tolerate it as a literal user message and still produce reasonable
+/// output, which is good enough for the day-9 single-template scope.
 fn build_general_prompt(
     transcript: &str,
     language_instruction: &str,

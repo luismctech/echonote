@@ -286,7 +286,7 @@ impl AppState {
         }
         if !self.model_path.exists() {
             return Err(format!(
-                "model not found at {}. Set ECHO_ASR_MODEL or run `scripts/download-models.sh base.en`.",
+                "model not found at {}. Set ECHO_ASR_MODEL or run `scripts/download-models.sh` (downloads multilingual large-v3-turbo by default).",
                 self.model_path.display()
             ));
         }
@@ -310,13 +310,18 @@ fn resolve_db_path() -> PathBuf {
 }
 
 /// Pick the LLM model to load by default, in priority order:
-/// the largest installed Qwen 2.5 first (best quality), then the
-/// 3B fallback for dev machines / lower-spec hardware. Resolution
-/// against the workspace happens later in [`resolve_asset_path`];
-/// here we only pick a *relative* path that the resolver checks
-/// for existence.
+/// Qwen 3 first (better Spanish coverage and more recent training),
+/// largest dense first then MoE then legacy Qwen 2.5 fallbacks for
+/// back-compat with Sprint 1 day 9 setups. Resolution against the
+/// workspace happens later in [`resolve_asset_path`]; here we only
+/// pick a *relative* path that the resolver checks for existence.
 fn preferred_llm_model() -> &'static str {
     const CANDIDATES: &[&str] = &[
+        // Qwen 3 — current default family (Spanish-first).
+        "models/llm/qwen3-30b-a3b-instruct-q4_k_m.gguf",
+        "models/llm/qwen3-14b-instruct-q4_k_m.gguf",
+        "models/llm/qwen3-8b-instruct-q4_k_m.gguf",
+        // Qwen 2.5 — legacy fallback (kept for back-compat).
         "models/llm/qwen2.5-7b-instruct-q4_k_m.gguf",
         "models/llm/qwen2.5-3b-instruct-q4_k_m.gguf",
     ];
@@ -326,25 +331,31 @@ fn preferred_llm_model() -> &'static str {
             return rel;
         }
     }
-    // Nothing installed yet — default to the canonical 7B path so the
-    // error message points the user at the right download command.
-    "models/llm/qwen2.5-7b-instruct-q4_k_m.gguf"
+    // Nothing installed yet — default to the canonical 14B Qwen 3 path
+    // so the error message points the user at the right download
+    // command (`scripts/download-models.sh llm`).
+    "models/llm/qwen3-14b-instruct-q4_k_m.gguf"
 }
 
-/// Pick the ASR model to load by default, in priority order:
-/// the largest installed multilingual ggml model first (so non-English
-/// users get a working transcript without env overrides), then
+/// Pick the ASR model to load by default, in priority order: the
+/// Spanish fine-tune first (lowest WER on Spanish meetings), then
+/// the largest installed multilingual ggml model so non-English
+/// users get a working transcript without env overrides, then
 /// English-only fallbacks for backwards compatibility with Sprint 0
 /// setups. Resolution against the workspace happens later in
 /// [`resolve_asset_path`]; here we only pick a *relative* path that
 /// the resolver checks for existence.
 fn preferred_asr_model() -> &'static str {
     const CANDIDATES: &[&str] = &[
+        // Spanish-first multilingual — best for our target audience.
+        "models/asr/ggml-large-v3-turbo-es.bin",
+        "models/asr/ggml-large-v3-turbo.bin",
         "models/asr/ggml-large-v3.bin",
         "models/asr/ggml-medium.bin",
         "models/asr/ggml-small.bin",
         "models/asr/ggml-base.bin",
         "models/asr/ggml-tiny.bin",
+        // English-only fallbacks (Sprint 0 / dev / benchmark setups).
         "models/asr/ggml-base.en.bin",
         "models/asr/ggml-small.en.bin",
         "models/asr/ggml-tiny.en.bin",
@@ -355,9 +366,10 @@ fn preferred_asr_model() -> &'static str {
             return rel;
         }
     }
-    // Nothing installed yet — default to multilingual base so the
-    // error message points the user at the right download command.
-    "models/asr/ggml-base.bin"
+    // Nothing installed yet — default to multilingual turbo so the
+    // error message points the user at the right download command
+    // (`scripts/download-models.sh`).
+    "models/asr/ggml-large-v3-turbo.bin"
 }
 
 /// Resolve an asset path with sensible dev-vs-prod fallbacks.
