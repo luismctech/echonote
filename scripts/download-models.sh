@@ -18,7 +18,7 @@
 #   scripts/download-models.sh small.en       # ~466 MB, English-only
 #   scripts/download-models.sh asr-es         # whisper-large-v3-turbo Spanish fine-tune
 #                                             # (requires Python; see Pack C below)
-#   scripts/download-models.sh vad            # Silero VAD v6 (~2 MB)
+#   scripts/download-models.sh vad            # Silero VAD v5.1.2 (~2 MB)
 #   scripts/download-models.sh embed          # 3D-Speaker ERes2Net (~26 MB)
 #   scripts/download-models.sh llm            # Qwen 3 14B Instruct Q4_K_M (~9 GB)
 #   scripts/download-models.sh llm-small      # Qwen 3 8B Instruct Q4_K_M (~5 GB)
@@ -46,12 +46,28 @@ MODELS_DIR="$ASR_DIR"
 
 # Hugging Face repository that mirrors the ggerganov/whisper.cpp models.
 HF_BASE="https://huggingface.co/ggerganov/whisper.cpp/resolve/main"
-# Silero VAD v6 lives in the upstream GitHub repo. Pinned to a tagged
-# release so we get reproducible downloads across machines and over time.
-# v6 (vs v5.1.2) reports −16% errors on noisy real-life audio and −11%
-# multi-domain, plus better handling of unusual / child / phone-quality
-# voices — relevant for real meetings (Silero release notes, 2025-08).
-SILERO_VAD_URL="https://github.com/snakers4/silero-vad/raw/v6.2.1/src/silero_vad/data/silero_vad.onnx"
+# Silero VAD v5.1.2 (last v5 release). Pinned to a tagged release so we
+# get reproducible downloads across machines and over time.
+#
+# The upstream v5 ONNX *does* contain a control-flow `If` operator
+# (dispatching between the 16 kHz and 8 kHz sub-networks on the `sr`
+# input). pure-Rust `tract-onnx` — the inference backend used by
+# `crates/echo-audio/src/preprocess/silero_vad.rs` — does not
+# implement `If`, so loading the raw file errors with
+# `optimize: Failed analyse for node #5 "If_0"`.
+#
+# We work around this by post-processing the ONNX after download with
+# `scripts/simplify-silero-vad.py`: inline the 16 kHz branch, drop the
+# now-orphan `sr` input and let ORT's constant-folding eliminate the
+# nested shape-dependent `If`s. The resulting graph is ~31 nodes of
+# pure feed-forward + LSTM, bitwise-equivalent to the upstream model
+# at 16 kHz, and loads cleanly in tract.
+#
+# v6 was evaluated and rejected: it changed the state signature
+# (`[2,1,128]` → two separate LSTM states) so the Rust adapter would
+# need a full rewrite on top of the simplification; the ~16% noisy-
+# audio WER improvement it promises is not worth that churn for MVP.
+SILERO_VAD_URL="https://github.com/snakers4/silero-vad/raw/v5.1.2/src/silero_vad/data/silero_vad.onnx"
 # 3D-Speaker ERes2Net (English VoxCeleb) — the speaker embedder used by
 # echo-diarize. Mirrored on Hugging Face by csukuangfj (sherpa-onnx
 # maintainer); upstream lives on ModelScope. ~26 MB, opset 13, outputs
@@ -164,33 +180,60 @@ download_one() {
 
 download_silero_vad() {
   local out="${VAD_DIR}/silero_vad.onnx"
+  local simplifier="${REPO_ROOT}/scripts/simplify-silero-vad.py"
+
+  # Caching strategy: file size alone is NOT a reliable readiness signal.
+  # A previous version of the simplifier ran ORT at ENABLE_ALL and emitted
+  # files of the same ~1220 KiB as the current BASIC pipeline but laced
+  # with FusedConv (an ORT contrib op tract rejects). To recover those
+  # users transparently, we always run the simplifier — its
+  # `already_simplified` check is O(few-ms) and correctly inspects op
+  # types, not just byte counts.
+  local need_download=1
   if [[ -f "$out" ]]; then
     local got_kib
     got_kib=$(( $(wc -c < "$out") / 1024 ))
-    if (( got_kib < 1500 )); then
-      warn "silero_vad.onnx present but truncated (${got_kib} KiB, expected ~2200 KiB). Re-downloading."
-      rm -f "$out"
+    if (( got_kib < 1000 )); then
+      warn "silero_vad.onnx present but truncated (${got_kib} KiB). Re-downloading."
     else
-      info "silero_vad.onnx already present (${got_kib} KiB) — skipping."
-      return
+      info "silero_vad.onnx already on disk (${got_kib} KiB) — will verify with simplifier."
+      need_download=0
     fi
   fi
 
-  info "Fetching Silero VAD v5 → ${out}"
-  if command -v curl >/dev/null 2>&1; then
-    curl --fail --location --progress-bar --output "$out" "$SILERO_VAD_URL"
-  elif command -v wget >/dev/null 2>&1; then
-    wget --show-progress --output-document="$out" "$SILERO_VAD_URL"
-  else
-    fail "Neither curl nor wget is installed."
+  if (( need_download )); then
+    info "Fetching Silero VAD v5.1.2 → ${out}"
+    if command -v curl >/dev/null 2>&1; then
+      curl --fail --location --progress-bar --output "$out" "$SILERO_VAD_URL"
+    elif command -v wget >/dev/null 2>&1; then
+      wget --show-progress --output-document="$out" "$SILERO_VAD_URL"
+    else
+      fail "Neither curl nor wget is installed."
+    fi
+    local got_kib
+    got_kib=$(( $(wc -c < "$out") / 1024 ))
+    if (( got_kib < 1000 )); then
+      fail "silero_vad.onnx downloaded incompletely (${got_kib} KiB)"
+    fi
   fi
+
+  info "Verifying / simplifying Silero VAD for tract-onnx (BASIC ORT level, no contrib ops)"
+  if ! command -v python3 >/dev/null 2>&1; then
+    fail "python3 is required to simplify Silero VAD. Install Python 3.9+ and re-run."
+  fi
+  if ! python3 -c "import onnx, onnxruntime" >/dev/null 2>&1; then
+    info "Installing simplifier deps: pip install --user onnx onnxruntime"
+    python3 -m pip install --quiet --user onnx onnxruntime \
+      || fail "Could not install onnx/onnxruntime. Install them manually and re-run."
+  fi
+  # The simplifier is idempotent: it short-circuits on a clean output
+  # and re-emits a fresh BASIC build on a stale FusedConv-tainted file.
+  python3 "$simplifier" --input "$out" --output "$out" \
+    || fail "Silero VAD simplification failed. Delete ${out} and ${out}.upstream and re-run to start clean."
 
   local got_kib
   got_kib=$(( $(wc -c < "$out") / 1024 ))
-  if (( got_kib < 1500 )); then
-    fail "silero_vad.onnx downloaded incompletely (${got_kib} KiB)"
-  fi
-  printf "  ${GRN}✓${RST} silero_vad.onnx (%d KiB)\n" "$got_kib"
+  printf "  ${GRN}✓${RST} silero_vad.onnx (%d KiB, tract-ready)\n" "$got_kib"
 }
 
 download_eres2net() {

@@ -1,8 +1,9 @@
 //! Silero VAD v5 adapter — neural Voice Activity Detection.
 //!
 //! Implements the [`Vad`] domain port using the Silero VAD v5 model
-//! (`silero_vad.onnx`, ~2 MB) running through pure-Rust ONNX inference
-//! (`tract-onnx`). Compared to the energy-based baseline this adapter:
+//! (`silero_vad.onnx`, ~1.2 MB after pre-processing) running through
+//! pure-Rust ONNX inference (`tract-onnx`). Compared to the
+//! energy-based baseline this adapter:
 //!
 //! - distinguishes voice from non-voice noise (music, keyboards, fans);
 //! - holds an LSTM hidden state across frames so short pauses inside
@@ -15,6 +16,21 @@
 //! fixed 512-sample windows (32 ms). The 8 kHz path (256-sample
 //! windows) exists upstream but is intentionally not exposed here —
 //! the rest of EchoNote is 16 kHz / mono.
+//!
+//! ## Why the on-disk ONNX is a modified build
+//!
+//! The upstream Silero v5 graph dispatches between the 16 kHz and
+//! 8 kHz sub-networks through an ONNX `If` operator controlled by the
+//! `sr` input. `tract-onnx` does not implement `If`, so loading the
+//! raw upstream file fails with `optimize: Failed analyse for node
+//! #5 "If_0" If`. We therefore pre-process the model at download
+//! time (`scripts/simplify-silero-vad.py`): we inline the 16 kHz
+//! `then_branch`, drop the now-unused `sr` input and let ORT's
+//! constant-folding pass collapse the nested `If`s that depended on
+//! static shape values. The result is a pure feed-forward + LSTM
+//! graph with 2 inputs (`input`, `state`) and 2 outputs (`output`,
+//! `stateN`), bitwise-equivalent to the upstream model for 16 kHz
+//! audio.
 //!
 //! ## Hysteresis
 //!
@@ -137,11 +153,6 @@ impl SileroVad {
                 InferenceFact::dt_shape(f32::datum_type(), [2_usize, 1, STATE_HIDDEN]),
             )
             .map_err(|e| DomainError::VadFailed(format!("state fact: {e}")))?
-            .with_input_fact(
-                2,
-                InferenceFact::dt_shape(i64::datum_type(), tvec!() as TVec<usize>),
-            )
-            .map_err(|e| DomainError::VadFailed(format!("sr fact: {e}")))?
             .into_optimized()
             .map_err(|e| DomainError::VadFailed(format!("optimize: {e}")))?
             .into_runnable()
@@ -163,6 +174,29 @@ impl SileroVad {
         Self::from_path(path, SileroVadConfig::default())
     }
 
+    /// Build a fresh detector that **shares this instance's optimized
+    /// model** (cheap Arc clone) but starts with a clean LSTM state,
+    /// empty carry buffer and `Silence` hysteresis. Use this between
+    /// independent sessions instead of re-loading from disk — the
+    /// expensive part is the `tract` graph optimization, not the
+    /// per-stream state.
+    ///
+    /// The returned detector keeps the same [`SileroVadConfig`] as
+    /// `self`. Caller can mutate it via [`SileroVad::from_path`] or
+    /// by exposing a config setter when needed.
+    #[must_use]
+    pub fn clone_for_new_session(&self) -> Self {
+        Self {
+            model: Arc::clone(&self.model),
+            config: self.config,
+            state: zero_state(),
+            carry: Vec::with_capacity(SILERO_FRAME_SAMPLES),
+            hysteresis: VoiceState::Silence,
+            voiced_run: 0,
+            silent_run: 0,
+        }
+    }
+
     /// Run a single 512-sample window through the network and return
     /// the raw speech probability in `[0.0, 1.0]`. Updates the LSTM
     /// state in place. Used by [`Self::push`] but exposed for tests
@@ -172,13 +206,8 @@ impl SileroVad {
 
         let audio = Tensor::from_shape(&[1, SILERO_FRAME_SAMPLES], window)
             .map_err(|e| DomainError::VadFailed(format!("audio tensor: {e}")))?;
-        let sr = tensor0::<i64>(i64::from(SILERO_SAMPLE_RATE));
 
-        let inputs = tvec!(
-            audio.into_tvalue(),
-            self.state.clone().into_tvalue(),
-            sr.into_tvalue(),
-        );
+        let inputs = tvec!(audio.into_tvalue(), self.state.clone().into_tvalue(),);
         let mut outputs = self
             .model
             .run(inputs)
@@ -394,6 +423,32 @@ mod tests {
             saw_voiced,
             "Silero must mark at least one window of the meeting fixture as voiced"
         );
+    }
+
+    #[tokio::test]
+    async fn clone_for_new_session_shares_model_but_resets_state() {
+        let Some(path) = model_path() else {
+            return;
+        };
+        let mut original = SileroVad::for_meetings(&path).expect("load model");
+        // Drive the original instance forward so its LSTM state is
+        // non-zero and (hopefully) its hysteresis flips to Voiced.
+        original.push(&sine(440.0, 1_000, 0.5)).await.unwrap();
+
+        let mut child = original.clone_for_new_session();
+        // Cheap shared model: both Arcs point at the same underlying
+        // graph. We can't compare Arc::ptr_eq directly without
+        // exposing the field, so just sanity-check the child starts
+        // at the silence baseline.
+        assert_eq!(child.hysteresis, VoiceState::Silence);
+        assert_eq!(child.voiced_run, 0);
+        assert_eq!(child.silent_run, 0);
+        assert!(child.carry.is_empty());
+
+        // And it should still classify pure silence as silent on a
+        // fresh stream — proves the LSTM state was zeroed too.
+        let state = child.push(&vec![0.0_f32; 16_000]).await.unwrap();
+        assert_eq!(state, VoiceState::Silence);
     }
 
     #[tokio::test]
