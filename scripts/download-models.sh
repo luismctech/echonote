@@ -69,18 +69,23 @@ ERES2NET_FIXTURE_DIR="${REPO_ROOT}/crates/echo-diarize/tests/fixtures"
 # tokens stay unchanged. Q4_K_M is ~9 GB on disk (~10 GB RAM with KV
 # cache at our 4 k context), comfortably inside our < 45 s/30 min target
 # from DEVELOPMENT_PLAN.md §3.1 CU-04 on Apple Silicon ≥16 GB.
-QWEN3_14B_URL="https://huggingface.co/Qwen/Qwen3-14B-Instruct-GGUF/resolve/main/qwen3-14b-instruct-q4_k_m.gguf"
-QWEN3_14B_NAME="qwen3-14b-instruct-q4_k_m.gguf"
+# Note on naming: the official Qwen team publishes Qwen 3 GGUFs under
+# `Qwen/Qwen3-<size>-GGUF` (no `-Instruct-` infix, since every Qwen 3
+# checkpoint is instruction-tuned out of the box) and uses capital `Q`
+# in the quant suffix (`Qwen3-14B-Q4_K_M.gguf`). We mirror that exact
+# casing to avoid 404s on the HF CDN.
+QWEN3_14B_URL="https://huggingface.co/Qwen/Qwen3-14B-GGUF/resolve/main/Qwen3-14B-Q4_K_M.gguf"
+QWEN3_14B_NAME="Qwen3-14B-Q4_K_M.gguf"
 # Smaller dense variant for laptops with 8-16 GB RAM. Drop-in upgrade
 # over Qwen 2.5 7B (better multilingual coverage, more recent training)
 # at almost the same footprint (~5 GB Q4_K_M).
-QWEN3_8B_URL="https://huggingface.co/Qwen/Qwen3-8B-Instruct-GGUF/resolve/main/qwen3-8b-instruct-q4_k_m.gguf"
-QWEN3_8B_NAME="qwen3-8b-instruct-q4_k_m.gguf"
+QWEN3_8B_URL="https://huggingface.co/Qwen/Qwen3-8B-GGUF/resolve/main/Qwen3-8B-Q4_K_M.gguf"
+QWEN3_8B_NAME="Qwen3-8B-Q4_K_M.gguf"
 # MoE variant for Macs ≥32 GB. 30 B total / 3 B active per token —
 # higher quality than the dense 32 B at a fraction of the inference
 # cost. Recommended when the user runs the Quality profile.
-QWEN3_MOE_URL="https://huggingface.co/Qwen/Qwen3-30B-A3B-Instruct-GGUF/resolve/main/qwen3-30b-a3b-instruct-q4_k_m.gguf"
-QWEN3_MOE_NAME="qwen3-30b-a3b-instruct-q4_k_m.gguf"
+QWEN3_MOE_URL="https://huggingface.co/Qwen/Qwen3-30B-A3B-GGUF/resolve/main/Qwen3-30B-A3B-Q4_K_M.gguf"
+QWEN3_MOE_NAME="Qwen3-30B-A3B-Q4_K_M.gguf"
 # Legacy Qwen 2.5 GGUFs kept for back-compat with Sprint 1 day 9 setups
 # and as a fallback when the Qwen 3 mirrors are unavailable.
 QWEN_7B_URL="https://huggingface.co/Qwen/Qwen2.5-7B-Instruct-GGUF/resolve/main/qwen2.5-7b-instruct-q4_k_m.gguf"

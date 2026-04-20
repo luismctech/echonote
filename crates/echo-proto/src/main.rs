@@ -784,10 +784,14 @@ fn resolve_llm_model(explicit: Option<PathBuf>) -> Result<PathBuf> {
         }
         return Ok(p);
     }
+    // Qwen 3 filenames mirror the official Qwen team's HF naming
+    // convention (`Qwen3-<size>-Q4_K_M.gguf`, capital `Q`, no
+    // `-Instruct-` infix). Keep the legacy lowercase Qwen 2.5 paths
+    // for back-compat with day-9 setups.
     const CANDIDATES: &[&str] = &[
-        "./models/llm/qwen3-30b-a3b-instruct-q4_k_m.gguf",
-        "./models/llm/qwen3-14b-instruct-q4_k_m.gguf",
-        "./models/llm/qwen3-8b-instruct-q4_k_m.gguf",
+        "./models/llm/Qwen3-30B-A3B-Q4_K_M.gguf",
+        "./models/llm/Qwen3-14B-Q4_K_M.gguf",
+        "./models/llm/Qwen3-8B-Q4_K_M.gguf",
         "./models/llm/qwen2.5-7b-instruct-q4_k_m.gguf",
         "./models/llm/qwen2.5-3b-instruct-q4_k_m.gguf",
     ];

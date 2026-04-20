@@ -317,10 +317,12 @@ fn resolve_db_path() -> PathBuf {
 /// pick a *relative* path that the resolver checks for existence.
 fn preferred_llm_model() -> &'static str {
     const CANDIDATES: &[&str] = &[
-        // Qwen 3 — current default family (Spanish-first).
-        "models/llm/qwen3-30b-a3b-instruct-q4_k_m.gguf",
-        "models/llm/qwen3-14b-instruct-q4_k_m.gguf",
-        "models/llm/qwen3-8b-instruct-q4_k_m.gguf",
+        // Qwen 3 — current default family (Spanish-first). Filenames
+        // mirror the official Qwen team's HF naming convention
+        // (`Qwen3-<size>-Q4_K_M.gguf`, no `-Instruct-` infix).
+        "models/llm/Qwen3-30B-A3B-Q4_K_M.gguf",
+        "models/llm/Qwen3-14B-Q4_K_M.gguf",
+        "models/llm/Qwen3-8B-Q4_K_M.gguf",
         // Qwen 2.5 — legacy fallback (kept for back-compat).
         "models/llm/qwen2.5-7b-instruct-q4_k_m.gguf",
         "models/llm/qwen2.5-3b-instruct-q4_k_m.gguf",
@@ -334,7 +336,7 @@ fn preferred_llm_model() -> &'static str {
     // Nothing installed yet — default to the canonical 14B Qwen 3 path
     // so the error message points the user at the right download
     // command (`scripts/download-models.sh llm`).
-    "models/llm/qwen3-14b-instruct-q4_k_m.gguf"
+    "models/llm/Qwen3-14B-Q4_K_M.gguf"
 }
 
 /// Pick the ASR model to load by default, in priority order: the
