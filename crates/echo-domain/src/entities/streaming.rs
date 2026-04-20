@@ -48,7 +48,17 @@ pub struct StreamingOptions {
     /// milliseconds. Default 5000 (5 s) — Whisper's sweet spot.
     pub chunk_ms: u32,
     /// Skip transcription of chunks whose RMS is below this threshold.
-    /// `0.0` disables the gate. Default 0.005 (~ -46 dBFS).
+    /// `0.0` disables the gate. Default 0.02 (~ -34 dBFS), aligned
+    /// with [`crate::EnergyVad`]'s `start_threshold` which was tuned
+    /// for desk microphones in quiet-ish rooms (laptop coffeeshop /
+    /// home office). A typical MacBook mic in a quiet room sits at
+    /// 0.005–0.015 RMS when nobody is speaking; conversational speech
+    /// at ~ -20 dBFS clocks in around 0.05–0.1 RMS. The previous
+    /// defaults (0.005, 0.01) were too permissive and let background
+    /// noise through, which fed Whisper near-silent chunks it then
+    /// hallucinated YouTube outros / single-word "Gracias." over. If
+    /// your mic environment is louder, raise it; if you have a soft
+    /// speaker or a noise-cancelling headset, lower it.
     pub silence_rms_threshold: f32,
 }
 
@@ -57,7 +67,7 @@ impl Default for StreamingOptions {
         Self {
             language: None,
             chunk_ms: 5_000,
-            silence_rms_threshold: 0.005,
+            silence_rms_threshold: 0.02,
         }
     }
 }
@@ -185,6 +195,14 @@ mod tests {
         assert!(json.contains("\"type\":\"started\""), "got: {json}");
         assert!(json.contains("\"sessionId\""), "got: {json}");
         assert!(json.contains("\"inputFormat\""), "got: {json}");
+        // Regression: nested AudioFormat must also be camelCase or the
+        // React `LivePane` subtitle renders "undefined Hz". See bug
+        // fixed alongside the Silero VAD work.
+        assert!(json.contains("\"sampleRateHz\""), "got: {json}");
+        assert!(
+            !json.contains("\"sample_rate_hz\""),
+            "AudioFormat leaked snake_case to the wire: {json}"
+        );
     }
 
     #[test]

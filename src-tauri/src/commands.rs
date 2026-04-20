@@ -22,12 +22,12 @@ use echo_app::{
     SummarizeMeeting, SummarizeMeetingError,
 };
 use echo_asr::WhisperCppTranscriber;
-use echo_audio::{RoutingAudioCapture, RubatoResamplerAdapter};
+use echo_audio::{RoutingAudioCapture, RubatoResamplerAdapter, SileroVad};
 use echo_diarize::{Eres2NetEmbedder, OnlineDiarizer};
 use echo_domain::{
     AudioCapture, AudioFormat, AudioSource, CaptureSpec, Diarizer, LlmModel, Meeting, MeetingId,
     MeetingSearchHit, MeetingStore, MeetingSummary, Resampler, SpeakerId, StreamingOptions,
-    StreamingSessionId, Summary, Transcriber, TranscriptEvent,
+    StreamingSessionId, Summary, Transcriber, TranscriptEvent, Vad,
 };
 use echo_llm::{LlamaCppLlm, LoadOptions as LlamaLoadOptions};
 use echo_storage::SqliteMeetingStore;
@@ -101,6 +101,25 @@ pub struct AppState {
     /// Lazily-loaded LLM. Wrapped in `AsyncMutex` because load is
     /// cooperative (the first caller pays, the rest wait).
     llm: AsyncMutex<Option<Arc<dyn LlmModel>>>,
+    /// Path to the Silero VAD ONNX (`./models/vad/silero_vad.onnx` by
+    /// default, overridable via `ECHO_VAD_MODEL`). The model is
+    /// loaded lazily on first `start_streaming` call so app startup
+    /// stays cheap; once loaded it lives behind an [`Arc`] and every
+    /// new session clones it via [`SileroVad::clone_for_new_session`]
+    /// (cheap Arc clone of the optimized graph + zeroed LSTM state).
+    vad_model_path: PathBuf,
+    /// Lazily-loaded Silero VAD template. `None` until the first
+    /// session asks for it; `Some(Arc)` afterwards. We hold an
+    /// `Arc<SileroVad>` (not `Box<dyn Vad>`) because the per-session
+    /// clone helper is on the concrete type.
+    ///
+    /// `Option` (not just `Arc`) so we can degrade gracefully when
+    /// the model file is missing: `start_streaming` proceeds with
+    /// the energy-based RMS gate and logs a warning instead of
+    /// failing outright. This keeps Sprint-0 setups working without
+    /// requiring users to download an extra ~2 MB asset before
+    /// recording.
+    vad: AsyncMutex<Option<Arc<SileroVad>>>,
 }
 
 struct SessionEntry {
@@ -186,12 +205,18 @@ impl AppState {
         );
         let llm_model_path =
             resolve_asset_path(std::env::var("ECHO_LLM_MODEL").ok(), preferred_llm_model());
+        let vad_model_path = resolve_asset_path(
+            std::env::var("ECHO_VAD_MODEL").ok(),
+            // Matches what `scripts/download-models.sh vad` writes.
+            "models/vad/silero_vad.onnx",
+        );
 
         let db_path = resolve_db_path();
         tracing::info!(
             asr_model = %model_path.display(),
             embed_model = %embed_model_path.display(),
             llm_model = %llm_model_path.display(),
+            vad_model = %vad_model_path.display(),
             db_path = %db_path.display(),
             "echo-shell paths resolved"
         );
@@ -216,6 +241,8 @@ impl AppState {
             sessions: Arc::new(Mutex::new(HashMap::new())),
             llm_model_path,
             llm: AsyncMutex::new(None),
+            vad_model_path,
+            vad: AsyncMutex::new(None),
         })
     }
 
@@ -277,6 +304,51 @@ impl AppState {
             "speaker embedder ready"
         );
         Ok(Box::new(OnlineDiarizer::with_defaults(Box::new(embedder))))
+    }
+
+    /// Lazily load the Silero VAD ONNX once per process.
+    ///
+    /// Returns `Ok(None)` (instead of an error) when the model file
+    /// is missing — callers fall back to the pure-RMS silence gate
+    /// and the user sees a one-time warning in the logs. This keeps
+    /// EchoNote usable without forcing every install to run
+    /// `scripts/download-models.sh vad`.
+    async fn ensure_vad(&self) -> Result<Option<Arc<SileroVad>>, String> {
+        let mut slot = self.vad.lock().await;
+        if let Some(v) = slot.as_ref() {
+            return Ok(Some(v.clone()));
+        }
+        if !self.vad_model_path.exists() {
+            tracing::warn!(
+                vad_model = %self.vad_model_path.display(),
+                "Silero VAD model not found; falling back to RMS gate. Run \
+                 `scripts/download-models.sh vad` for sharper voice/non-voice \
+                 discrimination (recommended)."
+            );
+            return Ok(None);
+        }
+        let path = self.vad_model_path.clone();
+        let started = std::time::Instant::now();
+        // Loading + tract optimization is sync CPU work; offload so
+        // the Tauri command executor can keep handling IPC while the
+        // first session pays the cost.
+        let loaded = tokio::task::spawn_blocking(move || SileroVad::for_meetings(&path))
+            .await
+            .map_err(|e| format!("Silero VAD load task panicked: {e}"))?
+            .map_err(|e| {
+                format!(
+                    "failed to load Silero VAD at {}: {e}",
+                    self.vad_model_path.display()
+                )
+            })?;
+        tracing::info!(
+            vad_model = %self.vad_model_path.display(),
+            load_ms = started.elapsed().as_millis() as u64,
+            "Silero VAD ready"
+        );
+        let arc = Arc::new(loaded);
+        *slot = Some(arc.clone());
+        Ok(Some(arc))
     }
 
     async fn ensure_transcriber(&self) -> Result<Arc<dyn Transcriber>, String> {
@@ -459,7 +531,7 @@ pub struct StartStreamingOptions {
     /// Audio chunk size in milliseconds. `None` ⇒ 5000.
     pub chunk_ms: Option<u32>,
     /// RMS threshold below which a chunk is reported as `Skipped`
-    /// instead of being sent to the ASR. `None` ⇒ 0.005.
+    /// instead of being sent to the ASR. `None` ⇒ 0.02.
     pub silence_rms_threshold: Option<f32>,
     /// Enable speaker diarization for this session. `None`/`false` ⇒
     /// disabled (keeps Sprint 0 behaviour). When enabled the backend
@@ -472,6 +544,14 @@ pub struct StartStreamingOptions {
     /// path resolved at app start. Mostly useful for tests / power
     /// users; the UI does not surface it.
     pub embed_model_path: Option<PathBuf>,
+    /// Disable the neural (Silero) VAD for this session and fall back
+    /// to the energy-based RMS gate. `None`/`false` ⇒ neural VAD is
+    /// used when the ONNX model is installed (default and recommended:
+    /// fewer Whisper hallucinations on silent / noisy chunks). Set to
+    /// `true` only as an escape hatch — e.g. for very soft speakers
+    /// the model misclassifies as silence, or to reproduce pre-Silero
+    /// behaviour for benchmarking.
+    pub disable_neural_vad: Option<bool>,
 }
 
 /// Start a streaming transcription session. Events are pushed through
@@ -488,7 +568,7 @@ pub async fn start_streaming(
     let streaming_options = StreamingOptions {
         language: opts.language,
         chunk_ms: opts.chunk_ms.unwrap_or(5_000),
-        silence_rms_threshold: opts.silence_rms_threshold.unwrap_or(0.005),
+        silence_rms_threshold: opts.silence_rms_threshold.unwrap_or(0.02),
     };
     let source: AudioSource = opts
         .source
@@ -520,6 +600,16 @@ pub async fn start_streaming(
     if opts.diarize.unwrap_or(false) {
         let diarizer = state.build_diarizer(opts.embed_model_path)?;
         pipeline = pipeline.with_diarizer(diarizer);
+    }
+    if !opts.disable_neural_vad.unwrap_or(false) {
+        // ensure_vad returns Ok(None) when the model file is missing
+        // — log once at warn level and continue with the RMS gate.
+        if let Some(template) = state.ensure_vad().await? {
+            let session_vad: Box<dyn Vad> = Box::new(template.clone_for_new_session());
+            pipeline = pipeline.with_vad(session_vad);
+        }
+    } else {
+        tracing::info!("neural VAD disabled by request; using RMS gate");
     }
 
     let handle = pipeline

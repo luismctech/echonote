@@ -40,7 +40,7 @@ use echo_app::{
 use echo_asr::WhisperCppTranscriber;
 use echo_audio::{
     resample_to_whisper, CpalMicrophoneCapture, RoutingAudioCapture, RubatoResamplerAdapter,
-    WavSink, WriteOptions, WHISPER_SAMPLE_RATE,
+    SileroVad, WavSink, WriteOptions, WHISPER_SAMPLE_RATE,
 };
 use echo_diarize::{Eres2NetEmbedder, OnlineDiarizer};
 use echo_domain::{
@@ -147,8 +147,9 @@ enum Command {
         #[arg(long, default_value_t = 5_000)]
         chunk_ms: u32,
         /// Skip transcription of chunks below this RMS. `0.0` disables
-        /// the gate.
-        #[arg(long, default_value_t = 0.005)]
+        /// the gate. Default 0.02 (~ -34 dBFS); raise it if room noise
+        /// is sneaking past, lower it for very quiet speakers.
+        #[arg(long, default_value_t = 0.02)]
         silence_threshold: f32,
         /// Attach a speaker diarizer to the pipeline. Each chunk is
         /// also fed through ERes2Net + online clustering and the
@@ -161,6 +162,18 @@ enum Command {
         /// Only consulted when `--diarize` is set.
         #[arg(long, env = "ECHO_EMBED_MODEL")]
         embed_model: Option<PathBuf>,
+        /// Path to the Silero VAD ONNX. Defaults to the
+        /// `ECHO_VAD_MODEL` env var or `./models/vad/silero_vad.onnx`.
+        /// When the file is present (and `--no-neural-vad` is not
+        /// passed) the pipeline gates Whisper behind Silero — sharply
+        /// reducing hallucinations on silent / noisy chunks.
+        #[arg(long, env = "ECHO_VAD_MODEL")]
+        vad_model: Option<PathBuf>,
+        /// Disable the neural VAD and rely only on the energy-based
+        /// RMS gate. Useful for benchmarking the old behaviour or
+        /// when a soft speaker is being misclassified as silence.
+        #[arg(long, default_value_t = false)]
+        no_neural_vad: bool,
     },
 
     /// Summarize a stored meeting using the local LLM (Sprint 1 day 9).
@@ -354,6 +367,8 @@ async fn main() -> Result<()> {
             silence_threshold,
             diarize,
             embed_model,
+            vad_model,
+            no_neural_vad,
         } => {
             run_stream(
                 duration,
@@ -365,6 +380,8 @@ async fn main() -> Result<()> {
                 silence_threshold,
                 diarize,
                 embed_model,
+                vad_model,
+                no_neural_vad,
             )
             .await
         }
@@ -576,6 +593,8 @@ async fn run_stream(
     silence_threshold: f32,
     diarize: bool,
     embed_model: Option<PathBuf>,
+    vad_model: Option<PathBuf>,
+    no_neural_vad: bool,
 ) -> Result<()> {
     let model_path = resolve_asr_model(model)?;
 
@@ -651,18 +670,51 @@ async fn run_stream(
         pipeline = pipeline.with_diarizer(diarizer);
     }
 
+    let vad_active = if no_neural_vad {
+        tracing::info!("--no-neural-vad set; using RMS gate only");
+        false
+    } else {
+        let vad_path = vad_model
+            .or_else(|| Some(PathBuf::from("./models/vad/silero_vad.onnx")))
+            .filter(|p| p.exists());
+        match vad_path {
+            Some(path) => {
+                let started = std::time::Instant::now();
+                let vad = SileroVad::for_meetings(&path)
+                    .map_err(anyhow::Error::from)
+                    .context("failed to load Silero VAD")?;
+                tracing::info!(
+                    model = %path.display(),
+                    load_ms = started.elapsed().as_millis() as u64,
+                    "Silero VAD ready"
+                );
+                pipeline = pipeline.with_vad(Box::new(vad));
+                true
+            }
+            None => {
+                tracing::warn!(
+                    "Silero VAD model not found at ./models/vad/silero_vad.onnx; \
+                     falling back to RMS gate. Run `scripts/download-models.sh vad` \
+                     for sharper voice/non-voice discrimination."
+                );
+                false
+            }
+        }
+    };
+
     let mut handle = pipeline
         .start_with_spec(spec, options)
         .await
         .context("failed to start streaming pipeline")?;
 
     println!(
-        "▶ streaming session {} — source={:?} — {}s window {}ms — diarize={} — Ctrl-C or wait to stop",
+        "▶ streaming session {} — source={:?} — {}s window {}ms — diarize={} — vad={} — Ctrl-C or wait to stop",
         handle.session_id(),
         source,
         duration_secs,
         chunk_ms,
         diarize,
+        if vad_active { "silero" } else { "rms" },
     );
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(duration_secs);

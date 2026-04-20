@@ -22,7 +22,7 @@ recordings. Conversational chat with citations lands next.
 
 **What works today (`develop`):**
 
-- 🎙️ Live microphone streaming with 5-second windows, energy VAD, and Whisper
+- 🎙️ Live microphone streaming with 5-second windows, neural Silero VAD (with energy-VAD fallback), and Whisper
   on Metal (RTF ≈ 0.08 on Apple M1 Pro).
 - 🗣️ Online speaker diarization via 3D-Speaker ERes2Net embeddings; speakers
   are persisted per-meeting and renameable from the UI.
@@ -85,7 +85,7 @@ variants and Qwen 2.5 fallbacks remain reachable for benchmarks and back-compat.
 | LLM | Qwen 3 14B Instruct Q4_K_M | ~9 GB |
 | LLM (lighter) | Qwen 3 8B Instruct Q4_K_M | ~5 GB |
 | LLM (Quality, MoE) | Qwen 3 30B-A3B Instruct Q4_K_M | ~18 GB |
-| VAD | Silero VAD v6.2.1 | ~2 MB |
+| VAD | Silero VAD v5.1.2 (pre-procesado) | ~1.2 MB on-disk (~2.2 MB upstream) |
 | Diarization | 3D-Speaker ERes2Net | ~15 MB |
 
 Lite and Quality profiles, plus benchmarks of alternative models, are tracked
@@ -270,12 +270,59 @@ cargo run -p echo-proto -- stream --duration 30
 
 # Custom chunk window + silence gate (RMS threshold; 0 disables):
 cargo run -p echo-proto -- stream --duration 60 --chunk-ms 4000 --silence-threshold 0.01
+
+# Disable the neural VAD and fall back to the energy gate only
+# (useful for very soft speakers Silero misclassifies as silence):
+cargo run -p echo-proto -- stream --duration 60 --no-neural-vad
 ```
 
 Each chunk prints with its index, offset, RTF and the decoded text.
 Silent chunks are reported as `silence (rms=…)` and skipped. Every
 session is **persisted to SQLite** through the same `MeetingRecorder`
 the UI uses — inspect afterwards with `meetings show`.
+
+##### Voice Activity Detection (VAD)
+
+EchoNote runs a **two-tier VAD** to keep Whisper from hallucinating
+on silent or noisy chunks (the canonical "Gracias por ver el video"
+or `[no speech]` outros):
+
+1. **Silero VAD (neural, default)** — when
+   `models/vad/silero_vad.onnx` is installed (run
+   `./scripts/download-models.sh vad`, ~1.2 MB on disk after
+   pre-processing), every resampled chunk is scored by Silero's
+   recurrent model. Only chunks classified as `Voiced` reach Whisper;
+   the rest are emitted as `Skipped` events and never see the ASR.
+   Silero's LSTM keeps temporal context across chunks, so it's much
+   sharper than RMS at distinguishing speech from fans, music, keyboard
+   noise, room tone, etc.
+
+   > **Note on the ONNX model**: the upstream Silero v5.1.2 ONNX uses
+   > the `If` operator and is dispatched at runtime by sample rate
+   > (8/16 kHz). Our ONNX backend (`tract-onnx`, chosen in ADR-0007 for
+   > a single-binary deploy with no native runtime) does not implement
+   > `If` nor ONNX-Runtime's contrib ops (`FusedConv`, …). The download
+   > script therefore runs `scripts/simplify-silero-vad.py` once after
+   > the download: it inlines the 16 kHz branch, drops the `sr` input,
+   > pins shapes, and constant-folds at `ORT_ENABLE_BASIC` to produce a
+   > 36-node, contrib-op-free graph that is bitwise-equivalent to the
+   > upstream output (Δ = 0). The raw upstream is preserved beside it as
+   > `silero_vad.onnx.upstream` for auditing.
+2. **Energy gate (fallback)** — when the Silero ONNX is missing, or
+   when the user passes `disableNeuralVad: true` (Tauri) /
+   `--no-neural-vad` (CLI), the pipeline falls back to a per-chunk
+   RMS gate at `0.02` (`StreamingOptions::silence_rms_threshold`,
+   tunable per session).
+
+When the Silero VAD is active, the RMS gate is intentionally
+**bypassed** — Silero is strictly more discriminating, and its
+temporal model needs every chunk in chronological order to stay
+coherent. The model is loaded once per process and cloned cheaply per
+session via `SileroVad::clone_for_new_session` (Arc share of the
+optimized graph + zeroed LSTM state).
+
+Override the model path with `ECHO_VAD_MODEL=/abs/path/silero_vad.onnx`
+or `--vad-model /abs/path/silero_vad.onnx` (CLI).
 
 #### Meetings (Sprint 0 day 8)
 

@@ -30,7 +30,8 @@ use tracing::{debug, error, info, warn};
 
 use echo_domain::{
     AudioCapture, AudioFormat, CaptureSpec, Diarizer, DomainError, Resampler, Sample, SpeakerId,
-    StreamingOptions, StreamingSessionId, TranscribeOptions, Transcriber, TranscriptEvent,
+    StreamingOptions, StreamingSessionId, TranscribeOptions, Transcriber, TranscriptEvent, Vad,
+    VoiceState,
 };
 
 /// Capacity of the event channel. ~10 minutes of headroom for a
@@ -65,6 +66,19 @@ pub struct StreamingPipeline {
     /// (plus its arrival-order slot) is attached to the emitted
     /// [`TranscriptEvent::Chunk`]. Skipped chunks bypass diarization.
     diarizer: Option<Box<dyn Diarizer>>,
+    /// Optional neural Voice Activity Detector. When set, the pipeline
+    /// pushes every resampled chunk through it **in chronological
+    /// order** (the LSTM state is sequence-sensitive) and only sends
+    /// chunks classified as `Voiced` to the transcriber. Chunks the
+    /// VAD calls `Silence` are emitted as `TranscriptEvent::Skipped`,
+    /// same as the energy-based RMS gate.
+    ///
+    /// When this is set the cheap RMS gate is bypassed — Silero is
+    /// strictly more discriminating (rejects pure tones, fans, music
+    /// and keyboard noise that the RMS gate lets through) and the
+    /// pipeline must feed it every chunk for its temporal model to
+    /// stay coherent.
+    vad: Option<Box<dyn Vad>>,
 }
 
 impl StreamingPipeline {
@@ -79,6 +93,7 @@ impl StreamingPipeline {
             resampler,
             transcriber,
             diarizer: None,
+            vad: None,
         }
     }
 
@@ -88,6 +103,19 @@ impl StreamingPipeline {
     #[must_use]
     pub fn with_diarizer(mut self, diarizer: Box<dyn Diarizer>) -> Self {
         self.diarizer = Some(diarizer);
+        self
+    }
+
+    /// Attach a neural VAD (typically `SileroVad`) to gate Whisper
+    /// behind voice activity detection. See the field doc on
+    /// [`StreamingPipeline::vad`] for the full semantics.
+    ///
+    /// Call once before `start*`. The VAD must run at 16 kHz mono
+    /// (the pipeline's canonical Whisper format); otherwise the
+    /// session will fail to start with a clear error message.
+    #[must_use]
+    pub fn with_vad(mut self, vad: Box<dyn Vad>) -> Self {
+        self.vad = Some(vad);
         self
     }
 
@@ -119,12 +147,22 @@ impl StreamingPipeline {
                 ))));
             }
         }
+        if let Some(v) = &self.vad {
+            // Same invariant for the VAD: it sees the resampled buffer.
+            if v.sample_rate_hz() != echo_audio_whisper_rate() {
+                return Err(StreamingError::Domain(DomainError::Invariant(format!(
+                    "VAD sample rate {} does not match the pipeline's 16 kHz mono",
+                    v.sample_rate_hz()
+                ))));
+            }
+        }
 
         let join = tokio::spawn(run_pipeline(
             self.capture,
             self.resampler,
             self.transcriber,
             self.diarizer,
+            self.vad,
             session_id,
             spec,
             options,
@@ -198,13 +236,20 @@ async fn run_pipeline(
     resampler: Arc<dyn Resampler>,
     transcriber: Arc<dyn Transcriber>,
     mut diarizer: Option<Box<dyn Diarizer>>,
+    mut vad: Option<Box<dyn Vad>>,
     session_id: StreamingSessionId,
     spec: CaptureSpec,
     options: StreamingOptions,
     events: mpsc::Sender<TranscriptEvent>,
     mut stop_rx: oneshot::Receiver<()>,
 ) {
-    info!(%session_id, "streaming pipeline starting");
+    info!(%session_id, vad_enabled = vad.is_some(), "streaming pipeline starting");
+
+    // Reset VAD state at session start so the LSTM/hysteresis don't
+    // carry over from a previous session reusing the same template.
+    if let Some(v) = vad.as_deref_mut() {
+        v.reset();
+    }
 
     let mut stream = match capture.start(spec).await {
         Ok(s) => s,
@@ -267,6 +312,7 @@ async fn run_pipeline(
                 &resampler,
                 &transcriber,
                 &mut diarizer,
+                &mut vad,
                 session_id,
                 chunk_index,
                 offset_ms,
@@ -297,6 +343,7 @@ async fn run_pipeline(
             &resampler,
             &transcriber,
             &mut diarizer,
+            &mut vad,
             session_id,
             chunk_index,
             offset_ms,
@@ -333,6 +380,7 @@ async fn process_chunk(
     resampler: &Arc<dyn Resampler>,
     transcriber: &Arc<dyn Transcriber>,
     diarizer: &mut Option<Box<dyn Diarizer>>,
+    vad: &mut Option<Box<dyn Vad>>,
     session_id: StreamingSessionId,
     chunk_index: u32,
     offset_ms: u32,
@@ -343,11 +391,17 @@ async fn process_chunk(
     transcribe_options: &TranscribeOptions,
     events: &mpsc::Sender<TranscriptEvent>,
 ) -> u32 {
-    // Silence gate runs on the raw multi-channel buffer; that's fine —
-    // RMS is invariant to channel layout for our purposes.
+    // RMS is computed up-front for telemetry (Skipped events carry it
+    // so the UI can show a meaningful "below the gate" indicator),
+    // and used as the cheap fast-path silence gate when no neural VAD
+    // is configured. When VAD *is* configured the RMS gate is bypassed
+    // — Silero distinguishes voice from non-voice noise (fans, music,
+    // pure tones) that exceed any reasonable RMS threshold, and the
+    // VAD's LSTM needs every chunk in chronological order to keep its
+    // temporal model coherent.
     let chunk_rms = rms(&raw_samples);
-    if silence_threshold > 0.0 && chunk_rms < silence_threshold {
-        debug!(%session_id, chunk_index, chunk_rms, "skipping silent chunk");
+    if vad.is_none() && silence_threshold > 0.0 && chunk_rms < silence_threshold {
+        debug!(%session_id, chunk_index, chunk_rms, "skipping silent chunk (RMS gate)");
         let _ = events
             .send(TranscriptEvent::Skipped {
                 session_id,
@@ -367,6 +421,37 @@ async fn process_chunk(
             return 0;
         }
     };
+
+    // Neural VAD gate runs on the resampled 16 kHz mono buffer (the
+    // sample rate Silero was trained for). We always push the chunk
+    // — even loud ones — so the LSTM hidden state stays in sync with
+    // the audio stream; the decision to skip transcription is based
+    // purely on the returned `VoiceState`.
+    if let Some(v) = vad.as_deref_mut() {
+        match v.push(&resampled).await {
+            Ok(VoiceState::Silence) => {
+                debug!(%session_id, chunk_index, chunk_rms, "skipping silent chunk (neural VAD)");
+                let _ = events
+                    .send(TranscriptEvent::Skipped {
+                        session_id,
+                        chunk_index,
+                        offset_ms,
+                        duration_ms,
+                        rms: chunk_rms,
+                    })
+                    .await;
+                return 0;
+            }
+            Ok(VoiceState::Voiced) => {
+                // Fall through to diarize + transcribe.
+            }
+            Err(e) => {
+                // VAD is best-effort: if it fails we still want to
+                // transcribe rather than silently drop the chunk.
+                warn!(error = %e, chunk_index, "VAD failed; transcribing chunk anyway");
+            }
+        }
+    }
 
     // Diarize the same 16 kHz mono buffer we're about to transcribe.
     // Done before the ASR call so the call site stays linear; the

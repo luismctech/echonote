@@ -20,7 +20,7 @@ use pretty_assertions::assert_eq;
 use echo_domain::{
     AudioCapture, AudioFormat, AudioFrame, AudioSource, AudioStream, CaptureSpec, DeviceInfo,
     Diarizer, DomainError, Resampler, Sample, Segment, SegmentId, Speaker, SpeakerId,
-    StreamingOptions, TranscribeOptions, Transcriber, Transcript, TranscriptEvent,
+    StreamingOptions, TranscribeOptions, Transcriber, Transcript, TranscriptEvent, Vad, VoiceState,
 };
 
 use super::{StreamingHandle, StreamingPipeline};
@@ -522,4 +522,200 @@ async fn stop_drains_cleanly_even_with_pending_frames() {
         }
     }
     assert!(saw_stopped, "pipeline did not emit Stopped after stop()");
+}
+
+// ---------------------------------------------------------------------------
+// VAD gate tests
+// ---------------------------------------------------------------------------
+
+/// Configurable VAD that returns a fixed `VoiceState` and counts calls.
+/// Lets tests pin the gate decision without needing the real Silero
+/// model on disk.
+#[derive(Debug)]
+struct MockVad {
+    fixed_state: VoiceState,
+    pushes: AtomicU32,
+    resets: AtomicU32,
+}
+
+impl MockVad {
+    fn new(state: VoiceState) -> Self {
+        Self {
+            fixed_state: state,
+            pushes: AtomicU32::new(0),
+            resets: AtomicU32::new(0),
+        }
+    }
+    fn push_count(&self) -> u32 {
+        self.pushes.load(Ordering::SeqCst)
+    }
+    fn reset_count(&self) -> u32 {
+        self.resets.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl Vad for MockVad {
+    fn sample_rate_hz(&self) -> u32 {
+        16_000
+    }
+    async fn push(&mut self, _samples: &[Sample]) -> Result<VoiceState, DomainError> {
+        self.pushes.fetch_add(1, Ordering::SeqCst);
+        Ok(self.fixed_state)
+    }
+    fn reset(&mut self) {
+        self.resets.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+#[tokio::test]
+async fn vad_silence_skips_chunks_even_when_rms_is_loud() {
+    // Three loud chunks (RMS ≈ 0.35) that the energy gate at 0.005
+    // would happily forward to Whisper. The neural VAD is configured
+    // to call them all `Silence`, so none should reach the ASR.
+    let format = AudioFormat::WHISPER;
+    let frames = vec![sine(16_000, 0.5), sine(16_000, 0.5), sine(16_000, 0.5)];
+    let capture = FakeCapture::new(format, frames);
+    let resampler = Arc::new(PassThroughResampler) as Arc<dyn Resampler>;
+    let transcriber = FakeTranscriber::new();
+    let vad = Box::new(MockVad::new(VoiceState::Silence));
+
+    let pipeline = StreamingPipeline::new(capture, resampler, transcriber.clone()).with_vad(vad);
+
+    let mut handle = pipeline
+        .start(StreamingOptions {
+            chunk_ms: 1_000,
+            silence_rms_threshold: 0.005,
+            language: None,
+        })
+        .await
+        .unwrap();
+
+    let events = drain_until_stopped(&mut handle).await;
+
+    let chunks = events
+        .iter()
+        .filter(|e| matches!(e, TranscriptEvent::Chunk { .. }))
+        .count();
+    let skipped = events
+        .iter()
+        .filter(|e| matches!(e, TranscriptEvent::Skipped { .. }))
+        .count();
+    assert_eq!(
+        chunks, 0,
+        "VAD-Silence chunks must not reach the transcriber: {events:#?}"
+    );
+    assert_eq!(skipped, 3, "expected one Skipped per chunk: {events:#?}");
+    assert_eq!(transcriber.call_count(), 0, "ASR must not be invoked");
+}
+
+#[tokio::test]
+async fn vad_voiced_forwards_chunks_to_transcriber() {
+    let format = AudioFormat::WHISPER;
+    let frames = vec![sine(16_000, 0.5), sine(16_000, 0.5)];
+    let capture = FakeCapture::new(format, frames);
+    let resampler = Arc::new(PassThroughResampler) as Arc<dyn Resampler>;
+    let transcriber = FakeTranscriber::new();
+    let vad = Box::new(MockVad::new(VoiceState::Voiced));
+
+    let pipeline = StreamingPipeline::new(capture, resampler, transcriber.clone()).with_vad(vad);
+
+    let mut handle = pipeline
+        .start(StreamingOptions {
+            chunk_ms: 1_000,
+            silence_rms_threshold: 0.005,
+            language: None,
+        })
+        .await
+        .unwrap();
+
+    let events = drain_until_stopped(&mut handle).await;
+    let chunks = events
+        .iter()
+        .filter(|e| matches!(e, TranscriptEvent::Chunk { .. }))
+        .count();
+    assert_eq!(chunks, 2, "events: {events:#?}");
+    assert_eq!(transcriber.call_count(), 2);
+}
+
+#[tokio::test]
+async fn vad_bypasses_rms_gate_for_silent_chunks() {
+    // Pure-zero chunks — the RMS gate at 0.005 would normally skip
+    // them. With a VAD configured the pipeline must instead push
+    // every chunk through the VAD (so its temporal model sees the
+    // silence too), and the VAD's verdict drives the skip decision.
+    // Setting the mock to `Voiced` lets us prove the chunks made it
+    // past the (would-be) RMS gate all the way to the transcriber.
+    let format = AudioFormat::WHISPER;
+    let frames = vec![vec![0.0_f32; 16_000], vec![0.0_f32; 16_000]];
+    let capture = FakeCapture::new(format, frames);
+    let resampler = Arc::new(PassThroughResampler) as Arc<dyn Resampler>;
+    let transcriber = FakeTranscriber::new();
+    let vad = Box::new(MockVad::new(VoiceState::Voiced));
+
+    let pipeline = StreamingPipeline::new(capture, resampler, transcriber.clone()).with_vad(vad);
+    let mut handle = pipeline
+        .start(StreamingOptions {
+            chunk_ms: 1_000,
+            silence_rms_threshold: 0.005,
+            language: None,
+        })
+        .await
+        .unwrap();
+
+    let events = drain_until_stopped(&mut handle).await;
+    let chunks = events
+        .iter()
+        .filter(|e| matches!(e, TranscriptEvent::Chunk { .. }))
+        .count();
+    assert_eq!(
+        chunks, 2,
+        "RMS gate must be bypassed when VAD is configured: {events:#?}"
+    );
+    assert_eq!(transcriber.call_count(), 2);
+}
+
+#[tokio::test]
+async fn vad_is_reset_on_session_start() {
+    // Build a MockVad outside the pipeline so we can check reset()
+    // was invoked on session start. We pass it via a small wrapper
+    // that holds an Arc and delegates Vad calls through it.
+    use std::sync::Arc as StdArc;
+
+    struct ArcVad(StdArc<MockVad>);
+    #[async_trait]
+    impl Vad for ArcVad {
+        fn sample_rate_hz(&self) -> u32 {
+            16_000
+        }
+        async fn push(&mut self, _samples: &[Sample]) -> Result<VoiceState, DomainError> {
+            self.0.pushes.fetch_add(1, Ordering::SeqCst);
+            Ok(self.0.fixed_state)
+        }
+        fn reset(&mut self) {
+            self.0.resets.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    let inner = StdArc::new(MockVad::new(VoiceState::Voiced));
+    let format = AudioFormat::WHISPER;
+    let frames = vec![sine(16_000, 0.5)];
+    let capture = FakeCapture::new(format, frames);
+    let resampler = Arc::new(PassThroughResampler) as Arc<dyn Resampler>;
+    let transcriber = FakeTranscriber::new();
+
+    let pipeline = StreamingPipeline::new(capture, resampler, transcriber)
+        .with_vad(Box::new(ArcVad(inner.clone())));
+    let mut handle = pipeline
+        .start(StreamingOptions {
+            chunk_ms: 1_000,
+            silence_rms_threshold: 0.005,
+            language: None,
+        })
+        .await
+        .unwrap();
+
+    let _ = drain_until_stopped(&mut handle).await;
+    assert_eq!(inner.reset_count(), 1, "VAD must be reset on session start");
+    assert_eq!(inner.push_count(), 1, "VAD must see the loud chunk");
 }
