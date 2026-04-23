@@ -45,6 +45,7 @@ thiserror = { workspace = true }
 futures = { workspace = true }
 reqwest = { workspace = true }
 tauri-plugin-dialog = "2.7.0"
+tauri-plugin-global-shortcut = "2.3.1"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

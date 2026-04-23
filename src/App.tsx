@@ -19,6 +19,7 @@ import { LivePane } from "./features/live/LivePane";
 import { MeetingDetail } from "./features/meetings/MeetingDetail";
 import { ModelManager } from "./features/settings/ModelManager";
 import { Sidebar } from "./features/sidebar/Sidebar";
+import { useGlobalShortcuts } from "./hooks/useGlobalShortcuts";
 import { useHealthProbe } from "./hooks/useHealthProbe";
 import { useModelManager } from "./hooks/useModelManager";
 import { useRecordingSession } from "./hooks/useRecordingSession";
@@ -102,6 +103,13 @@ export function App() {
     goToLive();
     resetRecording();
   }, [goToLive, resetRecording]);
+
+  useGlobalShortcuts({
+    canStart: recording.canStart,
+    canStop: recording.canStop,
+    onStart: handleStart,
+    onStop: stopRecording,
+  });
 
   return (
     <main className="flex h-full w-full flex-col gap-3 overflow-hidden px-4 py-3 sm:px-6 sm:py-4">

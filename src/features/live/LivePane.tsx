@@ -144,7 +144,7 @@ export function LivePane({
           <p className="text-zinc-400">
             {stream.kind === "recording"
               ? "Listening… speak into the microphone."
-              : "Press Start to begin a session."}
+              : "Press Start or ⌘⇧R to begin a session."}
           </p>
         ) : (
           <ul className="flex flex-col gap-1">

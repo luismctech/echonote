@@ -27,6 +27,7 @@ pub fn run() {
     // if we move telemetry off `tracing-subscriber`.
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .setup(|app| {
             // `AppState::initialize` is async (opens SQLite and runs
             // migrations). Tauri's setup hook is sync but we have a

@@ -8,6 +8,8 @@
     "core:window:default",
     "core:app:default",
     "core:event:default",
-    "dialog:default"
+    "dialog:default",
+    "global-shortcut:allow-register",
+    "global-shortcut:allow-unregister"
   ]
 }
