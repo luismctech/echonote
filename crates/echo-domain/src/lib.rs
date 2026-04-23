@@ -25,6 +25,7 @@ pub use ports::audio::{
     AudioCapture, AudioFormat, AudioFrame, AudioSource, AudioStream, CaptureSpec, DeviceInfo,
     Sample,
 };
+pub use ports::chat::{ChatAssistant, ChatMessage, ChatOptions, ChatRequest, ChatRole, ChatToken};
 pub use ports::diarizer::Diarizer;
 pub use ports::llm::{GenerateOptions, LlmModel};
 pub use ports::resampler::Resampler;

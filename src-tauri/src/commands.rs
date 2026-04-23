@@ -18,19 +18,21 @@ use tokio::sync::Mutex as AsyncMutex;
 use tokio::task::JoinHandle;
 
 use echo_app::{
-    MeetingRecorder, RenameSpeaker, RenameSpeakerError, StreamingHandle, StreamingPipeline,
-    SummarizeMeeting, SummarizeMeetingError,
+    AskAboutMeeting, AskAboutMeetingError, AskAboutMeetingEvent, MeetingRecorder, RenameSpeaker,
+    RenameSpeakerError, StreamingHandle, StreamingPipeline, SummarizeMeeting,
+    SummarizeMeetingError,
 };
 use echo_asr::WhisperCppTranscriber;
 use echo_audio::{RoutingAudioCapture, RubatoResamplerAdapter, SileroVad};
 use echo_diarize::{Eres2NetEmbedder, OnlineDiarizer};
 use echo_domain::{
-    AudioCapture, AudioFormat, AudioSource, CaptureSpec, Diarizer, LlmModel, Meeting, MeetingId,
-    MeetingSearchHit, MeetingStore, MeetingSummary, Resampler, SpeakerId, StreamingOptions,
-    StreamingSessionId, Summary, Transcriber, TranscriptEvent, Vad,
+    AudioCapture, AudioFormat, AudioSource, CaptureSpec, ChatAssistant, ChatMessage, Diarizer,
+    LlmModel, Meeting, MeetingId, MeetingSearchHit, MeetingStore, MeetingSummary, Resampler,
+    SpeakerId, StreamingOptions, StreamingSessionId, Summary, Transcriber, TranscriptEvent, Vad,
 };
 use echo_llm::{LlamaCppLlm, LoadOptions as LlamaLoadOptions};
 use echo_storage::SqliteMeetingStore;
+use futures::stream::StreamExt;
 
 // ---------------------------------------------------------------------------
 // Health check (Sprint 0 day 4)
@@ -91,16 +93,23 @@ pub struct AppState {
     /// task spawned by `start_streaming` can self-cleanup its own
     /// entry on terminal events without going through `tauri::State`.
     sessions: Arc<Mutex<HashMap<StreamingSessionId, SessionEntry>>>,
-    /// Path to the local LLM (.gguf) used for `summarize_meeting`.
-    /// Resolved at startup via `ECHO_LLM_MODEL` or
-    /// `models/llm/<preferred>.gguf`. The model itself is loaded
+    /// Path to the local LLM (.gguf) used for `summarize_meeting` +
+    /// `ask_about_meeting`. Resolved at startup via `ECHO_LLM_MODEL`
+    /// or `models/llm/<preferred>.gguf`. The model itself is loaded
     /// lazily on first use — same pattern as the whisper transcriber
-    /// — because the 7B Q4_K_M file pulls ~4.4 GB into RAM/VRAM and
+    /// — because the 14B Q4_K_M file pulls ~10 GB into RAM/VRAM and
     /// most app launches do not summarise.
     llm_model_path: PathBuf,
-    /// Lazily-loaded LLM. Wrapped in `AsyncMutex` because load is
-    /// cooperative (the first caller pays, the rest wait).
-    llm: AsyncMutex<Option<Arc<dyn LlmModel>>>,
+    /// Lazily-loaded LLM, held as the concrete [`LlamaCppLlm`] so we
+    /// can derive both adapters (`LlmModel` for summary,
+    /// `ChatAssistant` for chat) from the same loaded weights via
+    /// [`LlamaCppLlm::chat_handle`]. Wrapped in `AsyncMutex` because
+    /// the first caller pays the load cost cooperatively while the
+    /// rest wait. Per `docs/SPRINT-1-STATUS.md` §8.3 the model is
+    /// shared (~10 GB of weights) but each request still spins up its
+    /// own short-lived `LlamaContext`, so chat + summary can run
+    /// concurrently without serialization.
+    llm: AsyncMutex<Option<Arc<LlamaCppLlm>>>,
     /// Path to the Silero VAD ONNX (`./models/vad/silero_vad.onnx` by
     /// default, overridable via `ECHO_VAD_MODEL`). The model is
     /// loaded lazily on first `start_streaming` call so app startup
@@ -250,7 +259,13 @@ impl AppState {
     /// process — model load is the expensive operation (mmap + CUDA/
     /// Metal init), per-prompt generation runs against the cached
     /// instance.
-    async fn ensure_llm(&self) -> Result<Arc<dyn LlmModel>, String> {
+    ///
+    /// Returns the concrete [`Arc<LlamaCppLlm>`] (rather than
+    /// `Arc<dyn LlmModel>`) so callers that need other adapters from
+    /// the same loaded model — currently [`Self::ensure_chat`] — can
+    /// derive them via [`LlamaCppLlm::chat_handle`]. Trait-object
+    /// callers ([`Self::ensure_llm`]) cast on the way out.
+    async fn ensure_llm_concrete(&self) -> Result<Arc<LlamaCppLlm>, String> {
         let mut slot = self.llm.lock().await;
         if let Some(m) = slot.as_ref() {
             return Ok(m.clone());
@@ -266,7 +281,7 @@ impl AppState {
         let load_opts = LlamaLoadOptions::default();
         // `LlamaCppLlm::load_with` is synchronous (mmap + ggml init);
         // off-load to the blocking pool so we never stall the Tauri
-        // command executor while a 4 GB model loads.
+        // command executor while a 10 GB model loads.
         let loaded = tokio::task::spawn_blocking({
             let path = path.clone();
             move || LlamaCppLlm::load_with(&path, load_opts)
@@ -274,9 +289,25 @@ impl AppState {
         .await
         .map_err(|e| format!("LLM load task panicked: {e}"))?
         .map_err(|e| format!("failed to load LLM at {}: {e}", path.display()))?;
-        let arc: Arc<dyn LlmModel> = Arc::new(loaded);
+        let arc = Arc::new(loaded);
         *slot = Some(arc.clone());
         Ok(arc)
+    }
+
+    /// Lazy `LlmModel` accessor used by `summarize_meeting`. Same
+    /// load cost (paid once per process) as [`Self::ensure_chat`];
+    /// both share the cached `Arc<LlamaCppLlm>`.
+    async fn ensure_llm(&self) -> Result<Arc<dyn LlmModel>, String> {
+        Ok(self.ensure_llm_concrete().await? as Arc<dyn LlmModel>)
+    }
+
+    /// Lazy `ChatAssistant` accessor used by `ask_about_meeting`.
+    /// Calls [`LlamaCppLlm::chat_handle`] on the cached instance, so
+    /// no extra weights are loaded — only the trait-object wrapper is
+    /// allocated. Subsequent calls reuse the same loaded model.
+    async fn ensure_chat(&self) -> Result<Arc<dyn ChatAssistant>, String> {
+        let llm = self.ensure_llm_concrete().await?;
+        Ok(Arc::new(llm.chat_handle()) as Arc<dyn ChatAssistant>)
     }
 
     /// Build a fresh diarizer for the upcoming session. Each session
@@ -846,4 +877,86 @@ pub async fn get_summary(
         .get_summary(meeting_id)
         .await
         .map_err(|e| format!("get summary: {e}"))
+}
+
+// ---------------------------------------------------------------------------
+// Chat with transcript (Sprint 1 day 10 — CU-05)
+// ---------------------------------------------------------------------------
+
+/// Run one chat turn against a meeting's transcript.
+///
+/// Each invocation streams the assistant's reply token-by-token through
+/// `on_event` and resolves the IPC promise once the stream terminates
+/// (with [`AskAboutMeetingEvent::Finished`] on success or
+/// [`AskAboutMeetingEvent::Failed`] on a mid-decode error).
+///
+/// ## Lifecycle
+///
+/// 1. Pre-stream errors (meeting not found, empty question, model
+///    not loaded) come back as `Err(String)` so the UI can show a
+///    toast without parsing event variants.
+/// 2. Once the stream is open, **every** terminal condition travels
+///    as a final event on the channel: success → `Finished`,
+///    mid-decode failure → `Failed`. The promise then resolves
+///    `Ok(())`.
+/// 3. Cancellation is automatic: when the React component unmounts
+///    (or the user closes the chat panel), Tauri drops the
+///    `Channel`. The next `on_event.send` returns `Err(_)`, this
+///    function exits its drain loop, the `BoxStream` is dropped, the
+///    underlying `mpsc::Receiver` closes and the blocking decoder
+///    thread inside `LlamaCppChat` exits on the next
+///    `tx.blocking_send` failure. No explicit `cancel_chat` command
+///    is needed — symmetric with `start_streaming` was deliberately
+///    not chosen because chat is bounded (one Q&A turn ≤ ~10s on
+///    Qwen 14B, vs streaming sessions that can run hours).
+///
+/// ## Why we don't spawn a background task
+///
+/// Unlike `start_streaming`, which returns a session id and runs
+/// indefinitely until `stop_streaming`, a chat turn is a single
+/// bounded interaction. Draining the stream inline keeps the IPC
+/// surface minimal (one command, one channel, one promise) and means
+/// any error gets observed by the calling `await` instead of escaping
+/// into a detached `tokio::spawn`.
+#[tauri::command]
+pub async fn ask_about_meeting(
+    state: State<'_, AppState>,
+    meeting_id: MeetingId,
+    history: Option<Vec<ChatMessage>>,
+    question: String,
+    on_event: Channel<AskAboutMeetingEvent>,
+) -> Result<(), String> {
+    let chat = state.ensure_chat().await?;
+    let use_case = AskAboutMeeting::new(chat, state.store.clone());
+
+    let mut stream = use_case
+        .execute(meeting_id, history.unwrap_or_default(), question)
+        .await
+        .map_err(|e| match e {
+            AskAboutMeetingError::NotFound(id) => {
+                format!("not found: meeting {id} does not exist")
+            }
+            AskAboutMeetingError::EmptyQuestion => "empty question".to_string(),
+            AskAboutMeetingError::EmptyTranscript(id) => {
+                format!("empty transcript: meeting {id} has no segments to chat about")
+            }
+            AskAboutMeetingError::Chat(err) => format!("chat: {err}"),
+            AskAboutMeetingError::Storage(err) => format!("storage: {err}"),
+        })?;
+
+    while let Some(event) = stream.next().await {
+        if let Err(e) = on_event.send(event) {
+            // Frontend disconnected (component unmount / window
+            // close). Dropping the stream below cascades a clean
+            // shutdown into the decoder thread — see the function
+            // docstring.
+            tracing::warn!(
+                error = %e,
+                %meeting_id,
+                "ask_about_meeting channel send failed; aborting drain",
+            );
+            break;
+        }
+    }
+    Ok(())
 }

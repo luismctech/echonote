@@ -1,7 +1,7 @@
 # Sprint 1 — Memoria de desarrollo (handoff para día 10)
 
 > **Autor:** Alberto Cruz
-> **Última actualización:** 2026-04-20 (post-fix Silero VAD)
+> **Última actualización:** 2026-04-23 (día 10 — VAD commiteado, ADR-0008 mergeado, CU-05 chat completo end-to-end: puerto + use case + adapter + IPC + types + UI)
 > **Branch de trabajo:** `develop` (al día con `origin/develop`)
 > **Último tag estable:** `v0.1.0-sprint0` (final de Sprint 0)
 > **Propósito:** documento vivo que captura el estado del proyecto al cierre
@@ -23,12 +23,12 @@ descrita en `docs/ARCHITECTURE.md` y el plan completo en
 | Captura de audio del sistema macOS | ✅ Funcional (ScreenCaptureKit) | `echo-audio::capture::macos_system` |
 | Routing mic vs system-output | ✅ Dos pistas independientes | `echo-audio::capture::routing` |
 | VAD energético (RMS) | ✅ Fallback | `echo-app::streaming` |
-| **VAD neural Silero v5.1.2** | ✅ **Funcional end-to-end (pendiente commit)** | `echo-audio::preprocess::silero_vad` + `scripts/simplify-silero-vad.py` |
+| **VAD neural Silero v5.1.2** | ✅ Funcional end-to-end + commiteado (`2fc7b9a` / `9eeefc7` / `f93f479`) + ADR-0008 | `echo-audio::preprocess::silero_vad` + `scripts/simplify-silero-vad.py` |
 | Diarización (ERes2Net + clustering online) | ✅ End-to-end (audio → DB → UI) | `echo-diarize` + UI |
 | Persistencia SQLite + WAL + migraciones | ✅ | `echo-storage` |
 | Búsqueda FTS5 en meetings | ✅ | `echo-storage` + sidebar UI |
 | Resumen LLM local (Qwen 3 14B) | ✅ Template "general", on-demand | `echo-llm` + UI |
-| Chat con la transcripción | ⏳ Siguiente | — |
+| Chat con la transcripción | ✅ End-to-end (puerto, use case, adapter, IPC, types, hook, UI) | `echo-domain::ports::chat`, `echo-app::AskAboutMeeting`, `echo-llm::LlamaCppChat`, `src-tauri/src/commands::ask_about_meeting`, `src/ipc/client::askAboutMeeting`, `src/types/chat.ts`, `src/hooks/useChat.ts`, `src/features/meetings/ChatPanel.tsx` |
 | Windows / Linux system-audio capture | ⏳ No iniciado | — |
 | Onboarding / perfiles Lite-Quality | ⏳ No iniciado | — |
 | Encrypted-at-rest (SQLCipher) | ⏳ No iniciado | — |
@@ -71,23 +71,20 @@ relevantes para entender el estado del código):
 
 ---
 
-## 3. Trabajo en curso **sin commitear** (lo que tendrá que entrar antes del día 10)
+## 3. Trabajo de mitigación de hallucinations + VAD neural (commiteado día 10)
 
-Archivos modificados en el working tree (ver `git status`):
-
-```
-M README.md
-M crates/echo-app/src/use_cases/streaming/mod.rs
-M crates/echo-app/src/use_cases/streaming/tests.rs
-M crates/echo-asr/src/whisper_cpp.rs
-M crates/echo-audio/src/preprocess/silero_vad.rs
-M crates/echo-domain/src/entities/streaming.rs
-M crates/echo-proto/src/main.rs
-M scripts/download-models.sh
-M src-tauri/src/commands.rs
-?? scripts/simplify-silero-vad.py        # nuevo, ver §3.4
-?? docs/SPRINT-1-STATUS.md               # este archivo
-```
+> **Estado al 2026-04-23:** todo lo descrito en esta sección está mergeado
+> en `develop`. Working tree limpio. Los tres commits sugeridos al final
+> de la sesión del día 9 cayeron tal cual:
+>
+> - `2fc7b9a` `feat(asr): harden Whisper params + drop known hallucinations`
+> - `9eeefc7` `feat(audio): pre-process Silero VAD ONNX for tract compatibility`
+> - `f93f479` `feat(streaming): gate chunks through Silero VAD with RMS fallback`
+> - extra `6963a2b` `fix(ipc): serialize AudioFormat in camelCase to match the TS contract`
+>
+> La sección que sigue se conserva como narrativa histórica del problema
+> y de la solución; los ficheros referenciados ya están en el árbol y los
+> tests verdes.
 
 Contexto: tras pasar al stack Spanish-first (día 9.5), Whisper comenzó a
 alucinar en silencio absoluto — principalmente `"Gracias."`,
@@ -235,20 +232,23 @@ modelos ahora lista **Silero VAD v5.1.2 (~1.2 MB on disk tras pre-proceso,
 - Tract carga el grafo BASIC sin errores ✅
 - Paridad numérica vs upstream: Δ = 0.00e+00 ✅
 
-**Pendiente explícito del usuario**: commitear este trabajo. Cuando se
-retome, el primer paso del día 10 es decidir estrategia de commit. Yo
-sugiero **tres commits temáticos** ahora que hay un script nuevo:
+**Cierre del día 10:** los tres commits sugeridos al final de la sesión
+del día 9 ya están en `develop` (ver banner al inicio de §3). La
+estrategia de commit que se siguió fue exactamente la propuesta:
 
-1. `feat(asr): harden Whisper params + drop known hallucinations`
-   — solo `crates/echo-asr/src/whisper_cpp.rs`.
-2. `feat(audio): pre-process Silero VAD ONNX for tract compatibility`
-   — `scripts/simplify-silero-vad.py` + `scripts/download-models.sh` +
-   `crates/echo-audio/src/preprocess/silero_vad.rs` (drop del input `sr`).
-3. `feat(streaming): gate chunks through Silero VAD with RMS fallback`
-   — `crates/echo-app/src/use_cases/streaming/{mod.rs,tests.rs}` +
-   `crates/echo-domain/src/entities/streaming.rs` +
-   `crates/echo-proto/src/main.rs` + `src-tauri/src/commands.rs` +
-   `README.md` + `docs/SPRINT-1-STATUS.md`.
+1. ✅ `2fc7b9a` `feat(asr): harden Whisper params + drop known hallucinations`
+2. ✅ `9eeefc7` `feat(audio): pre-process Silero VAD ONNX for tract compatibility`
+3. ✅ `f93f479` `feat(streaming): gate chunks through Silero VAD with RMS fallback`
+4. ✅ extra `6963a2b` `fix(ipc): serialize AudioFormat in camelCase to match the TS contract`
+
+Adicionalmente:
+
+- **ADR-0008** mergeado: `docs/adr/0008-silero-vad-tract-onnx-with-pre-simplification.md`.
+  Documenta la triple decisión (Silero v5.1.2 sobre WebRTC-VAD/v6/RNNoise,
+  `tract-onnx` sobre `ort`, pre-procesador Python como pegamento) con la
+  tabla empírica de niveles ORT del §3.4 y un *maintenance contract* para
+  el script. Incluye renumbering: la reserva original "ADR-0008 = Zustand"
+  se movió a ADR-0011, documentado en `docs/adr/README.md`.
 
 ---
 
@@ -310,29 +310,89 @@ y el contrato de mantenimiento del script `simplify-silero-vad.py`
 
 Priorizado. El orden asume que primero cerramos el trabajo en curso.
 
-### 6.1 Limpiar lo pendiente (día 10 exacto)
+> **Frente activo (día 10 → adelante):** chat con la transcripción
+> (CU-05). Empezando por el puerto `ChatAssistant` en `echo-domain` con
+> mock + tests, luego adapter `LlamaCppChat` reutilizando el contexto
+> Qwen 3 14B ya cargado, finalmente IPC streaming + UI. Ver §6.2.
 
-- [ ] **Commit del trabajo de VAD + hallucinations** (sección 3 arriba).
-      **Tres** commits sugeridos (asr / audio-onnx / streaming) + bump de
-      README + este SPRINT-1-STATUS en el último.
-- [ ] **ADR-0008: Silero VAD v5.1.2 + tract-onnx + simplify pipeline**.
-      Documentar la triple decisión: (a) Silero sobre WebRTC-VAD por
-      robustez al ruido, (b) `tract-onnx` sobre `ort` por binario sin
-      runtime nativo, (c) pre-procesador `scripts/simplify-silero-vad.py`
-      como pegamento (con la tabla empírica de niveles ORT del §3.4).
+### 6.1 Limpieza del cierre de Sprint 1 (día 10 — estado al 2026-04-23)
+
+- [x] **Commit del trabajo de VAD + hallucinations** — hecho en
+      `2fc7b9a` / `9eeefc7` / `f93f479` (+ `6963a2b` IPC fix).
+- [x] **ADR-0008: Silero VAD v5.1.2 + tract-onnx + simplify pipeline** —
+      `docs/adr/0008-silero-vad-tract-onnx-with-pre-simplification.md`.
+      Renumbering de la reserva original (Zustand → 0011) reflejado en
+      `docs/adr/README.md`.
 - [ ] **Smoke test real end-to-end**: grabar 2-3 min mitad silencio, mitad
       voz en español, verificar que:
   - Logs muestran `Silero VAD ready` en primer start.
   - En silencio hay `TranscriptEvent::Skipped { reason: "vad_silence" }`.
   - Ningún `Gracias.` fantasma en la UI.
-  - `--no-neural-vad` revierte limpio al RMS gate (regresion test).
+  - `--no-neural-vad` revierte limpio al RMS gate (regression test).
+
+  Sigue requiriendo intervención manual (mic real). No bloquea el chat,
+  pero idealmente se hace antes de release-candidate.
 
 ### 6.2 Features de Sprint 1 todavía abiertas (días 10-12)
 
-- [ ] **Chat con la transcripción** (CU-05 del spec). Puerto nuevo
-      `ChatAssistant` en dominio, implementación `LlamaCppChat` en
-      `echo-llm`, IPC streaming de tokens a React. Citas a `segment_id`.
-      Esto era el "siguiente" explícito del README.
+- [x] **Chat con la transcripción** (CU-05 del spec). ✅ Completo.
+      Plan de aterrizaje:
+      1. ✅ **Día 10.** Puerto `ChatAssistant` en `echo-domain`
+         (`ChatRole`, `ChatMessage`, `ChatOptions`, `ChatRequest`,
+         `ChatToken`) + `MockChatAssistant` + 6 tests. Decisión:
+         streaming vía `BoxStream<Result<ChatToken, DomainError>>`,
+         port stateless (la conversación la lleva el use case),
+         citaciones fuera del puerto.
+      2. ✅ **Día 10.** Caso de uso `AskAboutMeeting` en `echo-app` —
+         hidrata el transcript con marcadores `[seg:UUID]`, ensambla
+         system + history + question, llama al puerto y emite eventos
+         tipados (`Started` / `Token` / `Finished` / `Failed`) con el
+         estilo de `TranscriptEvent`. 13 tests cubren happy path,
+         citas inválidas/duplicadas/desconocidas, error mid-stream,
+         truncado de historial, y filtrado de `system` injection del
+         lado del cliente.
+      3. ✅ **Día 10.** Adapter `LlamaCppChat` en `echo-llm`
+         reutilizando los pesos Qwen 3 14B vía `chat_handle()` sobre
+         el mismo `Arc<LoadedModel>`. Streaming token-a-token con
+         `tokio::task::spawn_blocking` + `tokio::sync::mpsc` (buffer
+         64) → `BoxStream<Result<ChatToken, DomainError>>` vía
+         `futures::stream::unfold`. Render del chat template Qwen
+         (`<|im_start|>...`) como función pura `render_qwen_chat_prompt`.
+         Stop-sequence handling con `StreamState::push_piece` (cubre
+         trim parcial dentro de un piece + earliest-match cuando hay
+         varios stops). Pre-validation (`messages.is_empty()`,
+         `max_tokens == 0` → `DomainError::Invariant`) antes de
+         spawnear. 8 tests unitarios verdes (template + StreamState
+         + signature check); el smoke test con modelo real queda
+         para el día 12 (sin GGUF en CI).
+      4. ✅ **Día 10.** IPC streaming en `echo-shell`:
+         `ask_about_meeting(meeting_id, history, question, on_event)`
+         → drena el `BoxStream<AskAboutMeetingEvent>` inline (sin
+         background task; un turno de chat es bounded, ≤ ~10s). El
+         cache del LLM pasó de `Arc<dyn LlmModel>` a
+         `Arc<LlamaCppLlm>` con `ensure_llm_concrete()` para que
+         tanto `ensure_llm()` (summary) como `ensure_chat()`
+         (chat via `chat_handle()`) compartan los mismos pesos sin
+         carga adicional. Frontend: `src/types/chat.ts` define
+         `ChatEvent`, `ChatMessage`, `ChatRole`, `SegmentId`;
+         `src/ipc/client.ts::askAboutMeeting()` envuelve el invoke
+         con `Channel<ChatEvent>`. Cancelación es implícita (drop
+         del `Channel` → `send` falla → decoder thread aborta).
+      5. ✅ **Día 10.** Citas obligatorias a `segment_id` resueltas
+         mediante markdown-style markers `[seg:UUID]` parseados
+         post-hoc (decisión §8.4 → no re-prompteo). FTS5 ya devuelve
+         `segment_id`, así que el wiring UI será directo.
+      6. ✅ **Día 10.** UI: `ChatPanel.tsx` en
+         `src/features/meetings/` con burbujas user/assistant,
+         streaming con cursor pulsante, citas clickables
+         (`[seg:UUID]` → chip azul que hace scroll al segmento con
+         highlight temporal), indicador de "typing" (bounce dots),
+         textarea con Enter para enviar / Shift+Enter para newline.
+         Hook `useChat(meetingId)` gestiona `messages[]`,
+         `streamingText`, `error`, `model`, y `send()`. Wired into
+         `MeetingDetail` entre `SummaryPanel` y la lista de
+         segmentos; `scrollToSegment` usa `data-segment-id` +
+         `scrollIntoView` + classList flash.
 - [ ] **Plantillas de resumen restantes** (1:1, sprint review, entrevista,
       sales, clase). Esqueleto ya existe; solo son prompts + schemas JSON.
 - [ ] **Bench matrix en CI**: extender `bench.yml` a `small.en`,
@@ -421,8 +481,29 @@ Si algo falla, ordenar así la debugging:
    `preferences.audio` para que el usuario lo configure desde la UI.
 2. **¿Queremos un toggle de "modo estricto" en UI** que muestre los
    `Skipped` events (útil para depurar), o los ocultamos siempre?
-3. **¿El chat consume el mismo contexto del LLM que el resumen**, o
-   cargamos un modelo más pequeño para chat (latencia vs calidad)?
+3. ~~**¿El chat consume el mismo contexto del LLM que el resumen**, o
+   cargamos un modelo más pequeño para chat (latencia vs calidad)?~~
+   **Decidido día 10 (2026-04-23):** se reusa el modelo (los pesos
+   Qwen 3 14B, ~10 GB) del summarizer. Implementación al construir el
+   adapter (commit pendiente):
+   `LlamaCppLlm::chat_handle()` devuelve un `LlamaCppChat` que
+   comparte `Arc<LoadedModel>` con `LlamaCppLlm`; ambos adapters
+   crean su propio `LlamaContext` ephemeral por request, así que
+   resumen y chat pueden correr **realmente en paralelo** sin
+   `Mutex`, al coste de N × ~50 MB de KV-cache por request
+   concurrente. La hipótesis original ("hay que serializar con
+   `tokio::sync::Mutex`") cayó al inspeccionar el código existente
+   de `generate_blocking`: cada llamada ya creaba su propio context.
+   Si en stress test aparece thrashing por demasiados contexts
+   concurrentes (ej. 5+ chats simultáneos en una reunión grande),
+   añadir un `tokio::sync::Semaphore` en el adapter es trivial.
+4. **Citas explícitas obligatorias** (decidido día 10): el system
+   prompt instruye al modelo a citar `segment_id` con marcadores
+   `[seg:UUID]` en cada afirmación factual. El use case parsea los
+   marcadores post-hoc; si una respuesta llega sin ninguna, la UI
+   muestra el aviso "respuesta sin citas verificables" pero **no**
+   re-promptea (evita doblar latencia). Decisión revisable cuando
+   tengamos métricas reales de adherencia del modelo.
 4. **¿Seguimos con `tract-onnx` o migramos a `ort`?** Decisión de ADR
    propio si migramos — afecta Windows/Linux portability.
 

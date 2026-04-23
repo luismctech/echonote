@@ -14,6 +14,7 @@
 
 import { Channel, invoke } from "@tauri-apps/api/core";
 
+import type { ChatEvent, ChatMessage } from "../types/chat";
 import type { HealthStatus } from "../types/health";
 import type {
   Meeting,
@@ -169,4 +170,43 @@ export async function getSummary(
   meetingId: MeetingId,
 ): Promise<Summary | null> {
   return invoke<Summary | null>("get_summary", { meetingId });
+}
+
+// ---------------------------------------------------------------------------
+// Chat with transcript (Sprint 1 day 10 — CU-05)
+// ---------------------------------------------------------------------------
+
+/**
+ * Run one chat turn against a meeting's transcript. The backend
+ * streams the assistant's reply token-by-token through the supplied
+ * `onEvent` callback and resolves the promise once the stream
+ * terminates (with a `finished` or `failed` event).
+ *
+ * **Cancellation** is implicit: when the React component unmounts
+ * (or the user closes the chat panel), the `Channel` is dropped,
+ * and the backend aborts the decode loop on the next channel send
+ * failure. No explicit `cancelChat` command is needed.
+ *
+ * @param meetingId Target meeting whose transcript will be used as
+ *   context for the model.
+ * @param history Previous chat turns (excluding the system prompt,
+ *   which is assembled by the backend from the transcript). Pass
+ *   `[]` for the first turn.
+ * @param question The current user message.
+ * @param onEvent Callback that fires for every {@link ChatEvent}.
+ */
+export async function askAboutMeeting(
+  meetingId: MeetingId,
+  history: ChatMessage[],
+  question: string,
+  onEvent: (event: ChatEvent) => void,
+): Promise<void> {
+  const channel = new Channel<ChatEvent>();
+  channel.onmessage = onEvent;
+  return invoke<void>("ask_about_meeting", {
+    meetingId,
+    history: history.length > 0 ? history : null,
+    question,
+    onEvent: channel,
+  });
 }

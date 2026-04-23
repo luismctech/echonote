@@ -1,9 +1,14 @@
+import { useCallback, useRef } from "react";
+
 import { SpeakerChip } from "../../components/SpeakerChip";
+import { useChat } from "../../hooks/useChat";
 import { useMeetingSummary } from "../../hooks/useMeetingSummary";
 import { formatDate, formatDurationMs, formatTimestamp } from "../../lib/format";
 import { indexSpeakers, shortTag } from "../../lib/speakers";
+import type { SegmentId } from "../../types/chat";
 import type { SpeakerId } from "../../types/speaker";
 import type { MainView } from "../../types/view";
+import { ChatPanel } from "./ChatPanel";
 import { SpeakersPanel } from "./SpeakersPanel";
 import { SummaryPanel } from "./SummaryPanel";
 
@@ -23,6 +28,24 @@ export function MeetingDetail({
   // when the meeting transitions from loading → loaded.
   const meetingId = view.kind === "meeting" ? view.id : null;
   const summaryState = useMeetingSummary(meetingId);
+  const chat = useChat(meetingId);
+
+  // Ref to the scrollable transcript container so citation clicks
+  // in the ChatPanel can scroll the segment into view.
+  const transcriptRef = useRef<HTMLDivElement>(null);
+
+  const scrollToSegment = useCallback((segmentId: SegmentId) => {
+    const container = transcriptRef.current;
+    if (!container) return;
+    const el = container.querySelector(`[data-segment-id="${segmentId}"]`);
+    if (!el) return;
+    el.scrollIntoView({ behavior: "smooth", block: "center" });
+    // Brief highlight so the user notices which segment was cited.
+    el.classList.add("bg-blue-100", "dark:bg-blue-900/30");
+    setTimeout(() => {
+      el.classList.remove("bg-blue-100", "dark:bg-blue-900/30");
+    }, 2000);
+  }, []);
 
   if (view.loading) {
     return <p className="text-sm text-zinc-500">Loading meeting…</p>;
@@ -61,8 +84,12 @@ export function MeetingDetail({
         }}
       />
 
+      <ChatPanel chat={chat} onScrollToSegment={scrollToSegment} />
 
-      <div className="min-h-0 flex-1 overflow-y-auto rounded-md border border-zinc-100 bg-zinc-50 p-3 text-sm leading-relaxed dark:border-zinc-900 dark:bg-zinc-900/60">
+      <div
+        ref={transcriptRef}
+        className="min-h-0 flex-1 overflow-y-auto rounded-md border border-zinc-100 bg-zinc-50 p-3 text-sm leading-relaxed dark:border-zinc-900 dark:bg-zinc-900/60"
+      >
         {m.segments.length === 0 ? (
           <p className="text-zinc-400">No segments persisted for this meeting.</p>
         ) : (
@@ -72,7 +99,11 @@ export function MeetingDetail({
                 ? speakerIndex.get(seg.speakerId)
                 : undefined;
               return (
-                <li key={seg.id} className="flex items-baseline gap-3">
+                <li
+                  key={seg.id}
+                  data-segment-id={seg.id}
+                  className="flex items-baseline gap-3 rounded-sm transition-colors duration-500"
+                >
                   <span className="w-12 shrink-0 font-mono text-xs tabular-nums text-zinc-500">
                     {formatTimestamp(seg.startMs)}
                   </span>

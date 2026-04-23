@@ -14,6 +14,10 @@ echo-domain.workspace = true
 
 tokio.workspace = true
 async-trait.workspace = true
+# Used by `chat_with_transcript` to bridge the `ChatAssistant` token stream
+# into the use-case-level `AskAboutMeetingEvent` stream. Trait surface only
+# (`Stream`, `BoxStream`); no executor pulled in here.
+futures.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 serde.workspace = true

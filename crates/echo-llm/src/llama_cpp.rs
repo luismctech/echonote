@@ -11,28 +11,31 @@
 //! * `LlamaBackend::init()` is a process-wide singleton — guarded by a
 //!   `OnceLock` so multiple `LlamaCppLlm::load` calls (tests + runtime)
 //!   don't trip the "backend already initialised" error.
-//! * The model is loaded once into an `Arc<Inner>` and shared across
-//!   every generation request. Contexts are cheap to create relative
-//!   to model loading, so each request gets its own.
+//! * The model is loaded once into an `Arc<LoadedModel>` and shared
+//!   across every generation request — and across every adapter
+//!   built from it (see [`Self::chat_handle`]). Contexts are cheap to
+//!   create relative to model loading, so each request gets its own.
 //! * The inference loop is synchronous; we wrap it in `spawn_blocking`
 //!   so a long summary doesn't stall the rest of the runtime.
 
 use std::num::NonZeroU32;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::pin::pin;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use llama_cpp_2::context::params::LlamaContextParams;
-use llama_cpp_2::llama_backend::LlamaBackend;
 use llama_cpp_2::llama_batch::LlamaBatch;
 use llama_cpp_2::model::params::LlamaModelParams;
 use llama_cpp_2::model::{AddBos, LlamaModel};
 use llama_cpp_2::sampling::LlamaSampler;
-use llama_cpp_2::{send_logs_to_tracing, LogOptions};
 use tracing::{debug, info, instrument, warn};
 
 use echo_domain::{DomainError, GenerateOptions, LlmModel};
+
+use crate::backend::backend_singleton;
+use crate::llama_cpp_chat::LlamaCppChat;
+use crate::shared::LoadedModel;
 
 /// Default context window when the caller does not override it. Most
 /// 7B GGUFs ship with `n_ctx_train = 32_768`, but loading the full
@@ -114,22 +117,15 @@ impl LoadOptions {
     }
 }
 
-/// llama.cpp-backed [`LlmModel`] adapter.
+/// llama.cpp-backed [`LlmModel`] adapter for one-shot generation
+/// (summaries, structured-JSON prompts, …).
 ///
 /// Cloning is cheap (`Arc` internally); share one instance across the
-/// process via the application state.
+/// process via the application state. To serve the chat use case
+/// from the same loaded model, call [`Self::chat_handle`].
 #[derive(Clone)]
 pub struct LlamaCppLlm {
-    inner: Arc<Inner>,
-}
-
-struct Inner {
-    backend: &'static LlamaBackend,
-    model: LlamaModel,
-    model_id: String,
-    model_path: PathBuf,
-    n_ctx: u32,
-    n_threads: Option<i32>,
+    inner: Arc<LoadedModel>,
 }
 
 impl std::fmt::Debug for LlamaCppLlm {
@@ -180,7 +176,7 @@ impl LlamaCppLlm {
             .map_err(|e| DomainError::ModelNotLoaded(format!("llama.cpp: {e}")))?;
 
         Ok(Self {
-            inner: Arc::new(Inner {
+            inner: Arc::new(LoadedModel {
                 backend,
                 model,
                 model_id,
@@ -196,6 +192,22 @@ impl LlamaCppLlm {
     #[must_use]
     pub fn model_path(&self) -> &Path {
         &self.inner.model_path
+    }
+
+    /// Build a chat-streaming adapter that serves the
+    /// [`echo_domain::ChatAssistant`] port off of **the same** loaded
+    /// model. Cloning the underlying `Arc` is the only cost — no
+    /// extra weights are loaded, no background work is started.
+    ///
+    /// Per `docs/SPRINT-1-STATUS.md` §8.3, summaries and chat are
+    /// expected to share the Qwen 3 14B context. This is the entry
+    /// point that actually wires that up: at startup, `src-tauri`
+    /// loads the model once and dependency-injects both ports
+    /// (`Arc<LlamaCppLlm>` + `Arc<LlamaCppChat>`) into the application
+    /// layer.
+    #[must_use]
+    pub fn chat_handle(&self) -> LlamaCppChat {
+        LlamaCppChat::from_loaded(Arc::clone(&self.inner))
     }
 }
 
@@ -233,7 +245,7 @@ impl LlmModel for LlamaCppLlm {
 /// `cargo test --features ...` smoke tests without going through the
 /// async machinery.
 fn generate_blocking(
-    inner: &Inner,
+    inner: &LoadedModel,
     prompt: &str,
     options: &GenerateOptions,
 ) -> Result<String, DomainError> {
@@ -369,30 +381,6 @@ fn generate_blocking(
     }
 
     Ok(output)
-}
-
-/// Lazily initialise a process-wide [`LlamaBackend`].
-///
-/// `LlamaBackend::init()` errors on the second call, so we cache the
-/// successfully initialised handle and hand out `&'static`
-/// references. The leak is intentional: there is one backend per
-/// process and it lives for the entire process lifetime.
-fn backend_singleton() -> Result<&'static LlamaBackend, DomainError> {
-    static BACKEND: OnceLock<&'static LlamaBackend> = OnceLock::new();
-    if let Some(b) = BACKEND.get() {
-        return Ok(*b);
-    }
-
-    // Forward llama.cpp's chatty C++ logs to `tracing`. Disabled by
-    // default to avoid drowning the rest of the logs; the env-filter
-    // can re-enable them with `RUST_LOG=llama_cpp_2=info`.
-    send_logs_to_tracing(LogOptions::default().with_logs_enabled(false));
-
-    let backend = LlamaBackend::init()
-        .map_err(|e| DomainError::LlmFailed(format!("LlamaBackend::init: {e}")))?;
-    let leaked: &'static LlamaBackend = Box::leak(Box::new(backend));
-    let _ = BACKEND.set(leaked);
-    Ok(BACKEND.get().copied().expect("backend just set"))
 }
 
 #[cfg(test)]

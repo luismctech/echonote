@@ -49,6 +49,7 @@ pub fn run() {
             commands::search_meetings,
             commands::summarize_meeting,
             commands::get_summary,
+            commands::ask_about_meeting,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
