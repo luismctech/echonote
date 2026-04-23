@@ -15,6 +15,7 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 
 import type { ChatEvent, ChatMessage } from "../types/chat";
+import type { DownloadEvent, ModelInfo } from "../types/models";
 import type { HealthStatus } from "../types/health";
 import type {
   Meeting,
@@ -144,20 +145,18 @@ export async function searchMeetings(
 /**
  * Generate (or regenerate) the local-LLM summary for a meeting.
  *
- * Loads the LLM lazily on first call (the model file is ~9 GB for
- * the default Qwen 3 14B Q4_K_M, so the first invocation in a session
- * is the slow one). Subsequent calls reuse the cached model. The use case
- * upserts on (meetingId, template), so re-running this command on
- * the same meeting REPLACES the previous summary instead of
- * appending — matches the `Generate again` UX.
- *
- * Backend errors surface as plain strings ready for the toast
- * layer (`not found:`, `empty transcript:`, `llm:`, `storage:`).
+ * @param meetingId Target meeting.
+ * @param template Template id (`"general"`, `"oneOnOne"`, etc.).
+ *   Defaults to `"general"` when omitted or `null`.
  */
 export async function summarizeMeeting(
   meetingId: MeetingId,
+  template?: string,
 ): Promise<Summary> {
-  return invoke<Summary>("summarize_meeting", { meetingId });
+  return invoke<Summary>("summarize_meeting", {
+    meetingId,
+    template: template ?? null,
+  });
 }
 
 /**
@@ -170,6 +169,25 @@ export async function getSummary(
   meetingId: MeetingId,
 ): Promise<Summary | null> {
   return invoke<Summary | null>("get_summary", { meetingId });
+}
+
+// ---------------------------------------------------------------------------
+// Model management
+// ---------------------------------------------------------------------------
+
+/** Get the status of all downloadable models. */
+export async function getModelStatus(): Promise<ModelInfo[]> {
+  return invoke<ModelInfo[]>("get_model_status");
+}
+
+/** Download a model, streaming progress events to the callback. */
+export async function downloadModel(
+  modelId: string,
+  onEvent: (event: DownloadEvent) => void,
+): Promise<void> {
+  const channel = new Channel<DownloadEvent>();
+  channel.onmessage = onEvent;
+  return invoke<void>("download_model", { modelId, onEvent: channel });
 }
 
 // ---------------------------------------------------------------------------

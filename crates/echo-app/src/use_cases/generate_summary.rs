@@ -1,34 +1,22 @@
 //! `generate_summary` use case (CU-04 in `docs/DEVELOPMENT_PLAN.md`).
 //!
 //! Loads a finalized meeting from the store, asks the local LLM to
-//! produce a structured summary using the **General** template, parses
-//! the JSON response and persists it back to the store. Other templates
-//! (1:1, sprint review, interview, sales call, lecture) reuse this
-//! plumbing in Sprint 2 — only the prompt and the
-//! [`echo_domain::SummaryContent`] variant change.
+//! produce a structured summary using the requested template, parses
+//! the JSON response and persists it back to the store. Six templates
+//! are supported (DEVELOPMENT_PLAN.md §3.2): General (default),
+//! OneOnOne, SprintReview, Interview, SalesCall, and Lecture.
 //!
 //! ## Reliability
 //!
 //! Local 7-8B quantized models occasionally produce JSON that's not
-//! quite RFC-8259 compliant (trailing commas, unescaped newlines inside
-//! strings, prose before/after the block). The use case mitigates this
-//! with three layers:
+//! quite RFC-8259 compliant. Mitigation:
 //!
 //! 1. The system prompt forbids prose and pins the schema.
-//! 2. We strip the first ```json … ``` fence (or any `{ … }` block) out
-//!    of the response before parsing — many models emit a markdown
-//!    fence even when explicitly told not to.
-//! 3. On the first parse failure we retry once, this time including
-//!    the parser's error message in the user turn so the model can
-//!    self-correct (the same trick OpenAI's "function calling" used
-//!    before structured outputs).
+//! 2. We extract the first balanced `{ … }` block from the response.
+//! 3. On the first parse failure we retry once, including the parser
+//!    error in the user turn for self-correction.
 //! 4. If parsing still fails, we fall back to
-//!    [`echo_domain::SummaryContent::FreeText`] so the user always
-//!    sees *something* and the meeting isn't blocked behind a flaky
-//!    model.
-//!
-//! The fallback path is reported via tracing so we can monitor how
-//! often it fires once telemetry lands.
+//!    [`echo_domain::SummaryContent::FreeText`].
 
 use std::sync::Arc;
 
@@ -37,8 +25,8 @@ use time::OffsetDateTime;
 use tracing::{info, instrument, warn};
 
 use echo_domain::{
-    DomainError, GenerateOptions, LlmModel, Meeting, MeetingId, MeetingStore, Speaker, Summary,
-    SummaryContent, SummaryId,
+    Definition, DomainError, GenerateOptions, InterviewQuote, LlmModel, Meeting, MeetingId,
+    MeetingStore, Speaker, Summary, SummaryContent, SummaryId, TEMPLATE_IDS,
 };
 
 /// Maximum characters of transcript text fed to the model. Qwen 3
@@ -66,12 +54,13 @@ pub enum SummarizeMeetingError {
     #[error("meeting {0} not found")]
     NotFound(MeetingId),
 
-    /// The meeting exists but has no transcribed text yet — there's
-    /// nothing for the LLM to summarise. Surfaced explicitly so the UI
-    /// can show "wait until the recording finishes" instead of a
-    /// generic error.
+    /// The meeting exists but has no transcribed text yet.
     #[error("meeting {0} has no transcript text to summarize")]
     EmptyTranscript(MeetingId),
+
+    /// The caller passed a template id that doesn't exist.
+    #[error("unknown template: {0}")]
+    InvalidTemplate(String),
 
     /// The LLM adapter failed (load, decode, OOM, …). Wrapped so the
     /// caller doesn't need to import `DomainError`.
@@ -97,11 +86,23 @@ impl SummarizeMeeting {
         Self { llm, store }
     }
 
-    /// Generate (and persist) the General-template summary for a
-    /// meeting. Returns the freshly persisted [`Summary`] so the
-    /// caller can render it without an extra round-trip.
-    #[instrument(skip(self), fields(meeting_id = %meeting_id))]
-    pub async fn execute(&self, meeting_id: MeetingId) -> Result<Summary, SummarizeMeetingError> {
+    /// Generate (and persist) a summary for a meeting using the
+    /// given template. Returns the freshly persisted [`Summary`] so
+    /// the caller can render it without an extra round-trip.
+    ///
+    /// `template` must be one of [`TEMPLATE_IDS`] (`"general"`,
+    /// `"oneOnOne"`, …). Passing an unknown id returns
+    /// `Err(SummarizeMeetingError::InvalidTemplate)`.
+    #[instrument(skip(self), fields(meeting_id = %meeting_id, template = %template))]
+    pub async fn execute(
+        &self,
+        meeting_id: MeetingId,
+        template: &str,
+    ) -> Result<Summary, SummarizeMeetingError> {
+        if !TEMPLATE_IDS.contains(&template) {
+            return Err(SummarizeMeetingError::InvalidTemplate(template.to_string()));
+        }
+
         let meeting = self
             .store
             .get(meeting_id)
@@ -117,29 +118,32 @@ impl SummarizeMeeting {
         let language = meeting.summary.language.clone();
         let language_instruction = language_instruction(language.as_deref());
 
+        let build_prompt = |feedback: Option<&str>| {
+            build_prompt(template, &transcript, &language_instruction, feedback)
+        };
+        let parse = |raw: &str| parse_payload(template, raw);
+
         // ---- first attempt -------------------------------------------------
-        let first_prompt = build_general_prompt(&transcript, &language_instruction, None);
+        let first_prompt = build_prompt(None);
         let first_response = self
             .llm
             .generate(&first_prompt, &generate_opts())
             .await
             .map_err(SummarizeMeetingError::Llm)?;
 
-        let content = match parse_general_payload(&first_response) {
+        let content = match parse(&first_response) {
             Ok(c) => c,
             Err(first_err) => {
                 warn!(error = %first_err, "summary JSON parse failed on first try, retrying");
 
-                // ---- retry with parser feedback -----------------------------
-                let retry_prompt =
-                    build_general_prompt(&transcript, &language_instruction, Some(&first_err));
+                let retry_prompt = build_prompt(Some(&first_err));
                 let retry_response = self
                     .llm
                     .generate(&retry_prompt, &generate_opts())
                     .await
                     .map_err(SummarizeMeetingError::Llm)?;
 
-                match parse_general_payload(&retry_response) {
+                match parse(&retry_response) {
                     Ok(c) => c,
                     Err(retry_err) => {
                         warn!(
@@ -258,22 +262,54 @@ fn language_instruction(language: Option<&str>) -> String {
     }
 }
 
-/// Build the chat-template-wrapped prompt. The Qwen 3 family is the
-/// default model for the MVP (Qwen 2.5 is a legacy fallback), and both
-/// share the same `<|im_start|>` template, so a single prompt covers
-/// both. Most other modern instruct GGUFs (Llama 3, Mistral, Phi 3)
-/// tolerate it as a literal user message and still produce reasonable
-/// output, which is good enough for the day-9 single-template scope.
-fn build_general_prompt(
+// ---------------------------------------------------------------------------
+// Prompt building (dispatch per template)
+// ---------------------------------------------------------------------------
+
+fn build_prompt(
+    template: &str,
     transcript: &str,
     language_instruction: &str,
     parser_feedback: Option<&str>,
 ) -> String {
-    // The schema lives in its own raw string so we can keep the
-    // double quotes verbatim (Rust string escaping inside `format!`
-    // would make the JSON unreadable). Lines are deliberately kept
-    // short so the model sees one field per line.
-    const SCHEMA: &str = r#"Schema:
+    let schema = schema_for(template);
+    let role = role_for(template);
+    wrap_qwen_prompt(
+        role,
+        language_instruction,
+        schema,
+        transcript,
+        parser_feedback,
+    )
+}
+
+fn role_for(template: &str) -> &'static str {
+    match template {
+        "general" => "You are a meeting summarizer.",
+        "oneOnOne" => "You are a 1:1 meeting summarizer specializing in manager-report meetings.",
+        "sprintReview" => "You are a sprint review / retrospective summarizer for agile teams.",
+        "interview" => "You are an interview summarizer for user-research and hiring interviews.",
+        "salesCall" => {
+            "You are a sales-call summarizer specializing in B2B discovery and pipeline meetings."
+        }
+        "lecture" => "You are a lecture / class summarizer for educational content.",
+        _ => "You are a meeting summarizer.",
+    }
+}
+
+fn schema_for(template: &str) -> &'static str {
+    match template {
+        "general" => SCHEMA_GENERAL,
+        "oneOnOne" => SCHEMA_ONE_ON_ONE,
+        "sprintReview" => SCHEMA_SPRINT_REVIEW,
+        "interview" => SCHEMA_INTERVIEW,
+        "salesCall" => SCHEMA_SALES_CALL,
+        "lecture" => SCHEMA_LECTURE,
+        _ => SCHEMA_GENERAL,
+    }
+}
+
+const SCHEMA_GENERAL: &str = r#"Schema:
 {
   "summary": string,                        // 2-3 sentences
   "keyPoints": string[],                    // bulleted highlights
@@ -284,19 +320,80 @@ fn build_general_prompt(
   "openQuestions": string[]                 // unanswered questions
 }"#;
 
+const SCHEMA_ONE_ON_ONE: &str = r#"Schema:
+{
+  "summary": string,                        // 2-3 sentences
+  "wins": string[],                         // achievements mentioned
+  "blockers": string[],                     // obstacles / blockers
+  "growthFeedback": string[],               // growth / development feedback
+  "nextSteps": [                            // follow-up action items
+    { "task": string, "owner": string|null, "due": string|null }
+  ],
+  "followUpTopics": string[]               // topics for the next 1:1
+}"#;
+
+const SCHEMA_SPRINT_REVIEW: &str = r#"Schema:
+{
+  "summary": string,                        // 2-3 sentences
+  "completedItems": string[],               // items completed this sprint
+  "carryOver": string[],                    // items carried to next sprint
+  "risks": string[],                        // risks identified
+  "nextSprintPriorities": string[]          // priorities for next sprint
+}"#;
+
+const SCHEMA_INTERVIEW: &str = r#"Schema:
+{
+  "summary": string,                        // 2-3 sentences
+  "quotes": [                               // notable quotes
+    { "speaker": string, "quote": string, "context": string|null }
+  ],
+  "themes": string[],                       // recurring themes
+  "painPoints": string[],                   // pain points mentioned
+  "opportunities": string[]                 // opportunities identified
+}"#;
+
+const SCHEMA_SALES_CALL: &str = r#"Schema:
+{
+  "summary": string,                        // 2-3 sentences
+  "customerContext": string|null,            // background on the customer
+  "painPoints": string[],                   // customer pain points
+  "interestSignals": string[],              // positive interest signals
+  "objections": string[],                   // objections raised
+  "nextSteps": [                            // follow-up actions
+    { "task": string, "owner": string|null, "due": string|null }
+  ],
+  "dealStageIndicator": string|null         // "discovery" | "evaluation" | "proposal" | "negotiation"
+}"#;
+
+const SCHEMA_LECTURE: &str = r#"Schema:
+{
+  "summary": string,                        // 2-3 sentences
+  "conceptsCovered": string[],              // key concepts taught
+  "definitions": [                          // term/definition pairs
+    { "term": string, "definition": string }
+  ],
+  "examples": string[],                     // illustrative examples
+  "homeworkOrNext": string[]                // homework or next-session topics
+}"#;
+
+fn wrap_qwen_prompt(
+    role: &str,
+    language_instruction: &str,
+    schema: &str,
+    transcript: &str,
+    parser_feedback: Option<&str>,
+) -> String {
     let system = format!(
-        "You are a meeting summarizer. {language_instruction}\n\
+        "{role} {language_instruction}\n\
          Output ONLY a single JSON object that matches the schema below — no prose, \
          no markdown fences, no commentary. All string values must be valid UTF-8 and \
          all arrays may be empty when the transcript does not contain that information.\n\n\
-         {SCHEMA}"
+         {schema}"
     );
 
     let mut user = format!("Transcript:\n---\n{transcript}\n---\n\nReturn the JSON object only.");
 
     if let Some(err) = parser_feedback {
-        // Self-correction turn: surface the parser's complaint so the
-        // model knows what to fix.
         user.push_str(&format!(
             "\n\nYour previous response could not be parsed as JSON. \
              Parser error: {err}\n\
@@ -312,24 +409,13 @@ fn build_general_prompt(
     )
 }
 
-/// Pull the JSON payload out of the model's response and parse it
-/// into [`SummaryContent::General`].
-///
-/// The matcher is permissive on purpose — local quantized models love
-/// to wrap JSON in ```json fences or prefix it with "Here is the
-/// summary:". We grab the substring between the first `{` and the
-/// matching `}` (counting braces, ignoring those inside strings) so
-/// markdown wrappers don't break parsing.
-fn parse_general_payload(raw: &str) -> Result<SummaryContent, String> {
+// ---------------------------------------------------------------------------
+// Payload parsing (dispatch per template)
+// ---------------------------------------------------------------------------
+
+fn parse_payload(template: &str, raw: &str) -> Result<SummaryContent, String> {
     let block =
         extract_json_object(raw).ok_or_else(|| "no JSON object found in response".to_string())?;
-
-    // The on-the-wire shape uses camelCase already (matching our
-    // `rename_all_fields = "camelCase"` enum), but we still need to
-    // hand-pluck the fields rather than deserializing into
-    // `SummaryContent` directly because the LLM doesn't know about the
-    // `template` discriminator. Decode into an untyped value first,
-    // then map.
     let value: serde_json::Value =
         serde_json::from_str(block).map_err(|e| format!("invalid JSON: {e}"))?;
     let obj = value
@@ -342,18 +428,95 @@ fn parse_general_payload(raw: &str) -> Result<SummaryContent, String> {
         .ok_or_else(|| "missing required field `summary`".to_string())?
         .to_string();
 
-    let key_points = string_array(obj.get("keyPoints"));
-    let decisions = string_array(obj.get("decisions"));
-    let open_questions = string_array(obj.get("openQuestions"));
-    let action_items = action_items_array(obj.get("actionItems"));
+    match template {
+        "general" => Ok(SummaryContent::General {
+            summary,
+            key_points: string_array(obj.get("keyPoints")),
+            decisions: string_array(obj.get("decisions")),
+            action_items: action_items_array(obj.get("actionItems")),
+            open_questions: string_array(obj.get("openQuestions")),
+        }),
+        "oneOnOne" => Ok(SummaryContent::OneOnOne {
+            summary,
+            wins: string_array(obj.get("wins")),
+            blockers: string_array(obj.get("blockers")),
+            growth_feedback: string_array(obj.get("growthFeedback")),
+            next_steps: action_items_array(obj.get("nextSteps")),
+            follow_up_topics: string_array(obj.get("followUpTopics")),
+        }),
+        "sprintReview" => Ok(SummaryContent::SprintReview {
+            summary,
+            completed_items: string_array(obj.get("completedItems")),
+            carry_over: string_array(obj.get("carryOver")),
+            risks: string_array(obj.get("risks")),
+            next_sprint_priorities: string_array(obj.get("nextSprintPriorities")),
+        }),
+        "interview" => Ok(SummaryContent::Interview {
+            summary,
+            quotes: interview_quotes_array(obj.get("quotes")),
+            themes: string_array(obj.get("themes")),
+            pain_points: string_array(obj.get("painPoints")),
+            opportunities: string_array(obj.get("opportunities")),
+        }),
+        "salesCall" => Ok(SummaryContent::SalesCall {
+            summary,
+            customer_context: obj
+                .get("customerContext")
+                .and_then(|v| v.as_str().map(str::to_string)),
+            pain_points: string_array(obj.get("painPoints")),
+            interest_signals: string_array(obj.get("interestSignals")),
+            objections: string_array(obj.get("objections")),
+            next_steps: action_items_array(obj.get("nextSteps")),
+            deal_stage_indicator: obj
+                .get("dealStageIndicator")
+                .and_then(|v| v.as_str().map(str::to_string)),
+        }),
+        "lecture" => Ok(SummaryContent::Lecture {
+            summary,
+            concepts_covered: string_array(obj.get("conceptsCovered")),
+            definitions: definitions_array(obj.get("definitions")),
+            examples: string_array(obj.get("examples")),
+            homework_or_next: string_array(obj.get("homeworkOrNext")),
+        }),
+        _ => Err(format!("unknown template: {template}")),
+    }
+}
 
-    Ok(SummaryContent::General {
-        summary,
-        key_points,
-        decisions,
-        action_items,
-        open_questions,
-    })
+fn interview_quotes_array(v: Option<&serde_json::Value>) -> Vec<InterviewQuote> {
+    v.and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|item| {
+                    let obj = item.as_object()?;
+                    let speaker = obj.get("speaker").and_then(|v| v.as_str())?.to_string();
+                    let quote = obj.get("quote").and_then(|v| v.as_str())?.to_string();
+                    let context = obj
+                        .get("context")
+                        .and_then(|v| v.as_str().map(str::to_string));
+                    Some(InterviewQuote {
+                        speaker,
+                        quote,
+                        context,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn definitions_array(v: Option<&serde_json::Value>) -> Vec<Definition> {
+    v.and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|item| {
+                    let obj = item.as_object()?;
+                    let term = obj.get("term").and_then(|v| v.as_str())?.to_string();
+                    let definition = obj.get("definition").and_then(|v| v.as_str())?.to_string();
+                    Some(Definition { term, definition })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn string_array(v: Option<&serde_json::Value>) -> Vec<String> {
@@ -595,7 +758,7 @@ mod tests {
         .into())]));
 
         let uc = SummarizeMeeting::new(llm.clone(), store.clone());
-        let summary = uc.execute(id).await.unwrap();
+        let summary = uc.execute(id, "general").await.unwrap();
 
         assert_eq!(llm.calls(), 1);
         assert_eq!(summary.template(), "general");
@@ -644,7 +807,7 @@ mod tests {
         ]));
 
         let uc = SummarizeMeeting::new(llm.clone(), store.clone());
-        let summary = uc.execute(id).await.unwrap();
+        let summary = uc.execute(id, "general").await.unwrap();
 
         assert_eq!(llm.calls(), 2, "expected one retry");
         assert_eq!(summary.template(), "general");
@@ -667,7 +830,7 @@ mod tests {
         ]));
 
         let uc = SummarizeMeeting::new(llm.clone(), store.clone());
-        let summary = uc.execute(id).await.unwrap();
+        let summary = uc.execute(id, "general").await.unwrap();
 
         assert_eq!(llm.calls(), 2);
         match summary.content {
@@ -686,7 +849,7 @@ mod tests {
         let llm = Arc::new(ScriptedLlm::new(vec![]));
 
         let uc = SummarizeMeeting::new(llm.clone(), store.clone());
-        let err = uc.execute(id).await.unwrap_err();
+        let err = uc.execute(id, "general").await.unwrap_err();
         assert!(
             matches!(err, SummarizeMeetingError::EmptyTranscript(mid) if mid == id),
             "got {err:?}"
@@ -700,7 +863,7 @@ mod tests {
         let llm = Arc::new(ScriptedLlm::new(vec![]));
 
         let uc = SummarizeMeeting::new(llm.clone(), store.clone());
-        let err = uc.execute(MeetingId::new()).await.unwrap_err();
+        let err = uc.execute(MeetingId::new(), "general").await.unwrap_err();
         assert!(matches!(err, SummarizeMeetingError::NotFound(_)), "{err:?}");
     }
 
@@ -713,7 +876,7 @@ mod tests {
         ))]));
 
         let uc = SummarizeMeeting::new(llm.clone(), store.clone());
-        let err = uc.execute(id).await.unwrap_err();
+        let err = uc.execute(id, "general").await.unwrap_err();
         assert!(matches!(err, SummarizeMeetingError::Llm(_)), "{err:?}");
     }
 
@@ -826,5 +989,84 @@ mod tests {
         assert!(language_instruction(None).contains("English"));
         let other = language_instruction(Some("fr"));
         assert!(other.contains("fr"), "{other}");
+    }
+
+    #[tokio::test]
+    async fn one_on_one_template_produces_correct_variant() {
+        let store = Arc::new(FakeStore::default());
+        let id = seed_meeting(
+            &store,
+            vec!["Great progress on the API", "I'm blocked on the deploy"],
+        );
+        let llm = Arc::new(ScriptedLlm::new(vec![Ok(r#"
+            {
+              "summary": "1:1 productivo.",
+              "wins": ["API avanzado"],
+              "blockers": ["Deploy bloqueado"],
+              "growthFeedback": [],
+              "nextSteps": [{ "task": "Resolver deploy", "owner": "Luis", "due": null }],
+              "followUpTopics": ["Revisar roadmap"]
+            }
+        "#
+        .into())]));
+
+        let uc = SummarizeMeeting::new(llm, store);
+        let summary = uc.execute(id, "oneOnOne").await.unwrap();
+        assert_eq!(summary.template(), "oneOnOne");
+        match &summary.content {
+            SummaryContent::OneOnOne {
+                wins,
+                blockers,
+                follow_up_topics,
+                ..
+            } => {
+                assert_eq!(wins, &vec!["API avanzado".to_string()]);
+                assert_eq!(blockers, &vec!["Deploy bloqueado".to_string()]);
+                assert_eq!(follow_up_topics, &vec!["Revisar roadmap".to_string()]);
+            }
+            other => panic!("expected OneOnOne, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn interview_template_parses_quotes() {
+        let store = Arc::new(FakeStore::default());
+        let id = seed_meeting(&store, vec!["Tell me about your experience"]);
+        let llm = Arc::new(ScriptedLlm::new(vec![Ok(r#"
+            {
+              "summary": "Entrevista con candidato.",
+              "quotes": [{ "speaker": "Ana", "quote": "Me encanta Rust", "context": "Al hablar de stack" }],
+              "themes": ["Rust"],
+              "painPoints": ["CI lento"],
+              "opportunities": ["Mentoring"]
+            }
+        "#
+        .into())]));
+
+        let uc = SummarizeMeeting::new(llm, store);
+        let summary = uc.execute(id, "interview").await.unwrap();
+        assert_eq!(summary.template(), "interview");
+        match &summary.content {
+            SummaryContent::Interview { quotes, themes, .. } => {
+                assert_eq!(quotes.len(), 1);
+                assert_eq!(quotes[0].speaker, "Ana");
+                assert_eq!(themes, &vec!["Rust".to_string()]);
+            }
+            other => panic!("expected Interview, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn invalid_template_returns_error() {
+        let store = Arc::new(FakeStore::default());
+        let id = seed_meeting(&store, vec!["Hola"]);
+        let llm = Arc::new(ScriptedLlm::new(vec![]));
+
+        let uc = SummarizeMeeting::new(llm, store);
+        let err = uc.execute(id, "nonexistent").await.unwrap_err();
+        assert!(
+            matches!(err, SummarizeMeetingError::InvalidTemplate(ref t) if t == "nonexistent"),
+            "{err:?}"
+        );
     }
 }

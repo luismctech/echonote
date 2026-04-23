@@ -928,16 +928,22 @@ async fn run_summarize(
     let use_case = SummarizeMeeting::new(llm, store);
 
     let started = std::time::Instant::now();
-    let summary = use_case.execute(meeting_id).await.map_err(|e| match e {
-        SummarizeMeetingError::NotFound(id) => {
-            anyhow::anyhow!("meeting {id} not found")
-        }
-        SummarizeMeetingError::EmptyTranscript(id) => {
-            anyhow::anyhow!("meeting {id} has no segments to summarise")
-        }
-        SummarizeMeetingError::Llm(err) => anyhow::anyhow!("llm: {err}"),
-        SummarizeMeetingError::Storage(err) => anyhow::anyhow!("storage: {err}"),
-    })?;
+    let summary = use_case
+        .execute(meeting_id, "general")
+        .await
+        .map_err(|e| match e {
+            SummarizeMeetingError::NotFound(id) => {
+                anyhow::anyhow!("meeting {id} not found")
+            }
+            SummarizeMeetingError::EmptyTranscript(id) => {
+                anyhow::anyhow!("meeting {id} has no segments to summarise")
+            }
+            SummarizeMeetingError::InvalidTemplate(t) => {
+                anyhow::anyhow!("invalid template: {t}")
+            }
+            SummarizeMeetingError::Llm(err) => anyhow::anyhow!("llm: {err}"),
+            SummarizeMeetingError::Storage(err) => anyhow::anyhow!("storage: {err}"),
+        })?;
     let elapsed = started.elapsed();
 
     if json {

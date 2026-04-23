@@ -50,6 +50,8 @@ pub fn run() {
             commands::summarize_meeting,
             commands::get_summary,
             commands::ask_about_meeting,
+            commands::get_model_status,
+            commands::download_model,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

@@ -223,7 +223,9 @@ fn stream_chat_impl(
     let n_ctx = NonZeroU32::new(inner.n_ctx)
         .ok_or_else(|| DomainError::Invariant("n_ctx must be > 0".into()))?;
 
-    let mut ctx_params = LlamaContextParams::default().with_n_ctx(Some(n_ctx));
+    let mut ctx_params = LlamaContextParams::default()
+        .with_n_ctx(Some(n_ctx))
+        .with_n_batch(inner.n_ctx);
     if let Some(threads) = inner.n_threads {
         ctx_params = ctx_params.with_n_threads(threads);
         ctx_params = ctx_params.with_n_threads_batch(threads);

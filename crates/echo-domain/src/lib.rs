@@ -36,5 +36,7 @@ pub use entities::meeting::{Meeting, MeetingId, MeetingSearchHit, MeetingSummary
 pub use entities::segment::{Segment, SegmentId};
 pub use entities::speaker::{Speaker, SpeakerId};
 pub use entities::streaming::{StreamingOptions, StreamingSessionId, TranscriptEvent};
-pub use entities::summary::{ActionItem, Summary, SummaryContent, SummaryId};
+pub use entities::summary::{
+    ActionItem, Definition, InterviewQuote, Summary, SummaryContent, SummaryId, TEMPLATE_IDS,
+};
 pub use ports::storage::{CreateMeeting, FinalizeMeeting, MeetingStore};

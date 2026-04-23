@@ -43,6 +43,7 @@ thiserror = { workspace = true }
 # returned by the use case (`StreamExt::next`). Trait surface only — tokio
 # remains the runtime.
 futures = { workspace = true }
+reqwest = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

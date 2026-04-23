@@ -1,7 +1,7 @@
 # Sprint 1 — Memoria de desarrollo (handoff para día 10)
 
 > **Autor:** Alberto Cruz
-> **Última actualización:** 2026-04-23 (día 10 — VAD commiteado, ADR-0008 mergeado, CU-05 chat completo end-to-end: puerto + use case + adapter + IPC + types + UI)
+> **Última actualización:** 2026-04-23 (día 10 — CU-05 chat completo, 6 plantillas de resumen, descarga de modelos in-app)
 > **Branch de trabajo:** `develop` (al día con `origin/develop`)
 > **Último tag estable:** `v0.1.0-sprint0` (final de Sprint 0)
 > **Propósito:** documento vivo que captura el estado del proyecto al cierre
@@ -393,8 +393,16 @@ Priorizado. El orden asume que primero cerramos el trabajo en curso.
          `MeetingDetail` entre `SummaryPanel` y la lista de
          segmentos; `scrollToSegment` usa `data-segment-id` +
          `scrollIntoView` + classList flash.
-- [ ] **Plantillas de resumen restantes** (1:1, sprint review, entrevista,
-      sales, clase). Esqueleto ya existe; solo son prompts + schemas JSON.
+- [x] **Plantillas de resumen restantes** ✅ Completo.
+      6 plantillas end-to-end: General, 1:1, Sprint Review, Interview,
+      Sales Call, Lecture. Dominio: 5 nuevas variantes en `SummaryContent`
+      + structs `InterviewQuote` / `Definition` + `TEMPLATE_IDS` const.
+      Use case: `execute()` acepta `template: &str`, prompt builder y
+      parser por plantilla. IPC: `summarize_meeting` acepta `template`
+      opcional (default "general"). Frontend: tipos TS para las 6 plantillas,
+      selector `<select>` en `SummaryPanel`, body renderer por plantilla
+      (quotes, definitions, action items, deal stage, etc.). Tests: 3 nuevos
+      (oneOnOne happy path, interview quotes, invalid template).
 - [ ] **Bench matrix en CI**: extender `bench.yml` a `small.en`,
       `medium.en` y `large-v3-turbo` (el default actual). Publicar en
       `docs/benchmarks/PHASE-1/`.

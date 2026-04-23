@@ -17,10 +17,49 @@ import { useCallback, useState } from "react";
 import { HealthProbe } from "./features/live/HealthProbe";
 import { LivePane } from "./features/live/LivePane";
 import { MeetingDetail } from "./features/meetings/MeetingDetail";
+import { ModelManager } from "./features/settings/ModelManager";
 import { Sidebar } from "./features/sidebar/Sidebar";
 import { useHealthProbe } from "./hooks/useHealthProbe";
+import { useModelManager } from "./hooks/useModelManager";
 import { useRecordingSession } from "./hooks/useRecordingSession";
 import { useMeetings } from "./state/useMeetingsStore";
+
+function dotColor(downloading: boolean, allGood: boolean): string {
+  if (downloading) return "animate-pulse bg-blue-500";
+  if (allGood) return "bg-emerald-500";
+  return "bg-amber-500";
+}
+
+function ModelStatusBadge({
+  models,
+  downloading,
+  onClick,
+}: Readonly<{
+  models: { present: boolean }[];
+  downloading: boolean;
+  onClick: () => void;
+}>) {
+  const total = models.length;
+  const installed = models.filter((m) => m.present).length;
+  const allGood = total > 0 && installed === total;
+
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`flex items-center gap-1.5 rounded-md border px-2 py-1 font-mono text-[11px] leading-none whitespace-nowrap ${
+        allGood
+          ? "border-emerald-300 bg-emerald-50 text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950/40 dark:text-emerald-300"
+          : "border-amber-300 bg-amber-50 text-amber-800 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-300"
+      }`}
+    >
+      <span
+        className={`h-1.5 w-1.5 rounded-full ${dotColor(downloading, allGood)}`}
+      />
+      {total === 0 ? "models" : `models ${installed}/${total}`}
+    </button>
+  );
+}
 
 export function App() {
   const probe = useHealthProbe();
@@ -44,9 +83,9 @@ export function App() {
   // Diarize is opt-in to keep the existing whisper-only path unchanged
   // for users who haven't downloaded the embedder yet.
   const [diarize, setDiarize] = useState(false);
-  // Language hint for whisper. `""` = "auto-detect"; defaults to "es"
-  // because Spanish is the primary target language for this build.
   const [language, setLanguage] = useState<string>("es");
+  const [showModels, setShowModels] = useState(false);
+  const modelManager = useModelManager();
 
   // Pressing Start while viewing a stored meeting must also flip the
   // pane back to live so the user sees the new transcript.
@@ -75,8 +114,19 @@ export function App() {
             Private, local-first meeting transcription and AI summaries.
           </p>
         </div>
-        <HealthProbe probe={probe} />
+        <div className="flex items-center gap-2">
+          <ModelStatusBadge
+            models={modelManager.models}
+            downloading={modelManager.downloading !== null}
+            onClick={() => setShowModels(true)}
+          />
+          <HealthProbe probe={probe} />
+        </div>
       </header>
+
+      {showModels && (
+        <ModelManager state={modelManager} onClose={() => setShowModels(false)} />
+      )}
 
       <div className="grid min-h-0 flex-1 grid-cols-1 gap-4 md:grid-cols-[260px_1fr]">
         <Sidebar onGoLive={handleGoLive} />

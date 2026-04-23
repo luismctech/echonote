@@ -270,14 +270,23 @@ impl AppState {
         if let Some(m) = slot.as_ref() {
             return Ok(m.clone());
         }
-        if !self.llm_model_path.exists() {
-            return Err(format!(
-                "LLM model not found at {}. Set ECHO_LLM_MODEL or run \
-                 `scripts/download-models.sh llm`.",
-                self.llm_model_path.display()
-            ));
-        }
-        let path = self.llm_model_path.clone();
+        // Re-resolve: a model may have been downloaded at runtime via
+        // the model manager after the initial path was set at startup.
+        let path = if self.llm_model_path.exists() {
+            self.llm_model_path.clone()
+        } else {
+            let fresh =
+                resolve_asset_path(std::env::var("ECHO_LLM_MODEL").ok(), preferred_llm_model());
+            if !fresh.exists() {
+                return Err(format!(
+                    "LLM model not found at {}. Download one from the Models panel \
+                     or run `scripts/download-models.sh llm`.",
+                    self.llm_model_path.display()
+                ));
+            }
+            tracing::info!(path = %fresh.display(), "re-resolved LLM path after runtime download");
+            fresh
+        };
         let load_opts = LlamaLoadOptions::default();
         // `LlamaCppLlm::load_with` is synchronous (mmap + ggml init);
         // off-load to the blocking pool so we never stall the Tauri
@@ -387,13 +396,21 @@ impl AppState {
         if let Some(t) = slot.as_ref() {
             return Ok(t.clone());
         }
-        if !self.model_path.exists() {
-            return Err(format!(
-                "model not found at {}. Set ECHO_ASR_MODEL or run `scripts/download-models.sh` (downloads multilingual large-v3-turbo by default).",
-                self.model_path.display()
-            ));
-        }
-        let path = self.model_path.clone();
+        let path = if self.model_path.exists() {
+            self.model_path.clone()
+        } else {
+            let fresh =
+                resolve_asset_path(std::env::var("ECHO_ASR_MODEL").ok(), preferred_asr_model());
+            if !fresh.exists() {
+                return Err(format!(
+                    "ASR model not found at {}. Download one from the Models panel \
+                     or run `scripts/download-models.sh`.",
+                    self.model_path.display()
+                ));
+            }
+            tracing::info!(path = %fresh.display(), "re-resolved ASR path after runtime download");
+            fresh
+        };
         let loaded = tokio::task::spawn_blocking(move || WhisperCppTranscriber::load(&path))
             .await
             .map_err(|e| format!("whisper load task panicked: {e}"))?
@@ -839,28 +856,35 @@ pub async fn rename_speaker(
 
 /// Generate (or regenerate) the local-LLM summary for a meeting.
 ///
-/// Triggered explicitly by the UI ("Generate summary" button). The
-/// command loads the LLM lazily on first use, prompts it with the
-/// stored transcript, parses the JSON payload, and persists the
-/// resulting `Summary` to SQLite. Errors are mapped to user-facing
-/// strings so the toast layer can surface them verbatim.
+/// `template` selects the prompt template: `"general"` (default),
+/// `"oneOnOne"`, `"sprintReview"`, `"interview"`, `"salesCall"`, or
+/// `"lecture"`. Passing `null` or omitting the field defaults to
+/// `"general"`.
 #[tauri::command]
 pub async fn summarize_meeting(
     state: State<'_, AppState>,
     meeting_id: MeetingId,
+    template: Option<String>,
 ) -> Result<Summary, String> {
     let llm = state.ensure_llm().await?;
     let use_case = SummarizeMeeting::new(llm, state.store.clone());
-    use_case.execute(meeting_id).await.map_err(|e| match e {
-        SummarizeMeetingError::NotFound(id) => {
-            format!("not found: meeting {id} does not exist")
-        }
-        SummarizeMeetingError::EmptyTranscript(id) => {
-            format!("empty transcript: meeting {id} has no segments to summarise")
-        }
-        SummarizeMeetingError::Llm(err) => format!("llm: {err}"),
-        SummarizeMeetingError::Storage(err) => format!("storage: {err}"),
-    })
+    let tmpl = template.as_deref().unwrap_or("general");
+    use_case
+        .execute(meeting_id, tmpl)
+        .await
+        .map_err(|e| match e {
+            SummarizeMeetingError::NotFound(id) => {
+                format!("not found: meeting {id} does not exist")
+            }
+            SummarizeMeetingError::EmptyTranscript(id) => {
+                format!("empty transcript: meeting {id} has no segments to summarise")
+            }
+            SummarizeMeetingError::InvalidTemplate(t) => {
+                format!("invalid template: {t}")
+            }
+            SummarizeMeetingError::Llm(err) => format!("llm: {err}"),
+            SummarizeMeetingError::Storage(err) => format!("storage: {err}"),
+        })
 }
 
 /// Fetch the most recent summary for a meeting, or `null` when none
@@ -946,10 +970,6 @@ pub async fn ask_about_meeting(
 
     while let Some(event) = stream.next().await {
         if let Err(e) = on_event.send(event) {
-            // Frontend disconnected (component unmount / window
-            // close). Dropping the stream below cascades a clean
-            // shutdown into the decoder thread — see the function
-            // docstring.
             tracing::warn!(
                 error = %e,
                 %meeting_id,
@@ -959,4 +979,202 @@ pub async fn ask_about_meeting(
         }
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Model management
+// ---------------------------------------------------------------------------
+
+/// A downloadable model known to the app.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelInfo {
+    /// Machine-readable id (e.g. `"asr-large-v3-turbo"`).
+    pub id: String,
+    /// Human label shown in the UI.
+    pub label: String,
+    /// Category: `"asr"`, `"llm"`, `"vad"`, or `"embedder"`.
+    pub kind: String,
+    /// Whether the file exists on disk right now.
+    pub present: bool,
+    /// Approximate download size in bytes (for progress UI).
+    pub size_bytes: u64,
+}
+
+/// Catalog of models the app can download, with their HF URLs and
+/// expected sizes. Only includes models the priority resolvers know.
+fn model_catalog() -> Vec<(ModelInfo, &'static str)> {
+    let root = workspace_root();
+    let present = |rel: &str| root.join(rel).exists();
+
+    vec![
+        (
+            ModelInfo {
+                id: "asr-large-v3-turbo".into(),
+                label: "Whisper Large V3 Turbo (multilingual, 1.5 GB)".into(),
+                kind: "asr".into(),
+                present: present("models/asr/ggml-large-v3-turbo.bin"),
+                size_bytes: 1_600_000_000,
+            },
+            "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin",
+        ),
+        (
+            ModelInfo {
+                id: "asr-base".into(),
+                label: "Whisper Base (multilingual, 142 MB)".into(),
+                kind: "asr".into(),
+                present: present("models/asr/ggml-base.bin"),
+                size_bytes: 148_000_000,
+            },
+            "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin",
+        ),
+        (
+            ModelInfo {
+                id: "llm-qwen3-14b".into(),
+                label: "Qwen 3 14B Q4_K_M (9 GB)".into(),
+                kind: "llm".into(),
+                present: present("models/llm/Qwen3-14B-Q4_K_M.gguf"),
+                size_bytes: 9_200_000_000,
+            },
+            "https://huggingface.co/Qwen/Qwen3-14B-GGUF/resolve/main/Qwen3-14B-Q4_K_M.gguf",
+        ),
+        (
+            ModelInfo {
+                id: "llm-qwen3-8b".into(),
+                label: "Qwen 3 8B Q4_K_M (5 GB)".into(),
+                kind: "llm".into(),
+                present: present("models/llm/Qwen3-8B-Q4_K_M.gguf"),
+                size_bytes: 5_200_000_000,
+            },
+            "https://huggingface.co/Qwen/Qwen3-8B-GGUF/resolve/main/Qwen3-8B-Q4_K_M.gguf",
+        ),
+        (
+            ModelInfo {
+                id: "vad-silero".into(),
+                label: "Silero VAD v5 (2 MB)".into(),
+                kind: "vad".into(),
+                present: present("models/vad/silero_vad.onnx"),
+                size_bytes: 2_200_000,
+            },
+            "https://github.com/snakers4/silero-vad/raw/v5.1.2/src/silero_vad/data/silero_vad.onnx",
+        ),
+    ]
+}
+
+/// Map a catalog model id to its relative on-disk path.
+fn model_dest_path(id: &str) -> Option<&'static str> {
+    match id {
+        "asr-large-v3-turbo" => Some("models/asr/ggml-large-v3-turbo.bin"),
+        "asr-base" => Some("models/asr/ggml-base.bin"),
+        "llm-qwen3-14b" => Some("models/llm/Qwen3-14B-Q4_K_M.gguf"),
+        "llm-qwen3-8b" => Some("models/llm/Qwen3-8B-Q4_K_M.gguf"),
+        "vad-silero" => Some("models/vad/silero_vad.onnx"),
+        _ => None,
+    }
+}
+
+/// Return the status of all downloadable models.
+#[tauri::command]
+pub fn get_model_status() -> Vec<ModelInfo> {
+    model_catalog().into_iter().map(|(info, _)| info).collect()
+}
+
+/// Progress events streamed to the frontend during a download.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum DownloadEvent {
+    /// Periodic progress update.
+    #[serde(rename = "progress")]
+    Progress { downloaded: u64, total: u64 },
+    /// Download finished successfully.
+    #[serde(rename = "finished")]
+    Finished,
+    /// Download failed.
+    #[serde(rename = "failed")]
+    Failed { error: String },
+}
+
+/// Download a model by id, streaming progress events to the frontend.
+#[tauri::command]
+pub async fn download_model(
+    model_id: String,
+    on_event: Channel<DownloadEvent>,
+) -> Result<(), String> {
+    let catalog = model_catalog();
+    let (_, url) = catalog
+        .iter()
+        .find(|(info, _)| info.id == model_id)
+        .ok_or_else(|| format!("unknown model: {model_id}"))?;
+    let url = url.to_string();
+
+    let rel_path =
+        model_dest_path(&model_id).ok_or_else(|| format!("no dest path for model: {model_id}"))?;
+    let dest = workspace_root().join(rel_path);
+
+    if let Some(parent) = dest.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|e| format!("failed to create directory: {e}"))?;
+    }
+
+    let tmp = dest.with_extension("part");
+
+    let result = async {
+        let client = reqwest::Client::new();
+        let response = client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| format!("HTTP request failed: {e}"))?;
+
+        if !response.status().is_success() {
+            return Err(format!("HTTP {}", response.status()));
+        }
+
+        let total = response.content_length().unwrap_or(0);
+        let mut downloaded: u64 = 0;
+        let mut stream = response.bytes_stream();
+        let mut file = tokio::fs::File::create(&tmp)
+            .await
+            .map_err(|e| format!("failed to create file: {e}"))?;
+
+        use tokio::io::AsyncWriteExt;
+
+        let mut last_report = std::time::Instant::now();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|e| format!("download stream error: {e}"))?;
+            file.write_all(&chunk)
+                .await
+                .map_err(|e| format!("write error: {e}"))?;
+            downloaded += chunk.len() as u64;
+
+            if last_report.elapsed().as_millis() >= 250 || downloaded == total {
+                let _ = on_event.send(DownloadEvent::Progress { downloaded, total });
+                last_report = std::time::Instant::now();
+            }
+        }
+        file.flush()
+            .await
+            .map_err(|e| format!("flush error: {e}"))?;
+        drop(file);
+
+        tokio::fs::rename(&tmp, &dest)
+            .await
+            .map_err(|e| format!("rename failed: {e}"))?;
+
+        Ok(())
+    }
+    .await;
+
+    match result {
+        Ok(()) => {
+            let _ = on_event.send(DownloadEvent::Finished);
+            Ok(())
+        }
+        Err(e) => {
+            let _ = tokio::fs::remove_file(&tmp).await;
+            let _ = on_event.send(DownloadEvent::Failed { error: e.clone() });
+            Err(e)
+        }
+    }
 }

@@ -1,10 +1,10 @@
 //! Summary entity.
 //!
 //! A [`Summary`] is a structured projection over a [`crate::Meeting`]
-//! produced by the local LLM (CU-04 in the development plan). The MVP
-//! ships only the **General** template (DESIGN.md §3.2.1); the other
-//! five templates land in Sprint 2 — they will reuse this type and add
-//! their own variant of [`SummaryContent`].
+//! produced by the local LLM (CU-04 in the development plan). Six
+//! templates are implemented: General (default), OneOnOne, SprintReview,
+//! Interview, SalesCall, and Lecture — each as a variant of
+//! [`SummaryContent`] (DEVELOPMENT_PLAN.md §3.2).
 //!
 //! ## Why "content" is a discriminated union
 //!
@@ -77,52 +77,165 @@ pub struct ActionItem {
     pub due: Option<String>,
 }
 
+/// A notable quote attributed to a speaker, used by the Interview
+/// template (DEVELOPMENT_PLAN.md §3.2.4).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InterviewQuote {
+    /// Who said it.
+    pub speaker: String,
+    /// Verbatim or near-verbatim quote.
+    pub quote: String,
+    /// Situational context around the quote.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<String>,
+}
+
+/// A term/definition pair extracted from a lecture or class
+/// (DEVELOPMENT_PLAN.md §3.2.6).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Definition {
+    /// The term being defined.
+    pub term: String,
+    /// The definition provided.
+    pub definition: String,
+}
+
 /// Discriminated union over the body of a summary, keyed on the
 /// template that produced it.
 ///
-/// Today only `General` is implemented; the other variants are stubbed
-/// in DESIGN.md §3.2 and will be added one per sprint as the prompt
-/// templates ship. The `#[non_exhaustive]` attribute means consumers
-/// must `_ => …` when matching, so adding new variants later is
-/// non-breaking.
+/// Six content templates are implemented (DEVELOPMENT_PLAN.md §3.2).
+/// The `#[non_exhaustive]` attribute means consumers must `_ => …`
+/// when matching, so adding new variants later is non-breaking.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "template", rename_all_fields = "camelCase")]
 #[non_exhaustive]
 pub enum SummaryContent {
-    /// Default template — works for any meeting type. Mirrors the
-    /// JSON schema in DEVELOPMENT_PLAN.md §3.2.1 verbatim so the LLM's
-    /// output can be deserialized into this variant directly.
-    ///
-    /// `rename_all_fields = "camelCase"` on the enum applies the
-    /// camelCase convention to the inner field names (`key_points`
-    /// → `keyPoints`); the variant tag itself is forced lowercase
-    /// via `#[serde(rename = "...")]` so the wire format stays
-    /// stable independent of the Rust identifier.
+    /// Default template — works for any meeting type (§3.2.1).
     #[serde(rename = "general")]
     General {
         /// 2-3 sentence overview.
         summary: String,
-        /// Bulleted highlights, ordered by importance as decided by
-        /// the model.
+        /// Bulleted highlights.
         #[serde(default)]
         key_points: Vec<String>,
-        /// Decisions taken, with enough context to be intelligible
-        /// without re-reading the transcript.
+        /// Decisions taken.
         #[serde(default)]
         decisions: Vec<String>,
-        /// Action items with optional owner + due date. Empty when the
-        /// transcript had none — *not* the same as the model failing.
+        /// Action items with optional owner + due.
         #[serde(default)]
         action_items: Vec<ActionItem>,
-        /// Questions raised but not answered during the meeting.
+        /// Questions raised but not answered.
         #[serde(default)]
         open_questions: Vec<String>,
     },
-    /// Used as a graceful degradation when JSON parsing fails twice
-    /// in a row (DEVELOPMENT_PLAN.md §3.1 CU-04: "If JSON parsing
-    /// fails, retry once; if it fails again, show free-form text").
-    /// The frontend renders this as a single block of pre-formatted
-    /// text and warns the user that structure was unavailable.
+
+    /// 1:1 meetings between manager and report (§3.2.2).
+    #[serde(rename = "oneOnOne")]
+    OneOnOne {
+        /// 2-3 sentence overview.
+        summary: String,
+        /// Achievements mentioned.
+        #[serde(default)]
+        wins: Vec<String>,
+        /// Obstacles / blockers.
+        #[serde(default)]
+        blockers: Vec<String>,
+        /// Growth / development feedback.
+        #[serde(default)]
+        growth_feedback: Vec<String>,
+        /// Follow-up action items.
+        #[serde(default)]
+        next_steps: Vec<ActionItem>,
+        /// Topics for the next 1:1.
+        #[serde(default)]
+        follow_up_topics: Vec<String>,
+    },
+
+    /// Sprint review / retrospective (§3.2.3).
+    #[serde(rename = "sprintReview")]
+    SprintReview {
+        /// 2-3 sentence overview.
+        summary: String,
+        /// Items completed this sprint.
+        #[serde(default)]
+        completed_items: Vec<String>,
+        /// Items carried to next sprint.
+        #[serde(default)]
+        carry_over: Vec<String>,
+        /// Risks identified.
+        #[serde(default)]
+        risks: Vec<String>,
+        /// Priorities for next sprint.
+        #[serde(default)]
+        next_sprint_priorities: Vec<String>,
+    },
+
+    /// User research or hiring interview (§3.2.4).
+    #[serde(rename = "interview")]
+    Interview {
+        /// 2-3 sentence overview.
+        summary: String,
+        /// Notable quotes from participants.
+        #[serde(default)]
+        quotes: Vec<InterviewQuote>,
+        /// Recurring themes.
+        #[serde(default)]
+        themes: Vec<String>,
+        /// Pain points mentioned.
+        #[serde(default)]
+        pain_points: Vec<String>,
+        /// Opportunities identified.
+        #[serde(default)]
+        opportunities: Vec<String>,
+    },
+
+    /// Sales / discovery call (§3.2.5).
+    #[serde(rename = "salesCall")]
+    SalesCall {
+        /// 2-3 sentence overview.
+        summary: String,
+        /// Background on the customer.
+        #[serde(default)]
+        customer_context: Option<String>,
+        /// Customer pain points.
+        #[serde(default)]
+        pain_points: Vec<String>,
+        /// Positive interest signals.
+        #[serde(default)]
+        interest_signals: Vec<String>,
+        /// Objections raised.
+        #[serde(default)]
+        objections: Vec<String>,
+        /// Follow-up actions.
+        #[serde(default)]
+        next_steps: Vec<ActionItem>,
+        /// Pipeline stage hint (discovery / evaluation / proposal / negotiation).
+        #[serde(default)]
+        deal_stage_indicator: Option<String>,
+    },
+
+    /// Lecture, class, or workshop (§3.2.6).
+    #[serde(rename = "lecture")]
+    Lecture {
+        /// 2-3 sentence overview.
+        summary: String,
+        /// Key concepts taught.
+        #[serde(default)]
+        concepts_covered: Vec<String>,
+        /// Term/definition pairs.
+        #[serde(default)]
+        definitions: Vec<Definition>,
+        /// Illustrative examples.
+        #[serde(default)]
+        examples: Vec<String>,
+        /// Homework or next-session topics.
+        #[serde(default)]
+        homework_or_next: Vec<String>,
+    },
+
+    /// Graceful degradation when JSON parsing fails twice.
     #[serde(rename = "freeText")]
     FreeText {
         /// Whatever the model produced, verbatim.
@@ -138,10 +251,26 @@ impl SummaryContent {
     pub fn template_id(&self) -> &'static str {
         match self {
             SummaryContent::General { .. } => "general",
+            SummaryContent::OneOnOne { .. } => "oneOnOne",
+            SummaryContent::SprintReview { .. } => "sprintReview",
+            SummaryContent::Interview { .. } => "interview",
+            SummaryContent::SalesCall { .. } => "salesCall",
+            SummaryContent::Lecture { .. } => "lecture",
             SummaryContent::FreeText { .. } => "freeText",
         }
     }
 }
+
+/// The six user-facing template identifiers (excludes `freeText`
+/// which is a fallback, not something the user selects).
+pub const TEMPLATE_IDS: &[&str] = &[
+    "general",
+    "oneOnOne",
+    "sprintReview",
+    "interview",
+    "salesCall",
+    "lecture",
+];
 
 /// A persisted LLM summary attached to a [`crate::Meeting`].
 ///
@@ -253,28 +382,85 @@ mod tests {
 
     #[test]
     fn template_id_matches_serde_tag() {
-        // The storage adapter and the SQL `template` column use the
-        // string returned by `template_id()`; this test pins those
-        // values so a careless rename of the enum variant doesn't
-        // silently change the on-disk format.
-        assert_eq!(
-            SummaryContent::General {
-                summary: String::new(),
-                key_points: vec![],
-                decisions: vec![],
-                action_items: vec![],
-                open_questions: vec![],
-            }
-            .template_id(),
-            "general"
-        );
-        assert_eq!(
-            SummaryContent::FreeText {
-                text: String::new()
-            }
-            .template_id(),
-            "freeText"
-        );
+        let cases: Vec<(SummaryContent, &str)> = vec![
+            (
+                SummaryContent::General {
+                    summary: String::new(),
+                    key_points: vec![],
+                    decisions: vec![],
+                    action_items: vec![],
+                    open_questions: vec![],
+                },
+                "general",
+            ),
+            (
+                SummaryContent::OneOnOne {
+                    summary: String::new(),
+                    wins: vec![],
+                    blockers: vec![],
+                    growth_feedback: vec![],
+                    next_steps: vec![],
+                    follow_up_topics: vec![],
+                },
+                "oneOnOne",
+            ),
+            (
+                SummaryContent::SprintReview {
+                    summary: String::new(),
+                    completed_items: vec![],
+                    carry_over: vec![],
+                    risks: vec![],
+                    next_sprint_priorities: vec![],
+                },
+                "sprintReview",
+            ),
+            (
+                SummaryContent::Interview {
+                    summary: String::new(),
+                    quotes: vec![],
+                    themes: vec![],
+                    pain_points: vec![],
+                    opportunities: vec![],
+                },
+                "interview",
+            ),
+            (
+                SummaryContent::SalesCall {
+                    summary: String::new(),
+                    customer_context: None,
+                    pain_points: vec![],
+                    interest_signals: vec![],
+                    objections: vec![],
+                    next_steps: vec![],
+                    deal_stage_indicator: None,
+                },
+                "salesCall",
+            ),
+            (
+                SummaryContent::Lecture {
+                    summary: String::new(),
+                    concepts_covered: vec![],
+                    definitions: vec![],
+                    examples: vec![],
+                    homework_or_next: vec![],
+                },
+                "lecture",
+            ),
+            (
+                SummaryContent::FreeText {
+                    text: String::new(),
+                },
+                "freeText",
+            ),
+        ];
+        for (content, expected_id) in &cases {
+            assert_eq!(content.template_id(), *expected_id);
+            let json = serde_json::to_string(content).unwrap();
+            assert!(
+                json.contains(&format!("\"template\":\"{expected_id}\"")),
+                "template_id '{expected_id}' must match serde tag in JSON: {json}"
+            );
+        }
     }
 
     #[test]

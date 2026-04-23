@@ -37,13 +37,14 @@ use crate::backend::backend_singleton;
 use crate::llama_cpp_chat::LlamaCppChat;
 use crate::shared::LoadedModel;
 
-/// Default context window when the caller does not override it. Most
-/// 7B GGUFs ship with `n_ctx_train = 32_768`, but loading the full
-/// window allocates a lot of KV-cache RAM (~512 MB for 7B Q4_K_M).
-/// 4096 tokens fits a 30-min meeting summary prompt comfortably and
-/// keeps the per-context allocation under 100 MB; callers that need
-/// more can pass `LlamaCppLlm::load_with(path, opts.with_n_ctx(...))`.
-const DEFAULT_N_CTX: u32 = 4_096;
+/// Default context window when the caller does not override it. Both
+/// Qwen 3 8B and 14B ship with `n_ctx_train = 32_768`; 8192 is
+/// generous enough for a full meeting transcript (~6 k chars ≈ 1.7 k
+/// tokens) + system prompt + chat history + 1 k output tokens, while
+/// keeping the per-context KV-cache allocation under ~200 MB for 8B
+/// Q4_K_M. Callers that need more (or want to save RAM) can pass
+/// `LlamaCppLlm::load_with(path, opts.with_n_ctx(...))`.
+const DEFAULT_N_CTX: u32 = 8_192;
 
 /// Number of model layers to offload to the GPU when Metal/CUDA is
 /// available. `999` means "all of them"; llama.cpp clamps internally.
@@ -252,7 +253,9 @@ fn generate_blocking(
     let n_ctx = NonZeroU32::new(inner.n_ctx)
         .ok_or_else(|| DomainError::Invariant("n_ctx must be > 0".into()))?;
 
-    let mut ctx_params = LlamaContextParams::default().with_n_ctx(Some(n_ctx));
+    let mut ctx_params = LlamaContextParams::default()
+        .with_n_ctx(Some(n_ctx))
+        .with_n_batch(inner.n_ctx);
     if let Some(threads) = inner.n_threads {
         ctx_params = ctx_params.with_n_threads(threads);
         ctx_params = ctx_params.with_n_threads_batch(threads);

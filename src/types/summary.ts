@@ -29,34 +29,116 @@ export type ActionItem = {
   due: string | null;
 };
 
-/** General-purpose meeting summary (the only template shipping in v1). */
+export type InterviewQuote = {
+  speaker: string;
+  quote: string;
+  context: string | null;
+};
+
+export type Definition = {
+  term: string;
+  definition: string;
+};
+
+/** General-purpose meeting summary (§3.2.1). */
 export type GeneralSummary = {
   template: "general";
-  /** 2–3 sentence narrative recap. */
   summary: string;
-  /** Bulleted highlights — empty when the meeting was light. */
   keyPoints: string[];
-  /** Decisions taken during the meeting. */
   decisions: string[];
-  /** Action items with optional owner/due metadata. */
   actionItems: ActionItem[];
-  /** Questions raised but not answered. */
   openQuestions: string[];
 };
 
-/**
- * Fallback variant: used by the use case when the LLM keeps
- * returning malformed JSON after one corrective retry. The frontend
- * renders it as a single text block with a "Could not parse —
- * regenerate?" affordance.
- */
+/** 1:1 manager/report meeting (§3.2.2). */
+export type OneOnOneSummary = {
+  template: "oneOnOne";
+  summary: string;
+  wins: string[];
+  blockers: string[];
+  growthFeedback: string[];
+  nextSteps: ActionItem[];
+  followUpTopics: string[];
+};
+
+/** Sprint review / retrospective (§3.2.3). */
+export type SprintReviewSummary = {
+  template: "sprintReview";
+  summary: string;
+  completedItems: string[];
+  carryOver: string[];
+  risks: string[];
+  nextSprintPriorities: string[];
+};
+
+/** User research or hiring interview (§3.2.4). */
+export type InterviewSummary = {
+  template: "interview";
+  summary: string;
+  quotes: InterviewQuote[];
+  themes: string[];
+  painPoints: string[];
+  opportunities: string[];
+};
+
+/** Sales / discovery call (§3.2.5). */
+export type SalesCallSummary = {
+  template: "salesCall";
+  summary: string;
+  customerContext: string | null;
+  painPoints: string[];
+  interestSignals: string[];
+  objections: string[];
+  nextSteps: ActionItem[];
+  dealStageIndicator: string | null;
+};
+
+/** Lecture, class, or workshop (§3.2.6). */
+export type LectureSummary = {
+  template: "lecture";
+  summary: string;
+  conceptsCovered: string[];
+  definitions: Definition[];
+  examples: string[];
+  homeworkOrNext: string[];
+};
+
+/** Fallback when JSON parsing fails twice. */
 export type FreeTextSummary = {
   template: "freeText";
   text: string;
 };
 
 /** Discriminated union of every supported summary template. */
-export type SummaryContent = GeneralSummary | FreeTextSummary;
+export type SummaryContent =
+  | GeneralSummary
+  | OneOnOneSummary
+  | SprintReviewSummary
+  | InterviewSummary
+  | SalesCallSummary
+  | LectureSummary
+  | FreeTextSummary;
+
+/** User-facing template identifiers (excludes freeText). */
+export const TEMPLATE_IDS = [
+  "general",
+  "oneOnOne",
+  "sprintReview",
+  "interview",
+  "salesCall",
+  "lecture",
+] as const;
+
+export type TemplateId = (typeof TEMPLATE_IDS)[number];
+
+export const TEMPLATE_LABELS: Record<TemplateId, string> = {
+  general: "General",
+  oneOnOne: "1:1",
+  sprintReview: "Sprint Review",
+  interview: "Interview",
+  salesCall: "Sales Call",
+  lecture: "Lecture",
+};
 
 /**
  * The persisted summary as the backend returns it. The

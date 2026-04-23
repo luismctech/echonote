@@ -93,7 +93,7 @@ export function ChatPanel({
   return (
     <section
       aria-label="Chat"
-      className="flex min-h-0 flex-col gap-2 rounded-md border border-zinc-100 bg-zinc-50 p-3 dark:border-zinc-900 dark:bg-zinc-900/40"
+      className="flex flex-col gap-2 rounded-md border border-zinc-100 bg-zinc-50 p-3 dark:border-zinc-900 dark:bg-zinc-900"
     >
       {/* Header */}
       <header className="flex items-center justify-between gap-2">
@@ -104,7 +104,7 @@ export function ChatPanel({
       </header>
 
       {/* Messages area */}
-      <div className="flex min-h-[120px] max-h-[320px] flex-col gap-2 overflow-y-auto rounded-md border border-zinc-100 bg-white p-2 dark:border-zinc-800 dark:bg-zinc-900/60">
+      <div className="flex min-h-[120px] max-h-[320px] flex-col gap-2 overflow-y-auto rounded-md border border-zinc-100 bg-white p-2 dark:border-zinc-800 dark:bg-zinc-950">
         {isEmpty && (
           <p className="py-4 text-center text-xs text-zinc-400">
             Ask a question about this meeting's transcript.

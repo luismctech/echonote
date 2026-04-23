@@ -28,13 +28,15 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { getSummary, summarizeMeeting } from "../ipc/client";
 import { useIpcAction } from "../ipc/useIpcAction";
 import type { MeetingId } from "../types/meeting";
-import type { Summary } from "../types/summary";
+import type { Summary, TemplateId } from "../types/summary";
 
 export type UseMeetingSummary = {
   summary: Summary | null;
   loading: boolean;
   generating: boolean;
   error: string | null;
+  selectedTemplate: TemplateId;
+  setSelectedTemplate: (t: TemplateId) => void;
   generate: () => Promise<Summary | undefined>;
 };
 
@@ -43,11 +45,8 @@ export function useMeetingSummary(meetingId: MeetingId | null): UseMeetingSummar
   const [loading, setLoading] = useState(false);
   const [generating, setGenerating] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [selectedTemplate, setSelectedTemplate] = useState<TemplateId>("general");
 
-  // Track the last meeting id we issued a `getSummary` for so a slow
-  // response for the previous meeting can't overwrite the panel after
-  // the user already navigated away. Same pattern `useMeetingDetail`
-  // uses for `getMeeting`.
   const requestedRef = useRef<MeetingId | null>(null);
 
   useEffect(() => {
@@ -67,6 +66,11 @@ export function useMeetingSummary(meetingId: MeetingId | null): UseMeetingSummar
         const fetched = await getSummary(meetingId);
         if (cancelled || requestedRef.current !== meetingId) return;
         setSummary(fetched);
+        // Sync the selector to the loaded template so "Regenerate"
+        // targets the right one.
+        if (fetched) {
+          setSelectedTemplate(fetched.template as TemplateId);
+        }
       } catch (err) {
         if (cancelled || requestedRef.current !== meetingId) return;
         const message = err instanceof Error ? err.message : String(err);
@@ -82,11 +86,6 @@ export function useMeetingSummary(meetingId: MeetingId | null): UseMeetingSummar
     };
   }, [meetingId]);
 
-  // Generation goes through `useIpcAction` so failures auto-toast
-  // with the same UX as every other IPC error. We layer our own
-  // `generating` flag on top because the toast layer doesn't expose
-  // a "request in flight" signal — the SummaryPanel needs it to
-  // disable the button + render a spinner.
   const generateCall = useIpcAction(
     "Couldn't generate summary.",
     summarizeMeeting,
@@ -96,11 +95,7 @@ export function useMeetingSummary(meetingId: MeetingId | null): UseMeetingSummar
     if (!meetingId) return undefined;
     setGenerating(true);
     try {
-      const fresh = await generateCall(meetingId);
-      // Only commit the result if the user hasn't navigated away
-      // mid-generation. The use case still upserted to disk, so
-      // re-opening the meeting will show it — but mutating the panel
-      // for a different meeting would be a UX bug.
+      const fresh = await generateCall(meetingId, selectedTemplate);
       if (fresh && requestedRef.current === meetingId) {
         setSummary(fresh);
       }
@@ -108,7 +103,15 @@ export function useMeetingSummary(meetingId: MeetingId | null): UseMeetingSummar
     } finally {
       setGenerating(false);
     }
-  }, [meetingId, generateCall]);
+  }, [meetingId, selectedTemplate, generateCall]);
 
-  return { summary, loading, generating, error, generate };
+  return {
+    summary,
+    loading,
+    generating,
+    error,
+    selectedTemplate,
+    setSelectedTemplate,
+    generate,
+  };
 }
