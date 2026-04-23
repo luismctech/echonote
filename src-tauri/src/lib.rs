@@ -26,6 +26,7 @@ pub fn run() {
     // is delivered through that subscriber. Reintroduce the plugin only
     // if we move telemetry off `tracing-subscriber`.
     let app = tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             // `AppState::initialize` is async (opens SQLite and runs
             // migrations). Tauri's setup hook is sync but we have a
@@ -50,6 +51,7 @@ pub fn run() {
             commands::summarize_meeting,
             commands::get_summary,
             commands::ask_about_meeting,
+            commands::export_meeting,
             commands::get_model_status,
             commands::download_model,
         ])

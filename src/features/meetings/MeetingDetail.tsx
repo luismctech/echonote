@@ -4,6 +4,7 @@ import { formatDate, formatDurationMs, formatTimestamp } from "../../lib/format"
 import { indexSpeakers, shortTag } from "../../lib/speakers";
 import type { SpeakerId } from "../../types/speaker";
 import type { MainView } from "../../types/view";
+import { ExportButton } from "./ExportButton";
 import { SpeakersPanel } from "./SpeakersPanel";
 import { SummaryPanel } from "./SummaryPanel";
 
@@ -35,13 +36,16 @@ export function MeetingDetail({
   const speakerIndex = indexSpeakers(m.speakers);
   return (
     <>
-      <header className="flex flex-shrink-0 flex-col gap-1">
-        <h2 className="text-base font-medium sm:text-lg">{m.title}</h2>
-        <p className="text-xs text-zinc-500 dark:text-zinc-400">
-          {formatDate(m.startedAt)} · {formatDurationMs(m.durationMs)} ·{" "}
-          {m.language ?? "?"} · {m.segmentCount} segments
-        </p>
-        <p className="font-mono text-[10px] text-zinc-400">{m.id}</p>
+      <header className="flex flex-shrink-0 items-start justify-between gap-2">
+        <div className="flex flex-col gap-1">
+          <h2 className="text-base font-medium sm:text-lg">{m.title}</h2>
+          <p className="text-xs text-zinc-500 dark:text-zinc-400">
+            {formatDate(m.startedAt)} · {formatDurationMs(m.durationMs)} ·{" "}
+            {m.language ?? "?"} · {m.segmentCount} segments
+          </p>
+          <p className="font-mono text-[10px] text-zinc-400">{m.id}</p>
+        </div>
+        <ExportButton meetingId={m.id} title={m.title} />
       </header>
 
       <div className="min-h-0 flex-1 space-y-3 overflow-y-auto">

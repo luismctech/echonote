@@ -172,6 +172,30 @@ export async function getSummary(
 }
 
 // ---------------------------------------------------------------------------
+// Export (CU-08)
+// ---------------------------------------------------------------------------
+
+export type ExportFormat = "markdown" | "txt";
+
+/**
+ * Export a meeting (with its summary, if any) to a file.
+ *
+ * The caller is responsible for obtaining `destPath` via a save-file
+ * dialog before invoking this.
+ */
+export async function exportMeeting(
+  meetingId: MeetingId,
+  format: ExportFormat,
+  destPath: string,
+): Promise<void> {
+  return invoke<void>("export_meeting", {
+    meetingId,
+    format,
+    destPath,
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Model management
 // ---------------------------------------------------------------------------
 
