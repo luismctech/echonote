@@ -6,6 +6,8 @@
  * download button with real-time progress.
  */
 
+import { useTranslation } from "react-i18next";
+
 import type { UseModelManager, DownloadProgress } from "../../hooks/useModelManager";
 import type { ModelInfo } from "../../types/models";
 
@@ -23,6 +25,7 @@ export function ModelManager({
   onClose: () => void;
 }>) {
   const { models, loading, downloading, error } = state;
+  const { t } = useTranslation();
 
   const grouped = groupByKind(models);
 
@@ -30,13 +33,13 @@ export function ModelManager({
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
       <div className="flex max-h-[80vh] w-full max-w-lg flex-col gap-3 overflow-hidden rounded-xl border border-zinc-200 bg-white p-5 shadow-xl dark:border-zinc-800 dark:bg-zinc-950">
         <header className="flex items-center justify-between">
-          <h2 className="text-base font-semibold">Models</h2>
+          <h2 className="text-base font-semibold">{t("models.title")}</h2>
           <button
             type="button"
             onClick={onClose}
             className="rounded-md px-2 py-1 text-xs text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-900"
           >
-            Close
+            {t("models.close")}
           </button>
         </header>
 
@@ -47,7 +50,7 @@ export function ModelManager({
         )}
 
         {loading ? (
-          <p className="py-6 text-center text-sm text-zinc-500">Loading model status…</p>
+          <p className="py-6 text-center text-sm text-zinc-500">{t("models.loading")}</p>
         ) : (
           <div className="flex min-h-0 flex-col gap-4 overflow-y-auto">
             {grouped.map(([kind, items]) => (
@@ -84,10 +87,10 @@ function groupByKind(models: ModelInfo[]): [string, ModelInfo[]][] {
 }
 
 const KIND_LABELS: Record<string, string> = {
-  asr: "Speech Recognition (Whisper)",
-  llm: "Language Model (Summary & Chat)",
-  vad: "Voice Activity Detection",
-  embedder: "Speaker Embedder",
+  asr: "models.asr",
+  llm: "models.llm",
+  vad: "models.vad",
+  embedder: "models.embedder",
 };
 
 function ModelGroup({
@@ -101,10 +104,11 @@ function ModelGroup({
   downloading: DownloadProgress | null;
   onDownload: (id: string) => void;
 }>) {
+  const { t } = useTranslation();
   return (
     <div className="flex flex-col gap-2">
       <h3 className="text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
-        {KIND_LABELS[kind] ?? kind}
+        {t(KIND_LABELS[kind] ?? kind)}
       </h3>
       {models.map((m) => (
         <ModelRow
@@ -127,6 +131,7 @@ function ModelRow({
   downloading: DownloadProgress | null;
   onDownload: (id: string) => void;
 }>) {
+  const { t } = useTranslation();
   const isDownloading = downloading?.modelId === model.id;
   const anyDownloading = downloading !== null;
   const progress =
@@ -156,13 +161,13 @@ function ModelRow({
           </div>
         )}
         {isDownloading && downloading.total === 0 && (
-          <span className="text-[10px] text-zinc-500">Connecting…</span>
+          <span className="text-[10px] text-zinc-500">{t("models.connecting")}</span>
         )}
       </div>
 
       {model.present ? (
         <span className="shrink-0 rounded-md bg-emerald-50 px-2 py-1 text-[10px] font-medium text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300">
-          Installed
+          {t("models.installed")}
         </span>
       ) : (
         <button
@@ -171,7 +176,7 @@ function ModelRow({
           onClick={() => onDownload(model.id)}
           className="shrink-0 rounded-md border border-blue-200 bg-blue-50 px-2.5 py-1 text-xs font-medium text-blue-700 hover:bg-blue-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-blue-800 dark:bg-blue-950/40 dark:text-blue-300 dark:hover:bg-blue-900/60"
         >
-          {isDownloading ? "Downloading…" : `Download (${formatBytes(model.sizeBytes)})`}
+          {isDownloading ? t("models.downloading") : t("models.download", { size: formatBytes(model.sizeBytes) })}
         </button>
       )}
     </div>

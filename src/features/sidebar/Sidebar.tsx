@@ -9,12 +9,15 @@
  * passed down from the Shell instead of being read from context.
  */
 
+import { useTranslation } from "react-i18next";
+
 import { useMeetings } from "../../state/useMeetingsStore";
 import { MeetingsList } from "./MeetingsList";
 import { MeetingsSearchBox } from "./MeetingsSearchBox";
 import { SearchResults } from "./SearchResults";
 
 export function Sidebar({ onGoLive }: { onGoLive: () => void }) {
+  const { t } = useTranslation();
   const {
     meetings,
     meetingsError,
@@ -31,14 +34,14 @@ export function Sidebar({ onGoLive }: { onGoLive: () => void }) {
     <aside className="flex min-h-0 flex-col gap-2 overflow-hidden rounded-lg border border-zinc-200 bg-white p-3 shadow-sm dark:border-zinc-800 dark:bg-zinc-950">
       <header className="flex items-center justify-between">
         <h2 className="text-sm font-semibold tracking-wide text-zinc-700 dark:text-zinc-200">
-          Meetings
+          {t("sidebar.meetings")}
         </h2>
         <button
           type="button"
           onClick={onGoLive}
           className="rounded-md border border-zinc-200 px-2 py-0.5 text-xs text-zinc-600 hover:bg-zinc-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
         >
-          + Live
+          {t("sidebar.live")}
         </button>
       </header>
 

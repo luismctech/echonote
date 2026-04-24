@@ -13,12 +13,15 @@
  */
 
 import { useCallback, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import { HealthProbe } from "./features/live/HealthProbe";
 import { LivePane } from "./features/live/LivePane";
 import { MeetingDetail } from "./features/meetings/MeetingDetail";
 import { ModelManager } from "./features/settings/ModelManager";
+import { LanguageSwitcher } from "./features/settings/LanguageSwitcher";
 import { Sidebar } from "./features/sidebar/Sidebar";
+import { useAutoUpdate } from "./hooks/useAutoUpdate";
 import { useGlobalShortcuts } from "./hooks/useGlobalShortcuts";
 import { useHealthProbe } from "./hooks/useHealthProbe";
 import { useModelManager } from "./hooks/useModelManager";
@@ -63,6 +66,7 @@ function ModelStatusBadge({
 }
 
 export function App() {
+  const { t } = useTranslation();
   const probe = useHealthProbe();
   const { goToLive, refreshMeetings, view, renameSpeaker } = useMeetings();
   // Pull the primitives we depend on out of the hook return so our
@@ -111,18 +115,25 @@ export function App() {
     onStop: stopRecording,
   });
 
+  // Silent auto-update check. Logs to console when a new version is
+  // available; a future iteration can surface this in the UI.
+  useAutoUpdate((version) => {
+    console.info(`[update] new version available: ${version}`);
+  });
+
   return (
     <main className="flex h-full w-full flex-col gap-3 overflow-hidden px-4 py-3 sm:px-6 sm:py-4">
       <header className="flex flex-shrink-0 items-end justify-between gap-4">
         <div className="flex flex-col">
           <h1 className="text-xl font-semibold tracking-tight sm:text-2xl">
-            EchoNote
+            {t("app.title")}
           </h1>
           <p className="hidden text-xs text-zinc-500 dark:text-zinc-400 sm:block">
-            Private, local-first meeting transcription and AI summaries.
+            {t("app.subtitle")}
           </p>
         </div>
         <div className="flex items-center gap-2">
+          <LanguageSwitcher />
           <ModelStatusBadge
             models={modelManager.models}
             downloading={modelManager.downloading !== null}

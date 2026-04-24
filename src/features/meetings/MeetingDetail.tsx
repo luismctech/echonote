@@ -1,3 +1,5 @@
+import { useTranslation } from "react-i18next";
+
 import { SpeakerChip } from "../../components/SpeakerChip";
 import { useMeetingSummary } from "../../hooks/useMeetingSummary";
 import { formatDate, formatDurationMs, formatTimestamp } from "../../lib/format";
@@ -21,14 +23,15 @@ export function MeetingDetail({
 }) {
   const meetingId = view.kind === "meeting" ? view.id : null;
   const summaryState = useMeetingSummary(meetingId);
+  const { t } = useTranslation();
 
   if (view.loading) {
-    return <p className="text-sm text-zinc-500">Loading meeting…</p>;
+    return <p className="text-sm text-zinc-500">{t("meeting.loading")}</p>;
   }
   if (view.error || !view.meeting) {
     return (
       <p className="text-sm text-amber-700 dark:text-amber-400">
-        {view.error ?? "Meeting unavailable."}
+        {view.error ?? t("meeting.unavailable")}
       </p>
     );
   }
@@ -41,7 +44,7 @@ export function MeetingDetail({
           <h2 className="text-base font-medium sm:text-lg">{m.title}</h2>
           <p className="text-xs text-zinc-500 dark:text-zinc-400">
             {formatDate(m.startedAt)} · {formatDurationMs(m.durationMs)} ·{" "}
-            {m.language ?? "?"} · {m.segmentCount} segments
+            {m.language ?? "?"} · {m.segmentCount} {t("meeting.segments")}
           </p>
           <p className="font-mono text-[10px] text-zinc-400">{m.id}</p>
         </div>
@@ -57,7 +60,7 @@ export function MeetingDetail({
 
         <div className="rounded-md border border-zinc-100 bg-zinc-50 p-3 text-sm leading-relaxed dark:border-zinc-900 dark:bg-zinc-900">
           {m.segments.length === 0 ? (
-            <p className="text-zinc-400">No segments persisted for this meeting.</p>
+            <p className="text-zinc-400">{t("meeting.noSegments")}</p>
           ) : (
             <ol className="flex flex-col gap-2">
               {m.segments.map((seg) => {
@@ -81,7 +84,7 @@ export function MeetingDetail({
                       />
                     )}
                     <span className="flex-1">
-                      {seg.text.trim() || "[no speech]"}
+                      {seg.text.trim() || t("meeting.noSpeech")}
                     </span>
                   </li>
                 );

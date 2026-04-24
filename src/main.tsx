@@ -4,6 +4,7 @@ import { App } from "./App";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { ToastProvider } from "./components/Toaster";
 import { MeetingsProvider } from "./state/useMeetingsStore";
+import "./i18n"; // ← initialise i18next before any component renders
 import "./index.css";
 
 const root = document.getElementById("root");

@@ -1,0 +1,155 @@
+{
+  "app": {
+    "title": "EchoNote",
+    "subtitle": "Transcripción de reuniones privada y local con resúmenes de IA."
+  },
+  "sidebar": {
+    "meetings": "Reuniones",
+    "live": "+ En vivo",
+    "searchPlaceholder": "Buscar transcripciones…",
+    "searchLabel": "Buscar transcripciones de reuniones",
+    "clearSearch": "Limpiar búsqueda",
+    "noMeetings": "Sin reuniones aún. Pulsa Iniciar para grabar una.",
+    "seg": "seg",
+    "deleteConfirm": "Eliminar {{title}}"
+  },
+  "search": {
+    "failed": "Error en búsqueda:",
+    "searching": "Buscando…",
+    "noMatches": "Sin resultados para \"{{query}}\".",
+    "rank": "rank"
+  },
+  "live": {
+    "title": "Transcripción en vivo",
+    "description": "Ventanas de 5 s · whisper.cpp · {{label}}",
+    "langHint": "Pista para whisper. 'auto' deja que el modelo detecte.",
+    "langLabel": "Idioma",
+    "langTooltip": "Idioma de transcripción",
+    "langAuto": "auto",
+    "diarize": "Diarizar",
+    "starting": "Iniciando…",
+    "start": "Iniciar",
+    "stopping": "Deteniendo…",
+    "stop": "Detener",
+    "error": "error:",
+    "fatal": "fatal:",
+    "dismiss": "cerrar",
+    "listening": "Escuchando… habla por el micrófono.",
+    "pressStart": "Pulsa Iniciar o ⌘⇧R para comenzar una sesión.",
+    "modelLoads": "el modelo se carga en el primer inicio",
+    "silence": "silencio",
+    "noSpeech": "[sin voz]"
+  },
+  "health": {
+    "warmingUp": "calentando…",
+    "probing": "verificando backend…",
+    "offline": "desconectado",
+    "ok": "backend ok · v{{version}}",
+    "tooltip": "v{{version}} · {{target}} · {{commit}}"
+  },
+  "meeting": {
+    "loading": "Cargando reunión…",
+    "unavailable": "Reunión no disponible.",
+    "segments": "segmentos",
+    "noSegments": "No hay segmentos guardados para esta reunión.",
+    "noSpeech": "[sin voz]"
+  },
+  "export": {
+    "markdown": "Markdown (.md)",
+    "text": "Texto (.txt)",
+    "title": "Exportar reunión",
+    "exporting": "Exportando…",
+    "button": "Exportar ▾"
+  },
+  "speakers": {
+    "label": "Hablantes",
+    "speaker": "Hablante {{n}}",
+    "rename": "Renombrar {{name}}"
+  },
+  "summary": {
+    "label": "Resumen",
+    "loading": "Cargando resumen…",
+    "empty": "Sin resumen aún. Elige una plantilla y pulsa Generar.",
+    "generate": "Generar",
+    "generating": "Generando…",
+    "regenerate": "Regenerar",
+    "unknown": "Plantilla desconocida. Intenta regenerar con una plantilla conocida.",
+    "emptySummary": "[resumen vacío]",
+    "sections": {
+      "keyPoints": "Puntos clave",
+      "decisions": "Decisiones",
+      "openQuestions": "Preguntas abiertas",
+      "actionItems": "Acciones pendientes",
+      "wins": "Logros",
+      "blockers": "Bloqueos",
+      "growthFeedback": "Retroalimentación de crecimiento",
+      "nextSteps": "Próximos pasos",
+      "followUp": "Temas de seguimiento",
+      "completed": "Completado",
+      "carryOver": "Pendientes",
+      "risks": "Riesgos",
+      "nextSprintPriorities": "Prioridades del próximo sprint",
+      "themes": "Temas",
+      "painPoints": "Puntos de dolor",
+      "opportunities": "Oportunidades",
+      "customerContext": "Contexto del cliente",
+      "interestSignals": "Señales de interés",
+      "objections": "Objeciones",
+      "dealStage": "Etapa del deal:",
+      "conceptsCovered": "Conceptos cubiertos",
+      "examples": "Ejemplos",
+      "homeworkNext": "Tarea / siguiente",
+      "notableQuotes": "Citas destacadas",
+      "definitions": "Definiciones"
+    }
+  },
+  "chat": {
+    "label": "Chat",
+    "placeholder": "Pregunta sobre esta reunión…",
+    "send": "Enviar",
+    "noVerifiableCitations": "respuesta sin citas verificables",
+    "scrollToSegment": "Ir al segmento {{id}}…",
+    "description": "Haz una pregunta sobre la transcripción de esta reunión."
+  },
+  "models": {
+    "title": "Modelos",
+    "close": "Cerrar",
+    "loading": "Cargando estado de modelos…",
+    "asr": "Reconocimiento de voz (Whisper)",
+    "llm": "Modelo de lenguaje (Resumen y Chat)",
+    "vad": "Detección de actividad vocal",
+    "embedder": "Embedder de hablantes",
+    "connecting": "Conectando…",
+    "installed": "Instalado",
+    "downloading": "Descargando…",
+    "download": "Descargar ({{size}})"
+  },
+  "errors": {
+    "renderCrash": "fatal — error de renderizado",
+    "crashMessage": "Algo falló en la interfaz de EchoNote.",
+    "crashDetail": "La sesión actual está segura — tus reuniones en disco no se ven afectadas. Puedes copiar el error e intentar de nuevo, o reportar un bug.",
+    "stackTrace": "Stack trace + árbol de componentes",
+    "tryAgain": "Intentar de nuevo",
+    "reloadWindow": "Recargar ventana",
+    "copyError": "Copiar error",
+    "reportBug": "Reportar bug",
+    "streamingFailed": "El streaming falló — puedes reintentar.",
+    "streamingStopFailed": "El streaming falló al detener. Puede que no se haya guardado todo el audio.",
+    "summaryFailed": "No se pudo generar el resumen.",
+    "outsideTauri": "Fuera de Tauri — IPC no disponible con pnpm dev. Usa pnpm tauri:dev.",
+    "healthFailed": "Falló la verificación del backend."
+  },
+  "toast": {
+    "copied": "copiado",
+    "copy": "copiar",
+    "dismiss": "Descartar notificación",
+    "meetingSaved": "Reunión guardada",
+    "meetingDetail": "{{segments}} segmentos · {{seconds}} s"
+  },
+  "stats": {
+    "status": "estado",
+    "chunks": "chunks",
+    "skipped": "omitidos",
+    "audio": "audio"
+  }
+}

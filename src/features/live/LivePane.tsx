@@ -1,4 +1,5 @@
 import type { RefObject } from "react";
+import { useTranslation } from "react-i18next";
 
 import { StatsBar } from "../../components/StatsBar";
 import { statusLabel, type RecordingState } from "../../state/recording";
@@ -11,7 +12,7 @@ function modelLabel(stream: RecordingState): string {
     const { sampleRateHz, channels } = stream.inputFormat;
     return `${sampleRateHz} Hz · ${channels} ch`;
   }
-  return "model loads on first start";
+  return "";
 }
 
 export function LivePane({
@@ -46,6 +47,7 @@ export function LivePane({
   // Toggle is locked once a session is in flight: changing the
   // diarize flag (or language hint) mid-recording would mix
   // half-and-half results and is confusing to render.
+  const { t } = useTranslation();
   const toggleLocked =
     stream.kind === "starting" ||
     stream.kind === "recording" ||
@@ -54,9 +56,9 @@ export function LivePane({
     <>
       <header className="flex flex-shrink-0 flex-wrap items-center justify-between gap-3">
         <div>
-          <h2 className="text-base font-medium sm:text-lg">Live transcript</h2>
+          <h2 className="text-base font-medium sm:text-lg">{t("live.title")}</h2>
           <p className="text-xs text-zinc-500 dark:text-zinc-400">
-            5-second windows · whisper.cpp · {modelLabel(stream)}
+            {t("live.description", { label: modelLabel(stream) || t("live.modelLoads") })}
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-3">
@@ -64,17 +66,17 @@ export function LivePane({
             className={`flex select-none items-center gap-1.5 text-xs ${
               toggleLocked ? "opacity-60" : "cursor-pointer"
             }`}
-            title="Hint passed to whisper. 'auto' lets the model detect."
+            title={t("live.langHint")}
           >
-            <span className="text-zinc-500 dark:text-zinc-400">Lang</span>
+            <span className="text-zinc-500 dark:text-zinc-400">{t("live.langLabel")}</span>
             <select
               value={language}
               disabled={toggleLocked}
               onChange={(e) => onChangeLanguage(e.target.value)}
               className="rounded border border-zinc-200 bg-white px-1.5 py-0.5 text-xs dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200"
-              aria-label="Transcription language"
+              aria-label={t("live.langTooltip")}
             >
-              <option value="">auto</option>
+              <option value="">{t("live.langAuto")}</option>
               <option value="es">es</option>
               <option value="en">en</option>
               <option value="pt">pt</option>
@@ -95,7 +97,7 @@ export function LivePane({
               onChange={(e) => onToggleDiarize(e.target.checked)}
               className="h-3.5 w-3.5 accent-emerald-600"
             />
-            <span className="text-zinc-600 dark:text-zinc-300">Diarize</span>
+            <span className="text-zinc-600 dark:text-zinc-300">{t("live.diarize")}</span>
           </label>
           <button
             type="button"
@@ -103,7 +105,7 @@ export function LivePane({
             disabled={!canStart}
             className="rounded-md bg-emerald-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-emerald-500 disabled:cursor-not-allowed disabled:bg-zinc-300 dark:disabled:bg-zinc-700"
           >
-            {stream.kind === "starting" ? "Starting…" : "Start"}
+            {stream.kind === "starting" ? t("live.starting") : t("live.start")}
           </button>
           <button
             type="button"
@@ -111,7 +113,7 @@ export function LivePane({
             disabled={!canStop}
             className="rounded-md bg-rose-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-rose-500 disabled:cursor-not-allowed disabled:bg-zinc-300 dark:disabled:bg-zinc-700"
           >
-            {stream.kind === "stopping" ? "Stopping…" : "Stop"}
+            {stream.kind === "stopping" ? t("live.stopping") : t("live.stop")}
           </button>
         </div>
       </header>
@@ -120,7 +122,7 @@ export function LivePane({
         <div className="flex items-start justify-between gap-3 rounded-md bg-rose-50 px-3 py-2 text-xs text-rose-900 dark:bg-rose-950/40 dark:text-rose-200">
           <p>
             <strong className="font-semibold">
-              {stream.recoverable ? "error:" : "fatal:"}
+              {stream.recoverable ? t("live.error") : t("live.fatal")}
             </strong>{" "}
             {stream.message}
           </p>
@@ -129,7 +131,7 @@ export function LivePane({
             onClick={onDismissError}
             className="text-xs underline opacity-80 hover:opacity-100"
           >
-            dismiss
+            {t("live.dismiss")}
           </button>
         </div>
       )}
@@ -143,8 +145,8 @@ export function LivePane({
         {lines.length === 0 ? (
           <p className="text-zinc-400">
             {stream.kind === "recording"
-              ? "Listening… speak into the microphone."
-              : "Press Start or ⌘⇧R to begin a session."}
+              ? t("live.listening")
+              : t("live.pressStart")}
           </p>
         ) : (
           <ul className="flex flex-col gap-1">
