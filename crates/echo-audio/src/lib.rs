@@ -24,6 +24,7 @@ pub mod capture;
 pub mod preprocess;
 pub mod sink;
 
+pub use buffer::SamplePool;
 pub use capture::{CpalMicrophoneCapture, RoutingAudioCapture};
 #[cfg(target_os = "macos")]
 pub use capture::{ScreenCaptureKitCapture, SYSTEM_OUTPUT_DEVICE_ID};
