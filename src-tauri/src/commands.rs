@@ -199,7 +199,7 @@ impl AppState {
     /// Build the shared state. Async because opening the SQLite database
     /// runs migrations, which is I/O. The transcriber is *not* loaded
     /// eagerly — the first `start_streaming` call pays that cost.
-    pub async fn initialize() -> Result<Self, IpcError> {
+    pub async fn initialize(app_data_dir: Option<PathBuf>) -> Result<Self, IpcError> {
         // Prefer the multilingual `ggml-base.bin` when it's installed
         // (the user may have downloaded it for Spanish / pt / fr / …),
         // and only fall back to the `.en`-only base if that's all that
@@ -222,7 +222,7 @@ impl AppState {
             "models/vad/silero_vad.onnx",
         );
 
-        let db_path = resolve_db_path();
+        let db_path = resolve_db_path(app_data_dir);
         tracing::info!(
             asr_model = %model_path.display(),
             embed_model = %embed_model_path.display(),
@@ -442,10 +442,32 @@ impl AppState {
 
 /// Resolve the SQLite database path. Honours `ECHO_DB_PATH` for tests
 /// and falls back to `./echonote.db` (next to the binary). A real
-/// installer would point this at the OS-appropriate app-data dir;
-/// that's deferred until Sprint 1 when the installer lands.
-fn resolve_db_path() -> PathBuf {
-    resolve_asset_path(std::env::var("ECHO_DB_PATH").ok(), "echonote.db")
+/// Resolve the database file path.
+///
+/// Priority:
+/// 1. `ECHO_DB_PATH` env var (absolute or workspace-relative) — for
+///    developer overrides and CI.
+/// 2. `app_data_dir` from Tauri (OS-appropriate persistent storage).
+/// 3. `workspace_root()/echonote.db` — last resort for `cargo run`.
+fn resolve_db_path(app_data_dir: Option<PathBuf>) -> PathBuf {
+    if let Some(raw) = std::env::var("ECHO_DB_PATH")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+    {
+        let p = PathBuf::from(&raw);
+        if p.is_absolute() {
+            return p;
+        }
+        let rooted = workspace_root().join(&p);
+        if rooted.exists() {
+            return rooted;
+        }
+        return p;
+    }
+    if let Some(dir) = app_data_dir {
+        return dir.join("echonote.db");
+    }
+    workspace_root().join("echonote.db")
 }
 
 /// Pick the LLM model to load by default, in priority order:
@@ -1017,6 +1039,9 @@ pub enum ExportFormat {
 /// The frontend is responsible for showing the save-file dialog (via
 /// `@tauri-apps/plugin-dialog`) and passing the chosen path here. This
 /// command generates the formatted content and writes it atomically.
+///
+/// **Security:** `dest_path` is validated to be inside the user's home
+/// directory and must not contain path-traversal components (`..`).
 #[tauri::command]
 #[specta::specta]
 pub async fn export_meeting(
@@ -1025,6 +1050,48 @@ pub async fn export_meeting(
     format: ExportFormat,
     dest_path: String,
 ) -> Result<(), IpcError> {
+    // ── Path validation ──────────────────────────────────────────
+    let dest = PathBuf::from(&dest_path);
+    if !dest.is_absolute() {
+        return Err(IpcError::new(
+            ErrorCode::InvalidInput,
+            "export path must be absolute",
+        ));
+    }
+    // Reject explicit traversal components before canonicalizing.
+    if dest
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return Err(IpcError::new(
+            ErrorCode::InvalidInput,
+            "export path must not contain '..' components",
+        ));
+    }
+    let home =
+        dirs::home_dir().ok_or_else(|| IpcError::internal("cannot determine home directory"))?;
+    // Canonicalize the parent (the file itself may not exist yet).
+    let parent = dest.parent().ok_or_else(|| {
+        IpcError::new(
+            ErrorCode::InvalidInput,
+            "export path has no parent directory",
+        )
+    })?;
+    let canonical_parent = parent
+        .canonicalize()
+        .map_err(|e| IpcError::storage(format!("invalid export directory: {e}")))?;
+    if !canonical_parent.starts_with(&home) {
+        return Err(IpcError::new(
+            ErrorCode::InvalidInput,
+            "export path must be within the home directory",
+        ));
+    }
+    let safe_dest = canonical_parent
+        .join(dest.file_name().ok_or_else(|| {
+            IpcError::new(ErrorCode::InvalidInput, "export path has no filename")
+        })?);
+
+    // ── Generate + write ─────────────────────────────────────────
     let meeting = state
         .store
         .get(meeting_id)
@@ -1043,7 +1110,7 @@ pub async fn export_meeting(
         ExportFormat::Txt => render_plain_text(&meeting, summary.as_ref()),
     };
 
-    tokio::fs::write(&dest_path, content.as_bytes())
+    tokio::fs::write(&safe_dest, content.as_bytes())
         .await
         .map_err(|e| IpcError::storage(format!("write file: {e}")))?;
 
@@ -1455,7 +1522,11 @@ pub struct ModelInfo {
 
 /// Catalog of models the app can download, with their HF URLs and
 /// expected sizes. Only includes models the priority resolvers know.
-fn model_catalog() -> Vec<(ModelInfo, &'static str)> {
+///
+/// Each entry carries an optional SHA-256 hex digest. When present,
+/// downloads are verified after completion and rejected on mismatch.
+/// Populate hashes by running `shasum -a 256 <model_file>`.
+fn model_catalog() -> Vec<(ModelInfo, &'static str, Option<&'static str>)> {
     let root = workspace_root();
     let present = |rel: &str| root.join(rel).exists();
 
@@ -1469,6 +1540,7 @@ fn model_catalog() -> Vec<(ModelInfo, &'static str)> {
                 size_bytes: 1_600_000_000,
             },
             "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin",
+            None, // TODO: populate sha256
         ),
         (
             ModelInfo {
@@ -1479,6 +1551,7 @@ fn model_catalog() -> Vec<(ModelInfo, &'static str)> {
                 size_bytes: 574_000_000,
             },
             "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q5_0.bin",
+            None, // TODO: populate sha256
         ),
         (
             ModelInfo {
@@ -1489,6 +1562,7 @@ fn model_catalog() -> Vec<(ModelInfo, &'static str)> {
                 size_bytes: 756_000_000,
             },
             "https://huggingface.co/distil-whisper/distil-large-v3-ggml/resolve/main/ggml-distil-large-v3.bin",
+            None, // TODO: populate sha256
         ),
         (
             ModelInfo {
@@ -1499,6 +1573,7 @@ fn model_catalog() -> Vec<(ModelInfo, &'static str)> {
                 size_bytes: 1_530_000_000,
             },
             "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium.bin",
+            None, // TODO: populate sha256
         ),
         (
             ModelInfo {
@@ -1509,6 +1584,7 @@ fn model_catalog() -> Vec<(ModelInfo, &'static str)> {
                 size_bytes: 488_000_000,
             },
             "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin",
+            None, // TODO: populate sha256
         ),
         (
             ModelInfo {
@@ -1519,6 +1595,7 @@ fn model_catalog() -> Vec<(ModelInfo, &'static str)> {
                 size_bytes: 148_000_000,
             },
             "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin",
+            None, // TODO: populate sha256
         ),
         (
             ModelInfo {
@@ -1529,6 +1606,7 @@ fn model_catalog() -> Vec<(ModelInfo, &'static str)> {
                 size_bytes: 9_200_000_000,
             },
             "https://huggingface.co/Qwen/Qwen3-14B-GGUF/resolve/main/Qwen3-14B-Q4_K_M.gguf",
+            None, // TODO: populate sha256
         ),
         (
             ModelInfo {
@@ -1539,6 +1617,7 @@ fn model_catalog() -> Vec<(ModelInfo, &'static str)> {
                 size_bytes: 5_200_000_000,
             },
             "https://huggingface.co/Qwen/Qwen3-8B-GGUF/resolve/main/Qwen3-8B-Q4_K_M.gguf",
+            None, // TODO: populate sha256
         ),
         (
             ModelInfo {
@@ -1549,6 +1628,7 @@ fn model_catalog() -> Vec<(ModelInfo, &'static str)> {
                 size_bytes: 2_200_000,
             },
             "https://github.com/snakers4/silero-vad/raw/v5.1.2/src/silero_vad/data/silero_vad.onnx",
+            None, // TODO: populate sha256
         ),
     ]
 }
@@ -1573,7 +1653,10 @@ fn model_dest_path(id: &str) -> Option<&'static str> {
 #[tauri::command]
 #[specta::specta]
 pub fn get_model_status() -> Vec<ModelInfo> {
-    model_catalog().into_iter().map(|(info, _)| info).collect()
+    model_catalog()
+        .into_iter()
+        .map(|(info, _, _)| info)
+        .collect()
 }
 
 /// Progress events streamed to the frontend during a download.
@@ -1592,6 +1675,9 @@ pub enum DownloadEvent {
 }
 
 /// Download a model by id, streaming progress events to the frontend.
+///
+/// When the catalog entry includes a SHA-256 digest the downloaded file
+/// is verified before being promoted from `*.part` to its final path.
 #[tauri::command]
 #[specta::specta]
 pub async fn download_model(
@@ -1599,11 +1685,12 @@ pub async fn download_model(
     on_event: Channel<DownloadEvent>,
 ) -> Result<(), IpcError> {
     let catalog = model_catalog();
-    let (_, url) = catalog
+    let (_, url, expected_sha) = catalog
         .iter()
-        .find(|(info, _)| info.id == model_id)
+        .find(|(info, _, _)| info.id == model_id)
         .ok_or_else(|| IpcError::not_found(format!("unknown model: {model_id}")))?;
     let url = url.to_string();
+    let expected_sha = expected_sha.map(|s| s.to_string());
 
     let rel_path = model_dest_path(&model_id)
         .ok_or_else(|| IpcError::not_found(format!("no dest path for model: {model_id}")))?;
@@ -1636,8 +1723,10 @@ pub async fn download_model(
             .await
             .map_err(|e| IpcError::storage(format!("failed to create file: {e}")))?;
 
+        use sha2::{Digest, Sha256};
         use tokio::io::AsyncWriteExt;
 
+        let mut hasher = Sha256::new();
         let mut last_report = std::time::Instant::now();
         while let Some(chunk) = stream.next().await {
             let chunk =
@@ -1645,6 +1734,7 @@ pub async fn download_model(
             file.write_all(&chunk)
                 .await
                 .map_err(|e| IpcError::storage(format!("write error: {e}")))?;
+            hasher.update(&chunk);
             downloaded += chunk.len() as u64;
 
             if last_report.elapsed().as_millis() >= 250 || downloaded == total {
@@ -1656,6 +1746,18 @@ pub async fn download_model(
             .await
             .map_err(|e| IpcError::storage(format!("flush error: {e}")))?;
         drop(file);
+
+        // ── SHA-256 verification (when hash is known) ────────────
+        if let Some(expected) = &expected_sha {
+            let actual = format!("{:x}", hasher.finalize());
+            if actual != *expected {
+                let _ = tokio::fs::remove_file(&tmp).await;
+                return Err(IpcError::new(
+                    ErrorCode::InvalidInput,
+                    format!("SHA-256 mismatch for {model_id}: expected {expected}, got {actual}"),
+                ));
+            }
+        }
 
         tokio::fs::rename(&tmp, &dest)
             .await

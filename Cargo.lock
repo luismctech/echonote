@@ -1391,6 +1391,7 @@ dependencies = [
 name = "echo-shell"
 version = "0.1.0"
 dependencies = [
+ "dirs",
  "echo-app",
  "echo-asr",
  "echo-audio",
@@ -1404,6 +1405,7 @@ dependencies = [
  "reqwest 0.12.28",
  "serde",
  "serde_json",
+ "sha2",
  "specta",
  "specta-typescript",
  "tauri",

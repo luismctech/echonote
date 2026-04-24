@@ -115,8 +115,17 @@ pub fn run() {
 
             // ── App state (SQLite + adapters) ────────────────────
             let handle = app.handle().clone();
-            let state = tauri::async_runtime::block_on(commands::AppState::initialize())
-                .expect("failed to initialize echo-shell state");
+
+            // Resolve the OS-appropriate app-data directory and ensure
+            // it exists before the store tries to open the database.
+            let app_data_dir = handle.path().app_data_dir().ok();
+            if let Some(ref dir) = app_data_dir {
+                std::fs::create_dir_all(dir).expect("failed to create app data directory");
+            }
+
+            let state =
+                tauri::async_runtime::block_on(commands::AppState::initialize(app_data_dir))
+                    .expect("failed to initialize echo-shell state");
             handle.manage(state);
             Ok(())
         })

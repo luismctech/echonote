@@ -438,6 +438,7 @@ impl MeetingStore for SqliteMeetingStore {
                 continue;
             }
             let snippet: String = row.get(7);
+            let snippet = sanitize_fts_snippet(&snippet);
             let rank: f64 = row.get(8);
             hits.push(MeetingSearchHit {
                 meeting: row_to_summary(row)?,
@@ -621,6 +622,23 @@ fn row_to_summary(row: &sqlx::sqlite::SqliteRow) -> Result<MeetingSummary, Domai
 /// then wrap the survivor in double quotes, turning the input into
 /// the safe shape `"tok1" "tok2" "tok3"` (an implicit AND).
 ///
+/// HTML-escape a snippet from FTS5, preserving only `<mark>` and
+/// `</mark>` tags that we control. This prevents any stored text from
+/// being rendered as raw HTML when the frontend uses
+/// `dangerouslySetInnerHTML`.
+fn sanitize_fts_snippet(raw: &str) -> String {
+    // Step 1: escape all HTML-significant characters.
+    let escaped = raw
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;");
+    // Step 2: restore only the FTS5 marker tags.
+    escaped
+        .replace("&lt;mark&gt;", "<mark>")
+        .replace("&lt;/mark&gt;", "</mark>")
+}
+
 /// Returns `None` for empty / whitespace-only / all-stripped inputs
 /// so the caller can short-circuit to "no hits" without ever asking
 /// SQLite. That matches the search port contract.
