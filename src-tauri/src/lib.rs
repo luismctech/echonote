@@ -9,6 +9,8 @@
 mod commands;
 mod ipc_error;
 
+use tauri::menu::{MenuBuilder, MenuItemBuilder};
+use tauri::tray::TrayIconEvent;
 use tauri::Manager;
 
 /// Entry point invoked by `main.rs`. Kept library-friendly so mobile
@@ -68,12 +70,48 @@ pub fn run() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            // Another instance tried to launch — bring the existing
+            // window to the front instead of spawning a duplicate.
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.show();
+                let _ = w.unminimize();
+                let _ = w.set_focus();
+            }
+        }))
         .setup(|app| {
-            // `AppState::initialize` is async (opens SQLite and runs
-            // migrations). Tauri's setup hook is sync but we have a
-            // tokio runtime available via the handle, so we block_on
-            // long enough for the DB to come up. This is fine — the
-            // window has not been shown yet.
+            // ── System tray menu ─────────────────────────────────
+            let show = MenuItemBuilder::with_id("show", "Show EchoNote").build(app)?;
+            let quit = MenuItemBuilder::with_id("quit", "Quit").build(app)?;
+            let menu = MenuBuilder::new(app).items(&[&show, &quit]).build()?;
+
+            if let Some(tray) = app.tray_by_id("main-tray") {
+                tray.set_menu(Some(menu))?;
+                tray.on_menu_event(move |app, event| match event.id().as_ref() {
+                    "show" => {
+                        if let Some(w) = app.get_webview_window("main") {
+                            let _ = w.show();
+                            let _ = w.unminimize();
+                            let _ = w.set_focus();
+                        }
+                    }
+                    "quit" => {
+                        app.exit(0);
+                    }
+                    _ => {}
+                });
+                tray.on_tray_icon_event(|tray, event| {
+                    if matches!(event, TrayIconEvent::Click { .. }) {
+                        if let Some(w) = tray.app_handle().get_webview_window("main") {
+                            let _ = w.show();
+                            let _ = w.unminimize();
+                            let _ = w.set_focus();
+                        }
+                    }
+                });
+            }
+
+            // ── App state (SQLite + adapters) ────────────────────
             let handle = app.handle().clone();
             let state = tauri::async_runtime::block_on(commands::AppState::initialize())
                 .expect("failed to initialize echo-shell state");
@@ -85,35 +123,38 @@ pub fn run() {
         .expect("error while building tauri application");
 
     app.run(|app_handle, event| {
-        if matches!(event, tauri::RunEvent::Exit) {
-            // Run our ordered shutdown *before* the ggml workaround
-            // below: drain in-flight streaming sessions (so the final
-            // Stopped/Failed events get persisted) and close the
-            // SQLite pool (so WAL frames are checkpointed). We block
-            // on the existing async runtime — Tauri keeps it alive
-            // through the Exit event.
-            let state = app_handle.state::<commands::AppState>();
-            tauri::async_runtime::block_on(state.shutdown());
-
-            // Workaround: ggml/whisper.cpp registers a C++ atexit
-            // handler that frees the global Metal device. On macOS that
-            // destructor (`ggml_metal_rsets_free`) calls `ggml_abort`
-            // because a background GCD block (`__ggml_metal_rsets_init`)
-            // is still alive when the process tears down, producing a
-            // SIGABRT every time the user closes the window.
-            //
-            // We sidestep it by jumping straight to `_exit`, which
-            // returns to the kernel without running C/C++ static
-            // destructors. We do this *after* `state.shutdown()` so
-            // every Rust resource we can flush in-process is flushed
-            // first; only the C++ globals are skipped.
-            tracing::info!("echo-shell shutting down (bypassing atexit)");
-            #[cfg(unix)]
-            unsafe {
-                libc::_exit(0);
+        match event {
+            tauri::RunEvent::WindowEvent {
+                label,
+                event: tauri::WindowEvent::CloseRequested { api, .. },
+                ..
+            } if label == "main" => {
+                // Hide to tray instead of quitting — the user can
+                // restore the window from the tray icon or menu.
+                api.prevent_close();
+                if let Some(w) = app_handle.get_webview_window("main") {
+                    let _ = w.hide();
+                }
             }
-            #[cfg(not(unix))]
-            std::process::exit(0);
+            tauri::RunEvent::Exit => {
+                // Ordered shutdown: drain streaming sessions, close SQLite.
+                let state = app_handle.state::<commands::AppState>();
+                tauri::async_runtime::block_on(state.shutdown());
+
+                // Workaround: ggml/whisper.cpp registers a C++ atexit
+                // handler that frees the global Metal device. On macOS
+                // that destructor calls `ggml_abort` because a
+                // background GCD block is still alive at teardown,
+                // producing SIGABRT. `_exit` skips C++ destructors.
+                tracing::info!("echo-shell shutting down (bypassing atexit)");
+                #[cfg(unix)]
+                unsafe {
+                    libc::_exit(0);
+                }
+                #[cfg(not(unix))]
+                std::process::exit(0);
+            }
+            _ => {}
         }
     });
 }

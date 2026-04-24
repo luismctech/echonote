@@ -26,6 +26,11 @@
     "security": {
       "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src ipc: http://ipc.localhost",
       "capabilities": ["default"]
+    },
+    "trayIcon": {
+      "id": "main-tray",
+      "iconPath": "icons/32x32.png",
+      "tooltip": "EchoNote"
     }
   },
   "bundle": {
