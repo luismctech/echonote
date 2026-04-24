@@ -10,6 +10,8 @@
 # Usage:
 #   scripts/download-models.sh                # default: ggml-large-v3-turbo (multilingual)
 #   scripts/download-models.sh large-v3-turbo # ~1.5 GB, multilingual, recommended
+#   scripts/download-models.sh large-v3-turbo-q5_0 # ~574 MB, multilingual, quantized turbo
+#   scripts/download-models.sh distil-large-v3 # ~756 MB, English-only, 5x faster
 #   scripts/download-models.sh large-v3       # ~3.0 GB, multilingual, top quality
 #   scripts/download-models.sh medium         # ~1.5 GB, multilingual
 #   scripts/download-models.sh small          # ~466 MB, multilingual
@@ -137,6 +139,7 @@ expected_size_mib() {
     large-v3)                 echo 2900 ;;
     large-v3-turbo)           echo 1500 ;;
     large-v3-turbo-q5_0)      echo  550 ;;
+    distil-large-v3)          echo  720 ;;
     *)                        echo 0 ;;
   esac
 }
@@ -393,7 +396,34 @@ main() {
       "$helper"
       return
       ;;
-    tiny|tiny.en|base|base.en|small|small.en|medium|medium.en|large-v3|large-v3-turbo)
+    distil-large-v3)
+      # Distil-Whisper uses a different HF repo — handle separately.
+      local fname="ggml-distil-large-v3.bin"
+      local out="${MODELS_DIR}/${fname}"
+      if [[ -f "$out" ]]; then
+        local got_mib
+        got_mib=$(( $(wc -c < "$out") / 1048576 ))
+        if (( got_mib < 650 )); then
+          warn "${fname} present but truncated (${got_mib} MiB). Re-downloading."
+          rm -f "$out"
+        else
+          info "${fname} already present (${got_mib} MiB) — skipping."
+          return
+        fi
+      fi
+      info "Fetching ${fname} → ${out}"
+      if command -v curl >/dev/null 2>&1; then
+        curl --fail --location --progress-bar --output "$out" "$DISTIL_V3_URL"
+      elif command -v wget >/dev/null 2>&1; then
+        wget --show-progress --output-document="$out" "$DISTIL_V3_URL"
+      else
+        fail "Neither curl nor wget is installed."
+      fi
+      local got_mib
+      got_mib=$(( $(wc -c < "$out") / 1048576 ))
+      printf "  ${GRN}✓${RST} %s (%d MiB)\n" "$fname" "$got_mib"
+      ;;
+    tiny|tiny.en|base|base.en|small|small.en|medium|medium.en|large-v3|large-v3-turbo|large-v3-turbo-q5_0)
       download_one "$choice"
       ;;
     *)

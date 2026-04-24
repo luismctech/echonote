@@ -491,11 +491,16 @@ fn preferred_asr_model() -> &'static str {
         // Spanish-first multilingual — best for our target audience.
         "models/asr/ggml-large-v3-turbo-es.bin",
         "models/asr/ggml-large-v3-turbo.bin",
+        // Quantized turbo — same model, ~60% smaller, minimal WER loss.
+        "models/asr/ggml-large-v3-turbo-q5_0.bin",
         "models/asr/ggml-large-v3.bin",
         "models/asr/ggml-medium.bin",
         "models/asr/ggml-small.bin",
         "models/asr/ggml-base.bin",
         "models/asr/ggml-tiny.bin",
+        // English-only fast option — distil-whisper is 5x faster with
+        // minimal WER loss but only supports English.
+        "models/asr/ggml-distil-large-v3.bin",
         // English-only fallbacks (Sprint 0 / dev / benchmark setups).
         "models/asr/ggml-base.en.bin",
         "models/asr/ggml-small.en.bin",
@@ -1467,6 +1472,46 @@ fn model_catalog() -> Vec<(ModelInfo, &'static str)> {
         ),
         (
             ModelInfo {
+                id: "asr-large-v3-turbo-q5".into(),
+                label: "Whisper Large V3 Turbo Q5 (multilingual, 574 MB)".into(),
+                kind: "asr".into(),
+                present: present("models/asr/ggml-large-v3-turbo-q5_0.bin"),
+                size_bytes: 574_000_000,
+            },
+            "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q5_0.bin",
+        ),
+        (
+            ModelInfo {
+                id: "asr-distil-large-v3".into(),
+                label: "Distil-Whisper Large V3 (English, 756 MB, 5x faster)".into(),
+                kind: "asr".into(),
+                present: present("models/asr/ggml-distil-large-v3.bin"),
+                size_bytes: 756_000_000,
+            },
+            "https://huggingface.co/distil-whisper/distil-large-v3-ggml/resolve/main/ggml-distil-large-v3.bin",
+        ),
+        (
+            ModelInfo {
+                id: "asr-medium".into(),
+                label: "Whisper Medium (multilingual, 1.5 GB)".into(),
+                kind: "asr".into(),
+                present: present("models/asr/ggml-medium.bin"),
+                size_bytes: 1_530_000_000,
+            },
+            "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium.bin",
+        ),
+        (
+            ModelInfo {
+                id: "asr-small".into(),
+                label: "Whisper Small (multilingual, 488 MB)".into(),
+                kind: "asr".into(),
+                present: present("models/asr/ggml-small.bin"),
+                size_bytes: 488_000_000,
+            },
+            "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin",
+        ),
+        (
+            ModelInfo {
                 id: "asr-base".into(),
                 label: "Whisper Base (multilingual, 142 MB)".into(),
                 kind: "asr".into(),
@@ -1512,6 +1557,10 @@ fn model_catalog() -> Vec<(ModelInfo, &'static str)> {
 fn model_dest_path(id: &str) -> Option<&'static str> {
     match id {
         "asr-large-v3-turbo" => Some("models/asr/ggml-large-v3-turbo.bin"),
+        "asr-large-v3-turbo-q5" => Some("models/asr/ggml-large-v3-turbo-q5_0.bin"),
+        "asr-distil-large-v3" => Some("models/asr/ggml-distil-large-v3.bin"),
+        "asr-medium" => Some("models/asr/ggml-medium.bin"),
+        "asr-small" => Some("models/asr/ggml-small.bin"),
         "asr-base" => Some("models/asr/ggml-base.bin"),
         "llm-qwen3-14b" => Some("models/llm/Qwen3-14B-Q4_K_M.gguf"),
         "llm-qwen3-8b" => Some("models/llm/Qwen3-8B-Q4_K_M.gguf"),
