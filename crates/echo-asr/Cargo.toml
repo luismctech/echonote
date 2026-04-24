@@ -33,3 +33,10 @@ hound.workspace = true
 pretty_assertions.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[features]
+default = []
+# GPU acceleration — opt-in at build time.
+# Usage: cargo build -p echo-asr --features cuda
+cuda   = ["whisper-rs/cuda"]
+vulkan = ["whisper-rs/vulkan"]

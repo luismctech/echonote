@@ -35,3 +35,10 @@ encoding_rs = { workspace = true }
 [dev-dependencies]
 pretty_assertions.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[features]
+default = []
+# GPU acceleration — opt-in at build time.
+# Usage: cargo build -p echo-llm --features cuda
+cuda   = ["llama-cpp-2/cuda"]
+vulkan = ["llama-cpp-2/vulkan"]

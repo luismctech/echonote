@@ -57,6 +57,11 @@ libc = "0.2"
 # Default features are left empty; the shell opts in to platform backends
 # per build.
 default = []
+# GPU acceleration forwarded to the ASR and LLM crates.
+# Build with: cargo tauri build --features cuda
+#         or: cargo tauri build --features vulkan
+cuda   = ["echo-asr/cuda", "echo-llm/cuda"]
+vulkan = ["echo-asr/vulkan", "echo-llm/vulkan"]
 
 # Debug-only — lints we want turned up inside this crate without blocking
 # the rest of the workspace. Clippy treats this section via Cargo profile
