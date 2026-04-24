@@ -52,6 +52,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use echo_domain::{DomainError, Sample, Vad, VoiceState};
+use tracing::info;
 use tract_onnx::prelude::*;
 
 /// Sample rate Silero VAD v5 was trained for.
@@ -88,6 +89,21 @@ impl Default for SileroVadConfig {
         Self {
             start_threshold: 0.5,
             end_threshold: 0.35,
+            start_frames: 1,
+            end_frames: 16,
+        }
+    }
+}
+
+impl SileroVadConfig {
+    /// Permissive thresholds for meeting transcription where missing
+    /// speech is far more costly than transcribing a quiet moment.
+    /// Works well with re-captured audio (speaker → air → mic) and
+    /// low-gain scenarios.
+    pub fn meetings() -> Self {
+        Self {
+            start_threshold: 0.35,
+            end_threshold: 0.20,
             start_frames: 1,
             end_frames: 16,
         }
@@ -171,7 +187,7 @@ impl SileroVad {
 
     /// Convenience constructor with defaults tuned for meeting audio.
     pub fn for_meetings(path: impl AsRef<Path>) -> Result<Self, DomainError> {
-        Self::from_path(path, SileroVadConfig::default())
+        Self::from_path(path, SileroVadConfig::meetings())
     }
 
     /// Build a fresh detector that **shares this instance's optimized
@@ -267,6 +283,15 @@ impl Vad for SileroVad {
     }
 
     async fn push(&mut self, samples: &[Sample]) -> Result<VoiceState, DomainError> {
+        // Reset the LSTM hidden state at the start of each chunk so
+        // cross-chunk state drift cannot lock the model into permanent
+        // silence. Each 5-second chunk still gets ~156 windows of
+        // intra-chunk LSTM context (plenty for Silero to build a
+        // temporal model). Cross-chunk coherence is provided by the
+        // hysteresis counters (voiced_run / silent_run) which persist
+        // across calls.
+        self.state = zero_state();
+
         // Concat carry + new samples, then drain in 512-sample windows.
         let mut buf: Vec<Sample> = if self.carry.is_empty() {
             samples.to_vec()
@@ -277,17 +302,67 @@ impl Vad for SileroVad {
             b
         };
 
+        // Track whether voice was detected at *any* point during this
+        // push. A 5-second chunk contains ~156 windows; the hysteresis
+        // may flip back to Silence at the tail end even though 3 s of
+        // speech appeared earlier. The caller wants to know "should I
+        // transcribe this chunk?" — the answer is yes if any window
+        // was voiced. We still step the hysteresis on every frame so
+        // the LSTM state stays coherent within this push.
+        let mut any_voiced = false;
+        let mut max_prob: f32 = 0.0;
+        let mut sum_prob: f32 = 0.0;
+        let mut n_windows: u32 = 0;
+        let mut n_above_start: u32 = 0;
+        let mut n_above_end: u32 = 0;
+
         let mut cursor = 0;
         while cursor + SILERO_FRAME_SAMPLES <= buf.len() {
             let prob = self.infer_window(&buf[cursor..cursor + SILERO_FRAME_SAMPLES])?;
             self.step_hysteresis(prob);
+            if self.hysteresis == VoiceState::Voiced {
+                any_voiced = true;
+            }
+            max_prob = max_prob.max(prob);
+            sum_prob += prob;
+            n_windows += 1;
+            if prob >= self.config.start_threshold {
+                n_above_start += 1;
+            }
+            if prob >= self.config.end_threshold {
+                n_above_end += 1;
+            }
             cursor += SILERO_FRAME_SAMPLES;
         }
 
         if cursor < buf.len() {
             self.carry = buf.split_off(cursor);
         }
-        Ok(self.hysteresis)
+
+        let mean_prob = if n_windows > 0 {
+            sum_prob / n_windows as f32
+        } else {
+            0.0
+        };
+
+        let result = if any_voiced {
+            VoiceState::Voiced
+        } else {
+            self.hysteresis
+        };
+
+        info!(
+            windows = n_windows,
+            max_prob = format!("{max_prob:.3}"),
+            mean_prob = format!("{mean_prob:.3}"),
+            above_start = n_above_start,
+            above_end = n_above_end,
+            hysteresis = ?self.hysteresis,
+            result = ?result,
+            "VAD chunk stats"
+        );
+
+        Ok(result)
     }
 
     fn reset(&mut self) {

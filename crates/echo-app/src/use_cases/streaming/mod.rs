@@ -21,6 +21,8 @@
 //! sees this as growing latency rather than dropped audio. A drop
 //! policy can be added in Sprint 1 once metrics are wired.
 
+mod sample_pool;
+
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -279,6 +281,7 @@ async fn run_pipeline(
         ..Default::default()
     };
 
+    let mut pool = sample_pool::SamplePool::new(chunk_samples);
     let mut buffer: Vec<Sample> = Vec::with_capacity(chunk_samples);
     let mut chunk_index: u32 = 0;
     let mut total_audio_ms: u32 = 0;
@@ -304,7 +307,9 @@ async fn run_pipeline(
         }
 
         while buffer.len() >= chunk_samples {
-            let chunk_samples_vec: Vec<Sample> = buffer.drain(..chunk_samples).collect();
+            let mut chunk_buf = pool.checkout();
+            chunk_buf.extend_from_slice(&buffer[..chunk_samples]);
+            buffer.drain(..chunk_samples);
             let offset_ms = total_audio_ms;
             total_audio_ms = total_audio_ms.saturating_add(options.chunk_ms);
 
@@ -319,11 +324,12 @@ async fn run_pipeline(
                 options.chunk_ms,
                 options.silence_rms_threshold,
                 format,
-                chunk_samples_vec,
+                &chunk_buf,
                 &transcribe_options,
                 &events,
             )
             .await;
+            pool.checkin(chunk_buf);
             total_segments = total_segments.saturating_add(segs);
             chunk_index = chunk_index.saturating_add(1);
         }
@@ -335,8 +341,7 @@ async fn run_pipeline(
 
     // Flush whatever is still buffered as a final, possibly-shorter chunk.
     if !buffer.is_empty() {
-        let chunk_samples_vec = std::mem::take(&mut buffer);
-        let chunk_ms = samples_to_ms(chunk_samples_vec.len(), format);
+        let chunk_ms = samples_to_ms(buffer.len(), format);
         let offset_ms = total_audio_ms;
         total_audio_ms = total_audio_ms.saturating_add(chunk_ms);
         let segs = process_chunk(
@@ -350,7 +355,7 @@ async fn run_pipeline(
             chunk_ms,
             options.silence_rms_threshold,
             format,
-            chunk_samples_vec,
+            &buffer,
             &transcribe_options,
             &events,
         )
@@ -387,7 +392,7 @@ async fn process_chunk(
     duration_ms: u32,
     silence_threshold: f32,
     format: AudioFormat,
-    raw_samples: Vec<Sample>,
+    raw_samples: &[Sample],
     transcribe_options: &TranscribeOptions,
     events: &mpsc::Sender<TranscriptEvent>,
 ) -> u32 {
@@ -399,7 +404,7 @@ async fn process_chunk(
     // pure tones) that exceed any reasonable RMS threshold, and the
     // VAD's LSTM needs every chunk in chronological order to keep its
     // temporal model coherent.
-    let chunk_rms = rms(&raw_samples);
+    let chunk_rms = rms(raw_samples);
     if vad.is_none() && silence_threshold > 0.0 && chunk_rms < silence_threshold {
         debug!(%session_id, chunk_index, chunk_rms, "skipping silent chunk (RMS gate)");
         let _ = events
@@ -414,7 +419,7 @@ async fn process_chunk(
         return 0;
     }
 
-    let resampled = match resampler.to_whisper(&raw_samples, format) {
+    let resampled = match resampler.to_whisper(raw_samples, format) {
         Ok(s) => s,
         Err(e) => {
             warn!(error = %e, chunk_index, "resampler failed; dropping chunk");
