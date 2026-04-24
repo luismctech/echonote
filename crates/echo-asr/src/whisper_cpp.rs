@@ -1,13 +1,13 @@
 //! whisper.cpp adapter via [`whisper-rs`].
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use async_trait::async_trait;
 use tracing::{debug, info, instrument};
 use whisper_rs::{
     install_logging_hooks, FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters,
-    WhisperError,
+    WhisperError, WhisperState,
 };
 
 use echo_domain::{
@@ -28,6 +28,12 @@ pub struct WhisperCppTranscriber {
 struct Inner {
     context: WhisperContext,
     model_path: PathBuf,
+    /// Cached [`WhisperState`] to avoid the ~470 MB GPU buffer
+    /// allocation that `create_state()` triggers on Metal per call.
+    /// The state is taken out of the mutex for the duration of each
+    /// `full()` call and returned afterwards so the next invocation
+    /// reuses the same GPU buffers instead of alloc/dealloc cycling.
+    cached_state: Mutex<Option<WhisperState>>,
 }
 
 impl std::fmt::Debug for WhisperCppTranscriber {
@@ -63,10 +69,18 @@ impl WhisperCppTranscriber {
         let context = WhisperContext::new_with_params(path_str, params)
             .map_err(|e| DomainError::ModelNotLoaded(format!("whisper.cpp: {e}")))?;
 
+        // Eagerly create the first state so Metal GPU buffers are
+        // allocated once at load time rather than on the first chunk.
+        let initial_state = context
+            .create_state()
+            .map_err(|e| DomainError::ModelNotLoaded(format!("whisper create_state: {e}")))?;
+        info!("whisper state pre-warmed (GPU buffers allocated once)");
+
         Ok(Self {
             inner: Arc::new(Inner {
                 context,
                 model_path: path.to_path_buf(),
+                cached_state: Mutex::new(Some(initial_state)),
             }),
         })
     }
@@ -100,7 +114,7 @@ impl Transcriber for WhisperCppTranscriber {
 
         // whisper.cpp's full() is CPU/GPU-bound and blocking. Keep the
         // async runtime free.
-        let result = tokio::task::spawn_blocking(move || run_full(&inner.context, &pcm, &opts))
+        let result = tokio::task::spawn_blocking(move || run_full(&inner, &pcm, &opts))
             .await
             .map_err(|e| DomainError::Invariant(format!("transcribe join: {e}")))?;
 
@@ -109,13 +123,21 @@ impl Transcriber for WhisperCppTranscriber {
 }
 
 fn run_full(
-    context: &WhisperContext,
+    inner: &Inner,
     samples: &[f32],
     options: &TranscribeOptions,
 ) -> Result<Transcript, DomainError> {
-    let mut state = context
-        .create_state()
-        .map_err(|e| DomainError::Invariant(format!("whisper create_state: {e}")))?;
+    // Take the cached state (or create a fresh one if somehow missing).
+    let mut state = inner
+        .cached_state
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .take()
+        .or_else(|| {
+            debug!("cached whisper state missing; creating a new one");
+            inner.context.create_state().ok()
+        })
+        .ok_or_else(|| DomainError::Invariant("whisper create_state failed".into()))?;
 
     let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 0 });
     let threads = options
@@ -213,6 +235,14 @@ fn run_full(
 
     let duration_ms =
         ((samples.len() as u64 * 1_000) / u64::from(echo_audio_whisper_rate())) as u32;
+
+    // Return the state to the pool so the next call reuses the GPU
+    // buffers instead of re-allocating ~470 MB on Metal.
+    let _ = inner
+        .cached_state
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .insert(state);
 
     Ok(Transcript {
         segments,

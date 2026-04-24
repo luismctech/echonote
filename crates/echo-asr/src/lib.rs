@@ -14,8 +14,9 @@
 //! `WhisperState::full` is a long-running, blocking call. The adapter
 //! offloads it to [`tokio::task::spawn_blocking`] so the async runtime
 //! stays responsive. The [`WhisperContext`] is `Send + Sync` and held
-//! once per process; new [`WhisperState`]s are cheap and created per
-//! call so concurrent transcriptions do not contend on a single state.
+//! once per process; a single [`WhisperState`] is cached and reused
+//! across calls to avoid the ~470 MB GPU buffer reallocation that
+//! `create_state()` triggers on Metal for every invocation.
 
 #![warn(rust_2018_idioms, clippy::all)]
 

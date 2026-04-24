@@ -17,10 +17,9 @@
 //! └───────────────────────┘                   └─────────────────────┘
 //! ```
 //!
-//! On non-macOS targets the system-output slot is `None` and any
+//! On unsupported targets the system-output slot is `None` and any
 //! request for `AudioSource::SystemOutput` returns
-//! [`DomainError::AudioDeviceUnavailable`] with a clear message —
-//! Sprint 1 only ships the macOS adapter.
+//! [`DomainError::AudioDeviceUnavailable`] with a clear message.
 //!
 //! The composite is intentionally *only* a router. Mixing two streams
 //! into a single [`AudioStream`] (mic + system in the same session)
@@ -36,6 +35,12 @@ use crate::CpalMicrophoneCapture;
 
 #[cfg(target_os = "macos")]
 use crate::ScreenCaptureKitCapture;
+
+#[cfg(target_os = "windows")]
+use crate::WasapiLoopbackCapture;
+
+#[cfg(target_os = "linux")]
+use crate::PulseMonitorCapture;
 
 /// Composite [`AudioCapture`] that delegates to a per-source adapter.
 ///
@@ -82,8 +87,9 @@ impl RoutingAudioCapture {
     /// Build with the default per-OS adapters:
     ///
     /// - microphone: [`CpalMicrophoneCapture`] on every platform.
-    /// - system output: [`ScreenCaptureKitCapture`] on macOS, `None`
-    ///   elsewhere (Linux/Windows adapters land in follow-up issues).
+    /// - system output: [`ScreenCaptureKitCapture`] on macOS,
+    ///   [`WasapiLoopbackCapture`] on Windows,
+    ///   [`PulseMonitorCapture`] on Linux.
     #[must_use]
     pub fn with_default_adapters() -> Self {
         let microphone: Arc<dyn AudioCapture> = Arc::new(CpalMicrophoneCapture::new());
@@ -92,7 +98,15 @@ impl RoutingAudioCapture {
         let system_output: Option<Arc<dyn AudioCapture>> =
             Some(Arc::new(ScreenCaptureKitCapture::new()));
 
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "windows")]
+        let system_output: Option<Arc<dyn AudioCapture>> =
+            Some(Arc::new(WasapiLoopbackCapture::new()));
+
+        #[cfg(target_os = "linux")]
+        let system_output: Option<Arc<dyn AudioCapture>> =
+            Some(Arc::new(PulseMonitorCapture::new()));
+
+        #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
         let system_output: Option<Arc<dyn AudioCapture>> = None;
 
         Self::new(microphone, system_output)
@@ -103,10 +117,7 @@ impl RoutingAudioCapture {
             AudioSource::Microphone => Ok(&self.microphone),
             AudioSource::SystemOutput => self.system_output.as_ref().ok_or_else(|| {
                 DomainError::AudioDeviceUnavailable(
-                    "system audio capture is not available on this build — \
-                     macOS 13+ ships ScreenCaptureKit; Linux/Windows adapters \
-                     are tracked separately"
-                        .into(),
+                    "system audio capture is not available on this platform".into(),
                 )
             }),
         }
