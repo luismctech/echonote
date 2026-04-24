@@ -21,9 +21,10 @@
 //!   matrix proportional to total chunk count.
 //!
 //! The trade-off is sensitivity to the similarity threshold. We pin
-//! a sensible default (`0.78`) calibrated against ERes2Net
-//! embeddings on the VoxConverse subset and let callers override it
-//! through [`OnlineClusterConfig`].
+//! a sensible default (`0.55`) calibrated against ERes2Net
+//! embeddings on streaming 5 s chunks and add a centroid merge pass
+//! (threshold `0.70`) to recover from early mis-splits. Callers can
+//! override both through [`OnlineClusterConfig`].
 //!
 //! ## Centroid update
 //!
@@ -46,6 +47,13 @@ pub struct OnlineClusterConfig {
     /// best-matching centroid for the new chunk to be assigned to
     /// that existing speaker. Below this, a new speaker is spawned
     /// (subject to `max_speakers`).
+    ///
+    /// **Calibration note (2026-04):** 0.78 was too strict for
+    /// streaming 5 s chunks — intra-speaker cosine on short, noisy
+    /// segments frequently falls in the 0.50–0.70 range, causing
+    /// spurious speaker spawns (e.g. 8 detected for 3 real). 0.55
+    /// is the lowest safe value that still discriminates different
+    /// speakers (cross-speaker cosine is typically < 0.35).
     pub similarity_threshold: f32,
 
     /// Hard cap on the number of distinct speakers we will spawn.
@@ -54,13 +62,20 @@ pub struct OnlineClusterConfig {
     /// runaway speaker counts from noisy embeddings on long
     /// recordings.
     pub max_speakers: usize,
+
+    /// Centroid-vs-centroid cosine above which two clusters are
+    /// merged after each assignment. Centroids are running means
+    /// (less noisy than raw embeddings) so this can safely sit above
+    /// `similarity_threshold`. Set to `1.0` to disable merging.
+    pub merge_threshold: f32,
 }
 
 impl Default for OnlineClusterConfig {
     fn default() -> Self {
         Self {
-            similarity_threshold: 0.78,
-            max_speakers: 8,
+            similarity_threshold: 0.55,
+            max_speakers: 6,
+            merge_threshold: 0.70,
         }
     }
 }
@@ -85,6 +100,9 @@ struct Centroid {
 pub struct OnlineCluster {
     config: OnlineClusterConfig,
     centroids: Vec<Centroid>,
+    /// Maps absorbed SpeakerId → surviving SpeakerId so callers can
+    /// retroactively fix already-emitted labels.
+    merge_map: Vec<(SpeakerId, SpeakerId)>,
 }
 
 impl OnlineCluster {
@@ -94,6 +112,7 @@ impl OnlineCluster {
         Self {
             config,
             centroids: Vec::new(),
+            merge_map: Vec::new(),
         }
     }
 
@@ -119,29 +138,38 @@ impl OnlineCluster {
     /// spawn a new one if no centroid is close enough and we still
     /// have headroom. Returns the resulting [`SpeakerId`].
     ///
-    /// The input vector is consumed so the implementation can move
-    /// it into a freshly-created centroid without an extra clone in
-    /// the new-speaker path. Callers that need to keep the vector
-    /// should clone it themselves.
+    /// After assignment, a merge pass checks whether any two
+    /// centroids have converged enough to be combined. This handles
+    /// the "early split, late convergence" pattern common with
+    /// short streaming chunks.
     pub fn assign(&mut self, mut embedding: Vec<f32>) -> SpeakerId {
         l2_normalize(&mut embedding);
 
         let best = self.best_match(&embedding);
 
-        match best {
+        let id = match best {
             Some((idx, sim)) if sim >= self.config.similarity_threshold => {
+                tracing::trace!(speaker_slot = self.centroids[idx].speaker.slot, cosine = %format!("{sim:.3}"), "assign → existing (above threshold)");
                 self.update_centroid(idx, &embedding);
                 self.centroids[idx].speaker.id
             }
-            Some((idx, _)) if self.centroids.len() >= self.config.max_speakers => {
-                // Cap reached: collapse into nearest centroid even
-                // though similarity is below threshold. Prevents
-                // unbounded speaker growth on noisy inputs.
+            Some((idx, sim)) if self.centroids.len() >= self.config.max_speakers => {
+                tracing::trace!(speaker_slot = self.centroids[idx].speaker.slot, cosine = %format!("{sim:.3}"), "assign → forced merge (cap reached)");
                 self.update_centroid(idx, &embedding);
                 self.centroids[idx].speaker.id
             }
-            _ => self.spawn(embedding),
-        }
+            Some((_, sim)) => {
+                tracing::debug!(best_cosine = %format!("{sim:.3}"), n_speakers = self.centroids.len(), "assign → new speaker (below threshold)");
+                self.spawn(embedding)
+            }
+            None => {
+                tracing::debug!("assign → first speaker");
+                self.spawn(embedding)
+            }
+        };
+
+        self.try_merge();
+        id
     }
 
     /// Apply a user label to an existing centroid. Returns `false`
@@ -175,9 +203,89 @@ impl OnlineCluster {
     /// when starting a new meeting with the same diarizer.
     pub fn reset(&mut self) {
         self.centroids.clear();
+        self.merge_map.clear();
+    }
+
+    /// Returns accumulated (absorbed_id → surviving_id) pairs from
+    /// centroid merges since the last reset. The caller (typically
+    /// [`OnlineDiarizer`]) can use this to retroactively update
+    /// already-emitted segment labels.
+    #[must_use]
+    pub fn drain_merge_map(&mut self) -> Vec<(SpeakerId, SpeakerId)> {
+        std::mem::take(&mut self.merge_map)
     }
 
     // ---------------- internals ----------------
+
+    /// After each assignment, scan all centroid pairs. If any two
+    /// centroids have converged above `merge_threshold`, absorb the
+    /// newer (fewer-count) one into the older (more-count) one.
+    /// Repeat until no merge is possible (handles cascading merges).
+    fn try_merge(&mut self) {
+        loop {
+            let pair = self.find_merge_pair();
+            let Some((i, j, sim)) = pair else { break };
+
+            // Keep the centroid with more observations; absorb the
+            // other. On a tie, keep the earlier slot (lower index).
+            let (keep, absorb) = if self.centroids[i].count >= self.centroids[j].count {
+                (i, j)
+            } else {
+                (j, i)
+            };
+
+            let absorbed_id = self.centroids[absorb].speaker.id;
+            let surviving_id = self.centroids[keep].speaker.id;
+
+            // Weighted merge of centroid vectors.
+            let nk = self.centroids[keep].count as f32;
+            let na = self.centroids[absorb].count as f32;
+            let total = nk + na;
+            let absorb_vec = self.centroids[absorb].vector.clone();
+            for (slot, &x) in self.centroids[keep]
+                .vector
+                .iter_mut()
+                .zip(absorb_vec.iter())
+            {
+                *slot = (*slot * nk + x * na) / total;
+            }
+            l2_normalize(&mut self.centroids[keep].vector);
+            self.centroids[keep].count = self.centroids[keep]
+                .count
+                .saturating_add(self.centroids[absorb].count);
+
+            // Preserve any user-assigned label from the absorbed
+            // centroid if the surviving one has none.
+            if self.centroids[keep].speaker.label.is_none() {
+                self.centroids[keep].speaker.label = self.centroids[absorb].speaker.label.clone();
+            }
+
+            tracing::info!(
+                absorbed_slot = self.centroids[absorb].speaker.slot,
+                surviving_slot = self.centroids[keep].speaker.slot,
+                cosine = %format!("{sim:.3}"),
+                remaining = self.centroids.len() - 1,
+                "merged centroids"
+            );
+
+            self.merge_map.push((absorbed_id, surviving_id));
+            self.centroids.remove(absorb);
+        }
+    }
+
+    /// Find the most similar centroid pair above `merge_threshold`.
+    fn find_merge_pair(&self) -> Option<(usize, usize, f32)> {
+        let mut best: Option<(usize, usize, f32)> = None;
+        for i in 0..self.centroids.len() {
+            for j in (i + 1)..self.centroids.len() {
+                let sim = cosine_similarity(&self.centroids[i].vector, &self.centroids[j].vector);
+                if sim >= self.config.merge_threshold && best.as_ref().is_none_or(|b| sim > b.2) {
+                    best = Some((i, j, sim));
+                }
+            }
+        }
+        best
+    }
 
     fn best_match(&self, embedding: &[f32]) -> Option<(usize, f32)> {
         let mut best: Option<(usize, f32)> = None;
@@ -271,6 +379,7 @@ mod tests {
         let cfg = OnlineClusterConfig {
             similarity_threshold: 0.95, // very strict so each chunk is "different"
             max_speakers: 2,
+            merge_threshold: 1.0, // disable merge for this test
         };
         let mut c = OnlineCluster::new(cfg);
         c.assign(at(0.0));
@@ -316,5 +425,43 @@ mod tests {
         }
         let snap_count = c.centroids[0].count;
         assert_eq!(snap_count, 21);
+    }
+
+    #[test]
+    fn merge_pass_combines_close_centroids() {
+        // Use a very strict similarity_threshold so both chunks spawn
+        // separate centroids, then let the merge pass combine them
+        // because cos(5°) ≈ 0.996 > merge_threshold 0.90.
+        let cfg = OnlineClusterConfig {
+            similarity_threshold: 0.999,
+            max_speakers: 10,
+            merge_threshold: 0.90,
+        };
+        let mut c = OnlineCluster::new(cfg);
+        let a = c.assign(at(0.0));
+        let b = c.assign(at(5.0));
+        assert_ne!(a, b, "strict threshold should create two centroids");
+        // The merge pass runs after each assign, so by now they merged.
+        assert_eq!(c.len(), 1, "merge pass should combine close centroids");
+    }
+
+    #[test]
+    fn merge_map_records_absorbed_into_survivor() {
+        let cfg = OnlineClusterConfig {
+            similarity_threshold: 0.999, // every chunk spawns a new centroid
+            max_speakers: 10,
+            merge_threshold: 0.90,
+        };
+        let mut c = OnlineCluster::new(cfg);
+        // Two very close centroids: cos(5°) ≈ 0.996 > 0.90
+        let a = c.assign(at(0.0));
+        let b = c.assign(at(5.0));
+        // The merge pass fires immediately because cos > merge_threshold.
+        assert_eq!(c.len(), 1, "should merge immediately");
+        let map = c.drain_merge_map();
+        assert_eq!(map.len(), 1);
+        // `b` was absorbed into `a` (a has count=1, b has count=1,
+        // tie-break goes to earlier index = a).
+        assert_eq!(map[0], (b, a));
     }
 }
