@@ -126,7 +126,7 @@ pub enum AskAboutMeetingError {
 ///    with the assembled text and parsed citations, **or**
 ///    [`Failed`](Self::Failed) if the adapter raised an error
 ///    mid-stream.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum AskAboutMeetingEvent {
     /// Stream is open; the model is about to start emitting tokens.

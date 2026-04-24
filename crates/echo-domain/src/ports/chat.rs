@@ -74,7 +74,7 @@ use crate::DomainError;
 /// vocabulary exactly so the adapter can fold them into `<|im_start|>`,
 /// `<s>[INST]` or any other model-specific framing without translation
 /// tables.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "lowercase")]
 pub enum ChatRole {
     /// Top-of-conversation instructions — typically the transcript
@@ -95,7 +95,7 @@ pub enum ChatRole {
 /// template format (Qwen's `<|im_start|>system\n…<|im_end|>`, Llama's
 /// `[INST] … [/INST]`, …) wrap each `ChatMessage` accordingly. The
 /// domain layer stays template-agnostic.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ChatMessage {
     /// Who authored this message.

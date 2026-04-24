@@ -20,7 +20,7 @@ use crate::ports::audio::AudioFormat;
 
 /// Strongly-typed identifier for a [`Meeting`]. UUIDv7 keeps lexical
 /// ordering aligned with creation time.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, specta::Type)]
 #[serde(transparent)]
 pub struct MeetingId(pub Uuid);
 
@@ -46,7 +46,7 @@ impl std::fmt::Display for MeetingId {
 
 /// Lightweight projection used by listing endpoints. Holds only what
 /// the UI needs to render a row in the sidebar — *not* the segments.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct MeetingSummary {
     /// Stable identifier.
@@ -80,7 +80,7 @@ pub struct MeetingSummary {
 ///
 /// `serde(rename_all = "camelCase")` keeps the wire format aligned
 /// with the rest of the IPC surface.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct MeetingSearchHit {
     /// Meeting matched by the query.
@@ -96,7 +96,7 @@ pub struct MeetingSearchHit {
 
 /// Full meeting aggregate. Returned by point lookups and includes the
 /// segment list and any diarized speakers.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct Meeting {
     /// Summary projection.

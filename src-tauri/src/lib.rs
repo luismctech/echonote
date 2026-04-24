@@ -7,8 +7,9 @@
 //! handlers.
 
 mod commands;
+mod ipc_error;
 
-use tauri::{generate_handler, Manager};
+use tauri::Manager;
 
 /// Entry point invoked by `main.rs`. Kept library-friendly so mobile
 /// targets (Tauri 2 iOS/Android) can reuse the same builder.
@@ -20,6 +21,45 @@ pub fn run() {
         commit = env!("ECHO_GIT_HASH"),
         "echo-shell starting"
     );
+
+    // Build the tauri-specta binding layer. This collects all
+    // `#[specta::specta]`-annotated commands and their types so they
+    // can be (a) fed to Tauri's invoke handler and (b) exported to
+    // TypeScript at dev time.
+    let specta_builder =
+        tauri_specta::Builder::<tauri::Wry>::new().commands(tauri_specta::collect_commands![
+            commands::health_check,
+            commands::start_streaming,
+            commands::stop_streaming,
+            commands::list_meetings,
+            commands::get_meeting,
+            commands::delete_meeting,
+            commands::rename_speaker,
+            commands::search_meetings,
+            commands::summarize_meeting,
+            commands::get_summary,
+            commands::ask_about_meeting,
+            commands::export_meeting,
+            commands::get_model_status,
+            commands::download_model,
+        ]);
+
+    // In dev builds, export TypeScript bindings so the frontend can
+    // import fully typed command wrappers and domain types from a
+    // single generated file. The file is written at app startup, NOT
+    // on every hot-reload, because we gate on `debug_assertions`.
+    #[cfg(debug_assertions)]
+    {
+        let bindings_path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../src/ipc/bindings.ts");
+        specta_builder
+            .export(
+                specta_typescript::Typescript::default()
+                    .bigint(specta_typescript::BigIntExportBehavior::Number),
+                &bindings_path,
+            )
+            .expect("failed to export tauri-specta TypeScript bindings");
+    }
 
     // NOTE: `tauri-plugin-log` conflicts with `echo_telemetry::init`,
     // which already installs a global `log → tracing` bridge. Logging
@@ -40,22 +80,7 @@ pub fn run() {
             handle.manage(state);
             Ok(())
         })
-        .invoke_handler(generate_handler![
-            commands::health_check,
-            commands::start_streaming,
-            commands::stop_streaming,
-            commands::list_meetings,
-            commands::get_meeting,
-            commands::delete_meeting,
-            commands::rename_speaker,
-            commands::search_meetings,
-            commands::summarize_meeting,
-            commands::get_summary,
-            commands::ask_about_meeting,
-            commands::export_meeting,
-            commands::get_model_status,
-            commands::download_model,
-        ])
+        .invoke_handler(specta_builder.invoke_handler())
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
 

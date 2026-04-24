@@ -17,10 +17,11 @@ use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::task::JoinHandle;
 
+use crate::ipc_error::{ErrorCode, IpcError};
+
 use echo_app::{
-    AskAboutMeeting, AskAboutMeetingError, AskAboutMeetingEvent, MeetingRecorder, RenameSpeaker,
-    RenameSpeakerError, StreamingHandle, StreamingPipeline, SummarizeMeeting,
-    SummarizeMeetingError,
+    AskAboutMeeting, AskAboutMeetingEvent, MeetingRecorder, RenameSpeaker, StreamingHandle,
+    StreamingPipeline, SummarizeMeeting,
 };
 use echo_asr::WhisperCppTranscriber;
 use echo_audio::{RoutingAudioCapture, RubatoResamplerAdapter, SileroVad};
@@ -39,7 +40,7 @@ use futures::stream::StreamExt;
 // ---------------------------------------------------------------------------
 
 /// Result returned by [`health_check`]. Mirrors `HealthStatus` on the TS side.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct HealthStatus {
     /// RFC 3339 timestamp of the probe.
@@ -54,6 +55,7 @@ pub struct HealthStatus {
 
 /// Lightweight probe the frontend calls on mount to confirm the bridge is live.
 #[tauri::command]
+#[specta::specta]
 pub fn health_check() -> HealthStatus {
     let timestamp = OffsetDateTime::now_utc()
         .format(&Rfc3339)
@@ -197,7 +199,7 @@ impl AppState {
     /// Build the shared state. Async because opening the SQLite database
     /// runs migrations, which is I/O. The transcriber is *not* loaded
     /// eagerly — the first `start_streaming` call pays that cost.
-    pub async fn initialize() -> Result<Self, String> {
+    pub async fn initialize() -> Result<Self, IpcError> {
         // Prefer the multilingual `ggml-base.bin` when it's installed
         // (the user may have downloaded it for Spanish / pt / fr / …),
         // and only fall back to the `.en`-only base if that's all that
@@ -229,9 +231,9 @@ impl AppState {
             db_path = %db_path.display(),
             "echo-shell paths resolved"
         );
-        let store = SqliteMeetingStore::open(&db_path)
-            .await
-            .map_err(|e| format!("open meeting store at {}: {e}", db_path.display()))?;
+        let store = SqliteMeetingStore::open(&db_path).await.map_err(|e| {
+            IpcError::storage(format!("open meeting store at {}: {e}", db_path.display()))
+        })?;
         tracing::info!(db_path = %db_path.display(), "meeting store ready");
 
         let store: Arc<dyn MeetingStore> = Arc::new(store);
@@ -265,7 +267,7 @@ impl AppState {
     /// the same loaded model — currently [`Self::ensure_chat`] — can
     /// derive them via [`LlamaCppLlm::chat_handle`]. Trait-object
     /// callers ([`Self::ensure_llm`]) cast on the way out.
-    async fn ensure_llm_concrete(&self) -> Result<Arc<LlamaCppLlm>, String> {
+    async fn ensure_llm_concrete(&self) -> Result<Arc<LlamaCppLlm>, IpcError> {
         let mut slot = self.llm.lock().await;
         if let Some(m) = slot.as_ref() {
             return Ok(m.clone());
@@ -278,11 +280,11 @@ impl AppState {
             let fresh =
                 resolve_asset_path(std::env::var("ECHO_LLM_MODEL").ok(), preferred_llm_model());
             if !fresh.exists() {
-                return Err(format!(
+                return Err(IpcError::model_not_ready(format!(
                     "LLM model not found at {}. Download one from the Models panel \
                      or run `scripts/download-models.sh llm`.",
                     self.llm_model_path.display()
-                ));
+                )));
             }
             tracing::info!(path = %fresh.display(), "re-resolved LLM path after runtime download");
             fresh
@@ -296,8 +298,13 @@ impl AppState {
             move || LlamaCppLlm::load_with(&path, load_opts)
         })
         .await
-        .map_err(|e| format!("LLM load task panicked: {e}"))?
-        .map_err(|e| format!("failed to load LLM at {}: {e}", path.display()))?;
+        .map_err(|e| IpcError::internal(format!("LLM load task panicked: {e}")))?
+        .map_err(|e| {
+            IpcError::new(
+                ErrorCode::Llm,
+                format!("failed to load LLM at {}: {e}", path.display()),
+            )
+        })?;
         let arc = Arc::new(loaded);
         *slot = Some(arc.clone());
         Ok(arc)
@@ -306,7 +313,7 @@ impl AppState {
     /// Lazy `LlmModel` accessor used by `summarize_meeting`. Same
     /// load cost (paid once per process) as [`Self::ensure_chat`];
     /// both share the cached `Arc<LlamaCppLlm>`.
-    async fn ensure_llm(&self) -> Result<Arc<dyn LlmModel>, String> {
+    async fn ensure_llm(&self) -> Result<Arc<dyn LlmModel>, IpcError> {
         Ok(self.ensure_llm_concrete().await? as Arc<dyn LlmModel>)
     }
 
@@ -314,7 +321,7 @@ impl AppState {
     /// Calls [`LlamaCppLlm::chat_handle`] on the cached instance, so
     /// no extra weights are loaded — only the trait-object wrapper is
     /// allocated. Subsequent calls reuse the same loaded model.
-    async fn ensure_chat(&self) -> Result<Arc<dyn ChatAssistant>, String> {
+    async fn ensure_chat(&self) -> Result<Arc<dyn ChatAssistant>, IpcError> {
         let llm = self.ensure_llm_concrete().await?;
         Ok(Arc::new(llm.chat_handle()) as Arc<dyn ChatAssistant>)
     }
@@ -326,18 +333,25 @@ impl AppState {
     /// O(100ms), well under the user-perceptible threshold for a
     /// "Start" click — but cached `tract` graphs could be wired in if
     /// this ever shows up in profiling.
-    fn build_diarizer(&self, override_path: Option<PathBuf>) -> Result<Box<dyn Diarizer>, String> {
+    fn build_diarizer(
+        &self,
+        override_path: Option<PathBuf>,
+    ) -> Result<Box<dyn Diarizer>, IpcError> {
         let path = override_path.unwrap_or_else(|| self.embed_model_path.clone());
         if !path.exists() {
-            return Err(format!(
+            return Err(IpcError::model_not_ready(format!(
                 "speaker embedder not found at {}. Run `scripts/download-models.sh embed` \
                  or set ECHO_EMBED_MODEL.",
                 path.display()
-            ));
+            )));
         }
         let started = std::time::Instant::now();
-        let embedder = Eres2NetEmbedder::new(&path)
-            .map_err(|e| format!("load speaker embedder at {}: {e}", path.display()))?;
+        let embedder = Eres2NetEmbedder::new(&path).map_err(|e| {
+            IpcError::new(
+                ErrorCode::Diarization,
+                format!("load speaker embedder at {}: {e}", path.display()),
+            )
+        })?;
         tracing::info!(
             model = %path.display(),
             load_ms = started.elapsed().as_millis() as u64,
@@ -353,7 +367,7 @@ impl AppState {
     /// and the user sees a one-time warning in the logs. This keeps
     /// EchoNote usable without forcing every install to run
     /// `scripts/download-models.sh vad`.
-    async fn ensure_vad(&self) -> Result<Option<Arc<SileroVad>>, String> {
+    async fn ensure_vad(&self) -> Result<Option<Arc<SileroVad>>, IpcError> {
         let mut slot = self.vad.lock().await;
         if let Some(v) = slot.as_ref() {
             return Ok(Some(v.clone()));
@@ -374,11 +388,14 @@ impl AppState {
         // first session pays the cost.
         let loaded = tokio::task::spawn_blocking(move || SileroVad::for_meetings(&path))
             .await
-            .map_err(|e| format!("Silero VAD load task panicked: {e}"))?
+            .map_err(|e| IpcError::internal(format!("Silero VAD load task panicked: {e}")))?
             .map_err(|e| {
-                format!(
-                    "failed to load Silero VAD at {}: {e}",
-                    self.vad_model_path.display()
+                IpcError::new(
+                    ErrorCode::Vad,
+                    format!(
+                        "failed to load Silero VAD at {}: {e}",
+                        self.vad_model_path.display()
+                    ),
                 )
             })?;
         tracing::info!(
@@ -391,7 +408,7 @@ impl AppState {
         Ok(Some(arc))
     }
 
-    async fn ensure_transcriber(&self) -> Result<Arc<dyn Transcriber>, String> {
+    async fn ensure_transcriber(&self) -> Result<Arc<dyn Transcriber>, IpcError> {
         let mut slot = self.transcriber.lock().await;
         if let Some(t) = slot.as_ref() {
             return Ok(t.clone());
@@ -402,19 +419,21 @@ impl AppState {
             let fresh =
                 resolve_asset_path(std::env::var("ECHO_ASR_MODEL").ok(), preferred_asr_model());
             if !fresh.exists() {
-                return Err(format!(
+                return Err(IpcError::model_not_ready(format!(
                     "ASR model not found at {}. Download one from the Models panel \
                      or run `scripts/download-models.sh`.",
                     self.model_path.display()
-                ));
+                )));
             }
             tracing::info!(path = %fresh.display(), "re-resolved ASR path after runtime download");
             fresh
         };
         let loaded = tokio::task::spawn_blocking(move || WhisperCppTranscriber::load(&path))
             .await
-            .map_err(|e| format!("whisper load task panicked: {e}"))?
-            .map_err(|e| format!("failed to load whisper model: {e}"))?;
+            .map_err(|e| IpcError::internal(format!("whisper load task panicked: {e}")))?
+            .map_err(|e| {
+                IpcError::new(ErrorCode::Asr, format!("failed to load whisper model: {e}"))
+            })?;
         let arc: Arc<dyn Transcriber> = Arc::new(loaded);
         *slot = Some(arc.clone());
         Ok(arc)
@@ -544,7 +563,7 @@ fn workspace_root() -> PathBuf {
 /// IPC mirror of [`echo_domain::AudioSource`] with camelCase naming
 /// so the frontend stays stylistically consistent (the domain enum
 /// uses snake_case for storage / CLI compatibility).
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Copy, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub enum IpcAudioSource {
     /// Default microphone via cpal.
@@ -564,7 +583,7 @@ impl From<IpcAudioSource> for AudioSource {
 
 /// Options the frontend may pass when starting a streaming session.
 /// All fields optional; defaults match `StreamingOptions::default()`.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct StartStreamingOptions {
     /// Capture source. `None` ⇒ microphone, preserving Sprint 0
@@ -607,11 +626,12 @@ pub struct StartStreamingOptions {
 /// invoked or the capture stream ends. Persists to SQLite incrementally
 /// via the [`MeetingRecorder`].
 #[tauri::command]
+#[specta::specta]
 pub async fn start_streaming(
     state: State<'_, AppState>,
     options: Option<StartStreamingOptions>,
     on_event: Channel<TranscriptEvent>,
-) -> Result<StreamingSessionId, String> {
+) -> Result<StreamingSessionId, IpcError> {
     let opts = options.unwrap_or_default();
     let streaming_options = StreamingOptions {
         language: opts.language,
@@ -663,7 +683,7 @@ pub async fn start_streaming(
     let handle = pipeline
         .start_with_spec(spec, streaming_options)
         .await
-        .map_err(|e| format!("failed to start streaming: {e}"))?;
+        .map_err(|e| IpcError::new(ErrorCode::Audio, format!("failed to start streaming: {e}")))?;
     let session_id = handle.session_id();
 
     // Drain the event receiver in a background task. Each event is
@@ -717,7 +737,12 @@ pub async fn start_streaming(
     state
         .sessions
         .lock()
-        .map_err(|e| format!("session map poisoned: {e}"))?
+        .map_err(|e| {
+            IpcError::new(
+                ErrorCode::SessionConflict,
+                format!("session map poisoned: {e}"),
+            )
+        })?
         .insert(
             session_id,
             SessionEntry {
@@ -733,24 +758,29 @@ pub async fn start_streaming(
 /// `Ok(false)` when the session id is unknown (already stopped or
 /// never existed).
 #[tauri::command]
+#[specta::specta]
 pub async fn stop_streaming(
     state: State<'_, AppState>,
     session_id: StreamingSessionId,
-) -> Result<bool, String> {
+) -> Result<bool, IpcError> {
     let entry = state
         .sessions
         .lock()
-        .map_err(|e| format!("session map poisoned: {e}"))?
+        .map_err(|e| {
+            IpcError::new(
+                ErrorCode::SessionConflict,
+                format!("session map poisoned: {e}"),
+            )
+        })?
         .remove(&session_id);
     let Some(entry) = entry else {
         return Ok(false);
     };
     {
         let mut guard = entry.handle.lock().await;
-        guard
-            .stop()
-            .await
-            .map_err(|e| format!("failed to stop pipeline: {e}"))?;
+        guard.stop().await.map_err(|e| {
+            IpcError::new(ErrorCode::Audio, format!("failed to stop pipeline: {e}"))
+        })?;
     }
     let _ = entry.join.await;
     Ok(true)
@@ -762,40 +792,43 @@ pub async fn stop_streaming(
 
 /// List meetings, newest first.
 #[tauri::command]
+#[specta::specta]
 pub async fn list_meetings(
     state: State<'_, AppState>,
     limit: Option<u32>,
-) -> Result<Vec<MeetingSummary>, String> {
+) -> Result<Vec<MeetingSummary>, IpcError> {
     state
         .store
         .list(limit.unwrap_or(0))
         .await
-        .map_err(|e| format!("list meetings: {e}"))
+        .map_err(|e| IpcError::storage(format!("list meetings: {e}")))
 }
 
 /// Fetch a single meeting (header + segments). Returns `null` when
 /// the id does not exist.
 #[tauri::command]
+#[specta::specta]
 pub async fn get_meeting(
     state: State<'_, AppState>,
     id: MeetingId,
-) -> Result<Option<Meeting>, String> {
+) -> Result<Option<Meeting>, IpcError> {
     state
         .store
         .get(id)
         .await
-        .map_err(|e| format!("get meeting: {e}"))
+        .map_err(|e| IpcError::storage(format!("get meeting: {e}")))
 }
 
 /// Delete a meeting and its segments. Returns `true` when the row
 /// existed and was removed.
 #[tauri::command]
-pub async fn delete_meeting(state: State<'_, AppState>, id: MeetingId) -> Result<bool, String> {
+#[specta::specta]
+pub async fn delete_meeting(state: State<'_, AppState>, id: MeetingId) -> Result<bool, IpcError> {
     state
         .store
         .delete(id)
         .await
-        .map_err(|e| format!("delete meeting: {e}"))
+        .map_err(|e| IpcError::storage(format!("delete meeting: {e}")))
 }
 
 /// Full-text search over segment text. Returns one hit per meeting,
@@ -808,16 +841,17 @@ pub async fn delete_meeting(state: State<'_, AppState>, id: MeetingId) -> Result
 /// frontend can pass raw user input without worrying about FTS5
 /// syntax characters.
 #[tauri::command]
+#[specta::specta]
 pub async fn search_meetings(
     state: State<'_, AppState>,
     query: String,
     limit: Option<u32>,
-) -> Result<Vec<MeetingSearchHit>, String> {
+) -> Result<Vec<MeetingSearchHit>, IpcError> {
     state
         .store
         .search(&query, limit.unwrap_or(20))
         .await
-        .map_err(|e| format!("search meetings: {e}"))
+        .map_err(|e| IpcError::storage(format!("search meetings: {e}")))
 }
 
 /// Rename a diarized speaker (or clear the label back to anonymous
@@ -825,29 +859,28 @@ pub async fn search_meetings(
 /// the frontend can re-render speakers + segment chips from a single
 /// source of truth without an extra `get_meeting` round-trip.
 #[tauri::command]
+#[specta::specta]
 pub async fn rename_speaker(
     state: State<'_, AppState>,
     meeting_id: MeetingId,
     speaker_id: SpeakerId,
     label: Option<String>,
-) -> Result<Meeting, String> {
+) -> Result<Meeting, IpcError> {
     state
         .rename_speaker
         .execute(meeting_id, speaker_id, label)
         .await
-        .map_err(|e| match e {
-            RenameSpeakerError::NotFound { .. } => format!("not found: {e}"),
-            RenameSpeakerError::Invalid(msg) => format!("invalid: {msg}"),
-            RenameSpeakerError::Storage(err) => format!("storage: {err}"),
-        })?;
+        .map_err(IpcError::from)?;
     // Re-fetch so the UI sees the canonical post-rename state
     // (including speakers with refreshed labels and segments).
     state
         .store
         .get(meeting_id)
         .await
-        .map_err(|e| format!("reload meeting: {e}"))?
-        .ok_or_else(|| format!("meeting {meeting_id} disappeared after rename"))
+        .map_err(|e| IpcError::storage(format!("reload meeting: {e}")))?
+        .ok_or_else(|| {
+            IpcError::not_found(format!("meeting {meeting_id} disappeared after rename"))
+        })
 }
 
 // ---------------------------------------------------------------------------
@@ -861,30 +894,19 @@ pub async fn rename_speaker(
 /// `"lecture"`. Passing `null` or omitting the field defaults to
 /// `"general"`.
 #[tauri::command]
+#[specta::specta]
 pub async fn summarize_meeting(
     state: State<'_, AppState>,
     meeting_id: MeetingId,
     template: Option<String>,
-) -> Result<Summary, String> {
+) -> Result<Summary, IpcError> {
     let llm = state.ensure_llm().await?;
     let use_case = SummarizeMeeting::new(llm, state.store.clone());
     let tmpl = template.as_deref().unwrap_or("general");
     use_case
         .execute(meeting_id, tmpl)
         .await
-        .map_err(|e| match e {
-            SummarizeMeetingError::NotFound(id) => {
-                format!("not found: meeting {id} does not exist")
-            }
-            SummarizeMeetingError::EmptyTranscript(id) => {
-                format!("empty transcript: meeting {id} has no segments to summarise")
-            }
-            SummarizeMeetingError::InvalidTemplate(t) => {
-                format!("invalid template: {t}")
-            }
-            SummarizeMeetingError::Llm(err) => format!("llm: {err}"),
-            SummarizeMeetingError::Storage(err) => format!("storage: {err}"),
-        })
+        .map_err(IpcError::from)
 }
 
 /// Fetch the most recent summary for a meeting, or `null` when none
@@ -892,15 +914,16 @@ pub async fn summarize_meeting(
 /// mount so the panel can render either the existing summary or the
 /// "Generate" affordance without a redundant generate call.
 #[tauri::command]
+#[specta::specta]
 pub async fn get_summary(
     state: State<'_, AppState>,
     meeting_id: MeetingId,
-) -> Result<Option<Summary>, String> {
+) -> Result<Option<Summary>, IpcError> {
     state
         .store
         .get_summary(meeting_id)
         .await
-        .map_err(|e| format!("get summary: {e}"))
+        .map_err(|e| IpcError::storage(format!("get summary: {e}")))
 }
 
 // ---------------------------------------------------------------------------
@@ -943,30 +966,21 @@ pub async fn get_summary(
 /// any error gets observed by the calling `await` instead of escaping
 /// into a detached `tokio::spawn`.
 #[tauri::command]
+#[specta::specta]
 pub async fn ask_about_meeting(
     state: State<'_, AppState>,
     meeting_id: MeetingId,
     history: Option<Vec<ChatMessage>>,
     question: String,
     on_event: Channel<AskAboutMeetingEvent>,
-) -> Result<(), String> {
+) -> Result<(), IpcError> {
     let chat = state.ensure_chat().await?;
     let use_case = AskAboutMeeting::new(chat, state.store.clone());
 
     let mut stream = use_case
         .execute(meeting_id, history.unwrap_or_default(), question)
         .await
-        .map_err(|e| match e {
-            AskAboutMeetingError::NotFound(id) => {
-                format!("not found: meeting {id} does not exist")
-            }
-            AskAboutMeetingError::EmptyQuestion => "empty question".to_string(),
-            AskAboutMeetingError::EmptyTranscript(id) => {
-                format!("empty transcript: meeting {id} has no segments to chat about")
-            }
-            AskAboutMeetingError::Chat(err) => format!("chat: {err}"),
-            AskAboutMeetingError::Storage(err) => format!("storage: {err}"),
-        })?;
+        .map_err(IpcError::from)?;
 
     while let Some(event) = stream.next().await {
         if let Err(e) = on_event.send(event) {
@@ -986,7 +1000,7 @@ pub async fn ask_about_meeting(
 // ---------------------------------------------------------------------------
 
 /// Supported export formats.
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Copy, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub enum ExportFormat {
     Markdown,
@@ -999,24 +1013,25 @@ pub enum ExportFormat {
 /// `@tauri-apps/plugin-dialog`) and passing the chosen path here. This
 /// command generates the formatted content and writes it atomically.
 #[tauri::command]
+#[specta::specta]
 pub async fn export_meeting(
     state: State<'_, AppState>,
     meeting_id: MeetingId,
     format: ExportFormat,
     dest_path: String,
-) -> Result<(), String> {
+) -> Result<(), IpcError> {
     let meeting = state
         .store
         .get(meeting_id)
         .await
-        .map_err(|e| format!("get meeting: {e}"))?
-        .ok_or_else(|| format!("meeting {meeting_id} not found"))?;
+        .map_err(|e| IpcError::storage(format!("get meeting: {e}")))?
+        .ok_or_else(|| IpcError::not_found(format!("meeting {meeting_id} not found")))?;
 
     let summary = state
         .store
         .get_summary(meeting_id)
         .await
-        .map_err(|e| format!("get summary: {e}"))?;
+        .map_err(|e| IpcError::storage(format!("get summary: {e}")))?;
 
     let content = match format {
         ExportFormat::Markdown => render_markdown(&meeting, summary.as_ref()),
@@ -1025,7 +1040,7 @@ pub async fn export_meeting(
 
     tokio::fs::write(&dest_path, content.as_bytes())
         .await
-        .map_err(|e| format!("write file: {e}"))?;
+        .map_err(|e| IpcError::storage(format!("write file: {e}")))?;
 
     Ok(())
 }
@@ -1418,7 +1433,7 @@ fn txt_list(out: &mut String, heading: &str, items: &[String]) {
 // ---------------------------------------------------------------------------
 
 /// A downloadable model known to the app.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelInfo {
     /// Machine-readable id (e.g. `"asr-large-v3-turbo"`).
@@ -1507,12 +1522,13 @@ fn model_dest_path(id: &str) -> Option<&'static str> {
 
 /// Return the status of all downloadable models.
 #[tauri::command]
+#[specta::specta]
 pub fn get_model_status() -> Vec<ModelInfo> {
     model_catalog().into_iter().map(|(info, _)| info).collect()
 }
 
 /// Progress events streamed to the frontend during a download.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, specta::Type)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum DownloadEvent {
     /// Periodic progress update.
@@ -1528,39 +1544,40 @@ pub enum DownloadEvent {
 
 /// Download a model by id, streaming progress events to the frontend.
 #[tauri::command]
+#[specta::specta]
 pub async fn download_model(
     model_id: String,
     on_event: Channel<DownloadEvent>,
-) -> Result<(), String> {
+) -> Result<(), IpcError> {
     let catalog = model_catalog();
     let (_, url) = catalog
         .iter()
         .find(|(info, _)| info.id == model_id)
-        .ok_or_else(|| format!("unknown model: {model_id}"))?;
+        .ok_or_else(|| IpcError::not_found(format!("unknown model: {model_id}")))?;
     let url = url.to_string();
 
-    let rel_path =
-        model_dest_path(&model_id).ok_or_else(|| format!("no dest path for model: {model_id}"))?;
+    let rel_path = model_dest_path(&model_id)
+        .ok_or_else(|| IpcError::not_found(format!("no dest path for model: {model_id}")))?;
     let dest = workspace_root().join(rel_path);
 
     if let Some(parent) = dest.parent() {
         tokio::fs::create_dir_all(parent)
             .await
-            .map_err(|e| format!("failed to create directory: {e}"))?;
+            .map_err(|e| IpcError::storage(format!("failed to create directory: {e}")))?;
     }
 
     let tmp = dest.with_extension("part");
 
-    let result = async {
+    let result: Result<(), IpcError> = async {
         let client = reqwest::Client::new();
         let response = client
             .get(&url)
             .send()
             .await
-            .map_err(|e| format!("HTTP request failed: {e}"))?;
+            .map_err(|e| IpcError::network(format!("HTTP request failed: {e}")))?;
 
         if !response.status().is_success() {
-            return Err(format!("HTTP {}", response.status()));
+            return Err(IpcError::network(format!("HTTP {}", response.status())));
         }
 
         let total = response.content_length().unwrap_or(0);
@@ -1568,16 +1585,17 @@ pub async fn download_model(
         let mut stream = response.bytes_stream();
         let mut file = tokio::fs::File::create(&tmp)
             .await
-            .map_err(|e| format!("failed to create file: {e}"))?;
+            .map_err(|e| IpcError::storage(format!("failed to create file: {e}")))?;
 
         use tokio::io::AsyncWriteExt;
 
         let mut last_report = std::time::Instant::now();
         while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|e| format!("download stream error: {e}"))?;
+            let chunk =
+                chunk.map_err(|e| IpcError::network(format!("download stream error: {e}")))?;
             file.write_all(&chunk)
                 .await
-                .map_err(|e| format!("write error: {e}"))?;
+                .map_err(|e| IpcError::storage(format!("write error: {e}")))?;
             downloaded += chunk.len() as u64;
 
             if last_report.elapsed().as_millis() >= 250 || downloaded == total {
@@ -1587,12 +1605,12 @@ pub async fn download_model(
         }
         file.flush()
             .await
-            .map_err(|e| format!("flush error: {e}"))?;
+            .map_err(|e| IpcError::storage(format!("flush error: {e}")))?;
         drop(file);
 
         tokio::fs::rename(&tmp, &dest)
             .await
-            .map_err(|e| format!("rename failed: {e}"))?;
+            .map_err(|e| IpcError::storage(format!("rename failed: {e}")))?;
 
         Ok(())
     }
@@ -1605,7 +1623,9 @@ pub async fn download_model(
         }
         Err(e) => {
             let _ = tokio::fs::remove_file(&tmp).await;
-            let _ = on_event.send(DownloadEvent::Failed { error: e.clone() });
+            let _ = on_event.send(DownloadEvent::Failed {
+                error: e.message.clone(),
+            });
             Err(e)
         }
     }

@@ -54,7 +54,7 @@ pub enum AudioSource {
 /// CLI boundary matches the TypeScript `AudioFormat` (`sampleRateHz`,
 /// `channels`). SQLite persistence uses dedicated columns and does
 /// not go through serde, so this rename is purely an IPC concern.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct AudioFormat {
     /// Sampling frequency in hertz.

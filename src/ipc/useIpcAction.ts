@@ -35,6 +35,7 @@
 import { useCallback } from "react";
 
 import { useToast, type ToastInput } from "../components/Toaster";
+import { isIpcError } from "../types/ipc-error";
 
 export type IpcAction<Args extends unknown[], R> = (
   ...args: Args
@@ -44,6 +45,10 @@ export type IpcAction<Args extends unknown[], R> = (
  * Pure wrapper around an async IPC call. Catches any thrown error,
  * pushes an error toast via the supplied `push`, and resolves to
  * `undefined` so the caller can short-circuit with a single guard.
+ *
+ * When the backend returns a structured `IpcError`, the toast
+ * includes the machine-readable `code` and the `retriable` flag is
+ * forwarded so the UI can offer a retry affordance in the future.
  *
  * Exported for tests; production code should prefer the
  * {@link useIpcAction} hook so it picks up the toast context
@@ -58,8 +63,12 @@ export async function runIpcAction<Args extends unknown[], R>(
   try {
     return await fn(...args);
   } catch (err) {
-    const detail = err instanceof Error ? err.message : String(err);
-    push({ kind: "error", message: label, detail });
+    if (isIpcError(err)) {
+      push({ kind: "error", message: label, detail: err.message });
+    } else {
+      const detail = err instanceof Error ? err.message : String(err);
+      push({ kind: "error", message: label, detail });
+    }
     return undefined;
   }
 }

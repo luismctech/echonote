@@ -10,6 +10,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { runIpcAction } from "./useIpcAction";
+import type { IpcError } from "../types/ipc-error";
 
 describe("runIpcAction", () => {
   it("returns the resolved value when the IPC call succeeds", async () => {
@@ -72,6 +73,27 @@ describe("runIpcAction", () => {
       kind: "error",
       message: "label",
       detail: "sync",
+    });
+  });
+
+  it("extracts message from a structured IpcError thrown by the backend", async () => {
+    const push = vi.fn();
+    const ipcErr: IpcError = {
+      code: "notFound",
+      message: "meeting abc123 not found",
+      retriable: false,
+    };
+    const fn = vi.fn(async () => {
+      throw ipcErr;
+    });
+
+    const result = await runIpcAction("Couldn't load meeting.", fn, push, []);
+
+    expect(result).toBeUndefined();
+    expect(push).toHaveBeenCalledWith({
+      kind: "error",
+      message: "Couldn't load meeting.",
+      detail: "meeting abc123 not found",
     });
   });
 });

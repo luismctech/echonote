@@ -30,7 +30,7 @@ use crate::entities::meeting::MeetingId;
 /// Strongly-typed identifier for a [`Summary`]. UUIDv7 keeps lexical
 /// ordering aligned with creation time, the same convention every
 /// other id in this crate uses.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, specta::Type)]
 #[serde(transparent)]
 pub struct SummaryId(pub Uuid);
 
@@ -60,7 +60,7 @@ impl std::fmt::Display for SummaryId {
 /// `None` when the transcript doesn't pin them down. The UI renders
 /// them with sensible placeholders ("unassigned", "no due date") so
 /// the summary remains useful even when partial.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ActionItem {
     /// What needs to be done. Required — an action item without a
@@ -79,7 +79,7 @@ pub struct ActionItem {
 
 /// A notable quote attributed to a speaker, used by the Interview
 /// template (DEVELOPMENT_PLAN.md §3.2.4).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct InterviewQuote {
     /// Who said it.
@@ -93,7 +93,7 @@ pub struct InterviewQuote {
 
 /// A term/definition pair extracted from a lecture or class
 /// (DEVELOPMENT_PLAN.md §3.2.6).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct Definition {
     /// The term being defined.
@@ -108,7 +108,7 @@ pub struct Definition {
 /// Six content templates are implemented (DEVELOPMENT_PLAN.md §3.2).
 /// The `#[non_exhaustive]` attribute means consumers must `_ => …`
 /// when matching, so adding new variants later is non-breaking.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(tag = "template", rename_all_fields = "camelCase")]
 #[non_exhaustive]
 pub enum SummaryContent {
@@ -279,7 +279,7 @@ pub const TEMPLATE_IDS: &[&str] = &[
 /// the [`SummaryContent`] enum so JSON readers see one combined
 /// document instead of `{ "content": { … } }`, matching how the LLM
 /// itself emits the structured output.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct Summary {
     /// Stable identifier.

@@ -15,7 +15,7 @@ use crate::ports::audio::AudioFormat;
 
 /// Identifier of a single streaming session. UUIDv7 keeps insertion
 /// order ≈ creation order, useful for logs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, specta::Type)]
 #[serde(transparent)]
 pub struct StreamingSessionId(pub Uuid);
 
@@ -40,7 +40,7 @@ impl std::fmt::Display for StreamingSessionId {
 }
 
 /// Knobs the caller can pass when starting a streaming pipeline.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, specta::Type)]
 pub struct StreamingOptions {
     /// ISO-639-1 language hint for the ASR backend. `None` ⇒ auto.
     pub language: Option<String>,
@@ -80,7 +80,7 @@ impl Default for StreamingOptions {
 ///
 /// Wire format: tagged with `type` (lowercase) and field names in
 /// `camelCase` for ergonomic consumption from TypeScript.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase", tag = "type")]
 pub enum TranscriptEvent {
     /// Capture has begun. Reports the negotiated input format.

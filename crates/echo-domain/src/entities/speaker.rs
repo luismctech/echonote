@@ -22,7 +22,7 @@ use uuid::Uuid;
 
 /// Strongly-typed speaker identifier. UUIDv7 keeps insertion-time
 /// ordering aligned with creation order.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, specta::Type)]
 #[serde(transparent)]
 pub struct SpeakerId(pub Uuid);
 
@@ -52,7 +52,7 @@ impl std::fmt::Display for SpeakerId {
 /// assigned in arrival order. It drives the UI palette and the
 /// default display name; it is **not** the database primary key
 /// (that's [`SpeakerId`]).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 pub struct Speaker {
     /// Stable identifier.
     pub id: SpeakerId,
