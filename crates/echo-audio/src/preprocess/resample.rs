@@ -13,6 +13,8 @@
 //! reused frame-by-frame; that path lands alongside the streaming ASR
 //! pipeline in Sprint 1.
 
+use std::sync::Mutex;
+
 use rubato::{
     Resampler as RubatoResampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType,
     WindowFunction,
@@ -92,19 +94,11 @@ fn downmix_to_mono(samples: &[Sample], channels: u16) -> Vec<Sample> {
     out
 }
 
-/// Resample a mono buffer from `from_hz` to `to_hz` using rubato's
-/// asynchronous sinc resampler with a balanced quality/speed preset.
-fn resample_mono(
-    samples: &[Sample],
-    from_hz: u32,
-    to_hz: u32,
-) -> Result<Vec<Sample>, ResampleError> {
-    if samples.is_empty() {
-        return Ok(Vec::new());
-    }
+/// Internal chunk size for rubato processing (input frames per call).
+const RESAMPLE_CHUNK_SIZE: usize = 1024;
 
-    // Balanced preset: 256-tap sinc, oversampling 256, Blackman-Harris
-    // window. This gets ~96 dB SNR — well below Whisper's noise floor.
+/// Build a fresh [`SincFixedIn`] resampler for the given rate pair.
+fn make_sinc_resampler(from_hz: u32, to_hz: u32) -> Result<SincFixedIn<f32>, ResampleError> {
     let params = SincInterpolationParameters {
         sinc_len: 256,
         f_cutoff: 0.95,
@@ -112,42 +106,96 @@ fn resample_mono(
         oversampling_factor: 256,
         window: WindowFunction::BlackmanHarris2,
     };
-    let chunk_size: usize = 1024;
     let ratio = f64::from(to_hz) / f64::from(from_hz);
+    SincFixedIn::<f32>::new(ratio, 2.0, params, RESAMPLE_CHUNK_SIZE, 1)
+        .map_err(|e| ResampleError::Rubato(e.to_string()))
+}
 
-    let mut resampler = SincFixedIn::<f32>::new(ratio, 2.0, params, chunk_size, 1)
-        .map_err(|e| ResampleError::Rubato(e.to_string()))?;
+/// Push `samples` through an already-constructed resampler.
+fn process_mono(
+    resampler: &mut SincFixedIn<f32>,
+    samples: &[Sample],
+    ratio: f64,
+) -> Result<Vec<Sample>, ResampleError> {
+    if samples.is_empty() {
+        return Ok(Vec::new());
+    }
 
-    // Pad the input with zeros so rubato can produce the very last
-    // chunk. Output is trimmed to the exact expected length below.
     let total_in = samples.len();
     let expected_out = ((total_in as f64) * ratio).round() as usize;
 
-    let mut input = Vec::with_capacity(total_in + chunk_size);
+    let mut input = Vec::with_capacity(total_in + RESAMPLE_CHUNK_SIZE);
     input.extend_from_slice(samples);
-    let pad = (chunk_size - (total_in % chunk_size)) % chunk_size;
+    let pad = (RESAMPLE_CHUNK_SIZE - (total_in % RESAMPLE_CHUNK_SIZE)) % RESAMPLE_CHUNK_SIZE;
     input.resize(total_in + pad, 0.0);
 
-    let mut output: Vec<f32> = Vec::with_capacity(expected_out + chunk_size);
+    let mut output: Vec<f32> = Vec::with_capacity(expected_out + RESAMPLE_CHUNK_SIZE);
     let mut cursor = 0;
-    while cursor + chunk_size <= input.len() {
-        let in_frame = vec![&input[cursor..cursor + chunk_size]];
+    while cursor + RESAMPLE_CHUNK_SIZE <= input.len() {
+        let in_frame = vec![&input[cursor..cursor + RESAMPLE_CHUNK_SIZE]];
         let out_frame = resampler
             .process(&in_frame, None)
             .map_err(|e| ResampleError::Rubato(e.to_string()))?;
         output.extend_from_slice(&out_frame[0]);
-        cursor += chunk_size;
+        cursor += RESAMPLE_CHUNK_SIZE;
     }
 
     output.truncate(expected_out);
     Ok(output)
 }
 
-/// Stateless adapter that satisfies the [`echo_domain::Resampler`] port
-/// using [`resample_to_whisper`]. Cheap to clone; safe to share across
-/// async tasks.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct RubatoResamplerAdapter;
+/// Resample a mono buffer from `from_hz` to `to_hz` using rubato's
+/// asynchronous sinc resampler with a balanced quality/speed preset.
+///
+/// Creates a fresh resampler each call — use [`RubatoResamplerAdapter`]
+/// for the streaming path where the sinc kernel is cached.
+fn resample_mono(
+    samples: &[Sample],
+    from_hz: u32,
+    to_hz: u32,
+) -> Result<Vec<Sample>, ResampleError> {
+    let mut resampler = make_sinc_resampler(from_hz, to_hz)?;
+    let ratio = f64::from(to_hz) / f64::from(from_hz);
+    process_mono(&mut resampler, samples, ratio)
+}
+
+// ── Cached adapter for the streaming pipeline ───────────────────────
+
+/// Cached sinc kernel + the rate pair it was built for.
+struct CachedSinc {
+    resampler: SincFixedIn<f32>,
+    from_hz: u32,
+    to_hz: u32,
+}
+
+/// Adapter that satisfies the [`echo_domain::Resampler`] port using
+/// [`rubato::SincFixedIn`].  Caches the 256-tap sinc kernel across
+/// calls so the expensive filter construction only happens once per
+/// sample-rate pair (typically once per recording session).
+pub struct RubatoResamplerAdapter {
+    cached: Mutex<Option<CachedSinc>>,
+}
+
+impl RubatoResamplerAdapter {
+    pub fn new() -> Self {
+        Self {
+            cached: Mutex::new(None),
+        }
+    }
+}
+
+impl Default for RubatoResamplerAdapter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl std::fmt::Debug for RubatoResamplerAdapter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RubatoResamplerAdapter")
+            .finish_non_exhaustive()
+    }
+}
 
 impl Resampler for RubatoResamplerAdapter {
     fn to_whisper(
@@ -155,7 +203,42 @@ impl Resampler for RubatoResamplerAdapter {
         samples: &[Sample],
         input: AudioFormat,
     ) -> Result<Vec<Sample>, DomainError> {
-        Ok(resample_to_whisper(samples, input)?)
+        if input.channels == 0 || input.sample_rate_hz == 0 {
+            return Err(ResampleError::InvalidFormat(input).into());
+        }
+
+        let mono = downmix_to_mono(samples, input.channels);
+
+        if input.sample_rate_hz == WHISPER_SAMPLE_RATE {
+            return Ok(mono);
+        }
+
+        let from_hz = input.sample_rate_hz;
+        let to_hz = WHISPER_SAMPLE_RATE;
+        let ratio = f64::from(to_hz) / f64::from(from_hz);
+
+        let mut guard = self.cached.lock().unwrap_or_else(|e| e.into_inner());
+
+        // Reuse the cached kernel when the rate pair matches; otherwise
+        // build a fresh one and stash it.
+        let sinc = match guard.as_mut() {
+            Some(c) if c.from_hz == from_hz && c.to_hz == to_hz => {
+                c.resampler.reset();
+                &mut c.resampler
+            }
+            _ => {
+                let rs = make_sinc_resampler(from_hz, to_hz)
+                    .map_err(DomainError::from)?;
+                *guard = Some(CachedSinc {
+                    resampler: rs,
+                    from_hz,
+                    to_hz,
+                });
+                &mut guard.as_mut().unwrap().resampler
+            }
+        };
+
+        Ok(process_mono(sinc, &mono, ratio)?)
     }
 }
 

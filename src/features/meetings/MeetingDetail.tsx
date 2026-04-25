@@ -1,12 +1,14 @@
+import { useRef } from "react";
 import { useTranslation } from "react-i18next";
+import { useVirtualizer } from "@tanstack/react-virtual";
 
-import { SpeakerChip } from "../../components/SpeakerChip";
 import { useMeetingSummary } from "../../hooks/useMeetingSummary";
-import { formatDate, formatDurationMs, formatTimestamp } from "../../lib/format";
-import { indexSpeakers, shortTag } from "../../lib/speakers";
+import { formatDate, formatDurationMs } from "../../lib/format";
+import { indexSpeakers } from "../../lib/speakers";
 import type { SpeakerId } from "../../types/speaker";
 import type { MainView } from "../../types/view";
 import { ExportButton } from "./ExportButton";
+import { SegmentRow } from "./SegmentRow";
 import { SpeakersPanel } from "./SpeakersPanel";
 import { SummaryPanel } from "./SummaryPanel";
 
@@ -24,19 +26,28 @@ export function MeetingDetail({
   const meetingId = view.kind === "meeting" ? view.id : null;
   const summaryState = useMeetingSummary(meetingId);
   const { t } = useTranslation();
+  const scrollRef = useRef<HTMLDivElement>(null);
+
+  const m = view.meeting;
+  const virtualizer = useVirtualizer({
+    count: m?.segments.length ?? 0,
+    getScrollElement: () => scrollRef.current,
+    estimateSize: () => 36,
+    overscan: 8,
+  });
 
   if (view.loading) {
     return <p className="text-sm text-zinc-500">{t("meeting.loading")}</p>;
   }
-  if (view.error || !view.meeting) {
+  if (view.error || !m) {
     return (
       <p className="text-sm text-amber-700 dark:text-amber-400">
         {view.error ?? t("meeting.unavailable")}
       </p>
     );
   }
-  const m = view.meeting;
   const speakerIndex = indexSpeakers(m.speakers);
+
   return (
     <>
       <header className="flex flex-shrink-0 items-start justify-between gap-2">
@@ -51,19 +62,26 @@ export function MeetingDetail({
         <ExportButton meetingId={m.id} title={m.title} />
       </header>
 
-      <div className="min-h-0 flex-1 space-y-3 overflow-y-auto">
+      <div className="flex min-h-0 flex-1 flex-col gap-3">
         {m.speakers.length > 0 && (
           <SpeakersPanel speakers={m.speakers} onRename={onRenameSpeaker} />
         )}
 
         <SummaryPanel state={summaryState} />
 
-        <div className="rounded-md border border-zinc-100 bg-zinc-50 p-3 text-sm leading-relaxed dark:border-zinc-900 dark:bg-zinc-900">
+        <div
+          ref={scrollRef}
+          className="min-h-0 flex-1 overflow-y-auto rounded-md border border-zinc-100 bg-zinc-50 p-3 text-sm leading-relaxed dark:border-zinc-900 dark:bg-zinc-900"
+        >
           {m.segments.length === 0 ? (
             <p className="text-zinc-400">{t("meeting.noSegments")}</p>
           ) : (
-            <ol className="flex flex-col gap-2">
-              {m.segments.map((seg) => {
+            <ol
+              className="relative w-full"
+              style={{ height: `${virtualizer.getTotalSize()}px` }}
+            >
+              {virtualizer.getVirtualItems().map((vItem) => {
+                const seg = m.segments[vItem.index]!;
                 const speaker = seg.speakerId
                   ? speakerIndex.get(seg.speakerId)
                   : undefined;
@@ -71,21 +89,17 @@ export function MeetingDetail({
                   <li
                     key={seg.id}
                     data-segment-id={seg.id}
-                    className="flex items-baseline gap-3 rounded-sm transition-colors duration-500"
+                    className="absolute left-0 top-0 flex w-full items-baseline gap-3 rounded-sm"
+                    style={{ transform: `translateY(${vItem.start}px)` }}
+                    data-index={vItem.index}
+                    ref={virtualizer.measureElement}
                   >
-                    <span className="w-12 shrink-0 font-mono text-xs tabular-nums text-zinc-500">
-                      {formatTimestamp(seg.startMs)}
-                    </span>
-                    {speaker && (
-                      <SpeakerChip
-                        slot={speaker.slot}
-                        label={shortTag(speaker.slot)}
-                        compact
-                      />
-                    )}
-                    <span className="flex-1">
-                      {seg.text.trim() || t("meeting.noSpeech")}
-                    </span>
+                    <SegmentRow
+                      startMs={seg.startMs}
+                      text={seg.text}
+                      speaker={speaker}
+                      noSpeechLabel={t("meeting.noSpeech")}
+                    />
                   </li>
                 );
               })}

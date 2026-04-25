@@ -43,6 +43,9 @@ export type RecordingStats = {
 
 const ZERO_STATS: RecordingStats = { chunks: 0, skipped: 0, audioMs: 0 };
 
+/** Max transcript lines kept in memory during a live session. */
+const MAX_LIVE_LINES = 500;
+
 export type StartOptions = {
   /** Whisper language hint. Empty string means "auto-detect". */
   language: string;
@@ -139,19 +142,24 @@ export function useRecordingSession({
           .map((s) => s.text.trim())
           .filter((t) => t.length > 0)
           .join(" ");
-        setLines((prev) => [
-          ...prev,
-          {
-            kind: "chunk",
-            key: `${evt.sessionId}-${evt.chunkIndex}`,
-            chunkIndex: evt.chunkIndex,
-            offsetMs: evt.offsetMs,
-            text: text || "[no speech]",
-            language: evt.language,
-            rtf: evt.rtf,
-            speakerSlot: evt.speakerSlot,
-          },
-        ]);
+        setLines((prev) => {
+          const next = [
+            ...prev,
+            {
+              kind: "chunk" as const,
+              key: `${evt.sessionId}-${evt.chunkIndex}`,
+              chunkIndex: evt.chunkIndex,
+              offsetMs: evt.offsetMs,
+              text: text || "[no speech]",
+              language: evt.language,
+              rtf: evt.rtf,
+              speakerSlot: evt.speakerSlot,
+            },
+          ];
+          return next.length > MAX_LIVE_LINES
+            ? next.slice(-MAX_LIVE_LINES)
+            : next;
+        });
         break;
       }
       case "skipped":
@@ -160,17 +168,22 @@ export function useRecordingSession({
           skipped: s.skipped + 1,
           audioMs: s.audioMs + evt.durationMs,
         }));
-        setLines((prev) => [
-          ...prev,
-          {
-            kind: "skipped",
-            key: `${evt.sessionId}-${evt.chunkIndex}`,
-            chunkIndex: evt.chunkIndex,
-            offsetMs: evt.offsetMs,
-            durationMs: evt.durationMs,
-            rms: evt.rms,
-          },
-        ]);
+        setLines((prev) => {
+          const next = [
+            ...prev,
+            {
+              kind: "skipped" as const,
+              key: `${evt.sessionId}-${evt.chunkIndex}`,
+              chunkIndex: evt.chunkIndex,
+              offsetMs: evt.offsetMs,
+              durationMs: evt.durationMs,
+              rms: evt.rms,
+            },
+          ];
+          return next.length > MAX_LIVE_LINES
+            ? next.slice(-MAX_LIVE_LINES)
+            : next;
+        });
         break;
       case "stopped":
         dispatch({

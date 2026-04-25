@@ -1,5 +1,6 @@
 import type { RefObject } from "react";
 import { useTranslation } from "react-i18next";
+import { useVirtualizer } from "@tanstack/react-virtual";
 
 import { StatsBar } from "../../components/StatsBar";
 import { statusLabel, type RecordingState } from "../../state/recording";
@@ -52,6 +53,14 @@ export function LivePane({
     stream.kind === "starting" ||
     stream.kind === "recording" ||
     stream.kind === "stopping";
+
+  const virtualizer = useVirtualizer({
+    count: lines.length,
+    getScrollElement: () => listRef.current,
+    estimateSize: () => 28,
+    overscan: 5,
+  });
+
   return (
     <>
       <header className="flex flex-shrink-0 flex-wrap items-center justify-between gap-3">
@@ -149,10 +158,26 @@ export function LivePane({
               : t("live.pressStart")}
           </p>
         ) : (
-          <ul className="flex flex-col gap-1">
-            {lines.map((line) => (
-              <TranscriptRow key={line.key} line={line} />
-            ))}
+          <ul
+            className="relative w-full"
+            style={{ height: `${virtualizer.getTotalSize()}px` }}
+          >
+            {virtualizer.getVirtualItems().map((vItem) => {
+              const line = lines[vItem.index]!;
+              return (
+                <li
+                  key={line.key}
+                  className={`absolute left-0 top-0 flex w-full items-baseline gap-3${
+                    line.kind === "skipped" ? " text-zinc-400" : ""
+                  }`}
+                  style={{ transform: `translateY(${vItem.start}px)` }}
+                  data-index={vItem.index}
+                  ref={virtualizer.measureElement}
+                >
+                  <TranscriptRow line={line} />
+                </li>
+              );
+            })}
           </ul>
         )}
       </div>
