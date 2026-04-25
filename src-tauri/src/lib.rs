@@ -31,19 +31,19 @@ pub fn run() {
     let specta_builder =
         tauri_specta::Builder::<tauri::Wry>::new().commands(tauri_specta::collect_commands![
             commands::health_check,
-            commands::start_streaming,
-            commands::stop_streaming,
-            commands::list_meetings,
-            commands::get_meeting,
-            commands::delete_meeting,
-            commands::rename_speaker,
-            commands::search_meetings,
-            commands::summarize_meeting,
-            commands::get_summary,
-            commands::ask_about_meeting,
-            commands::export_meeting,
-            commands::get_model_status,
-            commands::download_model,
+            commands::streaming::start_streaming,
+            commands::streaming::stop_streaming,
+            commands::meetings::list_meetings,
+            commands::meetings::get_meeting,
+            commands::meetings::delete_meeting,
+            commands::meetings::rename_speaker,
+            commands::meetings::search_meetings,
+            commands::llm::summarize_meeting,
+            commands::llm::get_summary,
+            commands::llm::ask_about_meeting,
+            commands::export::export_meeting,
+            commands::models::get_model_status,
+            commands::models::download_model,
         ]);
 
     // In dev builds, export TypeScript bindings so the frontend can

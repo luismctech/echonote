@@ -227,8 +227,7 @@ impl Resampler for RubatoResamplerAdapter {
                 &mut c.resampler
             }
             _ => {
-                let rs = make_sinc_resampler(from_hz, to_hz)
-                    .map_err(DomainError::from)?;
+                let rs = make_sinc_resampler(from_hz, to_hz).map_err(DomainError::from)?;
                 *guard = Some(CachedSinc {
                     resampler: rs,
                     from_hz,

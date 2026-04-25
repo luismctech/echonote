@@ -612,7 +612,7 @@ async fn run_stream(
     // facade serves the cpal mic and the macOS ScreenCaptureKit
     // loopback adapter without any branching at the call site.
     let capture: Arc<dyn AudioCapture> = Arc::new(RoutingAudioCapture::with_default_adapters());
-    let resampler: Arc<dyn Resampler> = Arc::new(RubatoResamplerAdapter);
+    let resampler: Arc<dyn Resampler> = Arc::new(RubatoResamplerAdapter::new());
     let transcriber: Arc<dyn Transcriber> = Arc::new(transcriber);
 
     let source: AudioSource = source_arg.into();
