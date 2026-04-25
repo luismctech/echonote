@@ -21,7 +21,7 @@
  * action layer means it slots into either world unchanged.
  */
 
-import { useCallback, useRef } from "react";
+import { useCallback, useEffect, useRef } from "react";
 
 import { useToast } from "../components/Toaster";
 import {
@@ -48,6 +48,14 @@ export function useMeetingDetail({
   setMeetingsError: (message: string | null) => void;
 }) {
   const toast = useToast();
+
+  // Keep a ref to the latest `view` so the action callbacks don't
+  // need it as a dependency (view changes on every navigation / load
+  // cycle, destabilising every callback downstream).
+  const viewRef = useRef(view);
+  useEffect(() => {
+    viewRef.current = view;
+  }, [view]);
 
   // Wrap renameSpeaker via useIpcAction since the only failure
   // surface is a toast — the success path needs no extra plumbing.
@@ -104,8 +112,9 @@ export function useMeetingDetail({
 
   const renameSpeakerAction = useCallback(
     async (speakerId: SpeakerId, label: string | null) => {
-      if (view.kind !== "meeting" || !view.meeting) return;
-      const meetingId = view.id;
+      const v = viewRef.current;
+      if (v.kind !== "meeting" || !v.meeting) return;
+      const meetingId = v.id;
       const updated = await renameSpeakerCall(meetingId, speakerId, label);
       if (!updated) return;
       // Re-render from the canonical post-rename meeting returned by
@@ -116,7 +125,7 @@ export function useMeetingDetail({
           : prev,
       );
     },
-    [view, renameSpeakerCall, setView],
+    [renameSpeakerCall, setView],
   );
 
   const deleteMeetingAction = useCallback(
@@ -124,7 +133,7 @@ export function useMeetingDetail({
       try {
         const removed = await deleteMeeting(id);
         await refreshMeetings();
-        if (view.kind === "meeting" && view.id === id) {
+        if (viewRef.current.kind === "meeting" && viewRef.current.id === id) {
           setView({ kind: "live" });
         }
         // Backend returns `false` when the row was already gone (race
@@ -149,7 +158,7 @@ export function useMeetingDetail({
         });
       }
     },
-    [refreshMeetings, view, setView, setMeetingsError, toast],
+    [refreshMeetings, setView, setMeetingsError, toast],
   );
 
   return {

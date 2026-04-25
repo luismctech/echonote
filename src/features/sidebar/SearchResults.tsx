@@ -1,3 +1,5 @@
+import { memo } from "react";
+
 import { formatDate } from "../../lib/format";
 import type {
   MeetingId,
@@ -6,7 +8,7 @@ import type {
 } from "../../types/meeting";
 
 /** FTS5 hits rendered as a sidebar list with `<mark>`-highlighted snippets. */
-export function SearchResults({
+export const SearchResults = memo(function SearchResults({
   query,
   hits,
   loading,
@@ -81,4 +83,4 @@ export function SearchResults({
       })}
     </ul>
   );
-}
+});

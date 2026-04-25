@@ -59,9 +59,15 @@ export function useChat(meetingId: MeetingId | null): UseChat {
   // latest value without re-closing.
   const accRef = useRef("");
 
+  // Keep a ref to the latest messages so `send` can read the current
+  // history without depending on the `messages` array (which changes
+  // on every assistant turn and would destabilize the callback).
+  const messagesRef = useRef<DisplayMessage[]>([]);
+
   useEffect(() => {
     activeMeetingRef.current = meetingId;
     setMessages([]);
+    messagesRef.current = [];
     setStreaming(false);
     setStreamingText("");
     setError(null);
@@ -80,13 +86,17 @@ export function useChat(meetingId: MeetingId | null): UseChat {
       accRef.current = "";
 
       const userMsg: DisplayMessage = { role: "user", content: trimmed };
-      setMessages((prev) => [...prev, userMsg]);
+      setMessages((prev) => {
+        const next = [...prev, userMsg];
+        messagesRef.current = next;
+        return next;
+      });
 
       // Build the history the backend expects: only user/assistant
       // turns (no system messages — the backend assembles those from
       // the transcript). We include the NEW user message as well,
       // because the backend expects `question` as a separate param.
-      const history: ChatMessage[] = messages.map((m) => ({
+      const history: ChatMessage[] = messagesRef.current.map((m) => ({
         role: m.role,
         content: m.content,
       }));
@@ -108,7 +118,11 @@ export function useChat(meetingId: MeetingId | null): UseChat {
               citations: event.citations,
               hadCitations: event.hadCitations,
             };
-            setMessages((prev) => [...prev, assistantMsg]);
+            setMessages((prev) => {
+              const next = [...prev, assistantMsg];
+              messagesRef.current = next;
+              return next;
+            });
             setStreaming(false);
             setStreamingText("");
             break;
@@ -129,7 +143,7 @@ export function useChat(meetingId: MeetingId | null): UseChat {
         setStreamingText("");
       });
     },
-    [meetingId, streaming, messages],
+    [meetingId, streaming],
   );
 
   return { messages, streaming, streamingText, error, model, send };

@@ -1,4 +1,4 @@
-import { useRef } from "react";
+import { useMemo, useRef } from "react";
 import { useTranslation } from "react-i18next";
 import { useVirtualizer } from "@tanstack/react-virtual";
 
@@ -29,6 +29,10 @@ export function MeetingDetail({
   const scrollRef = useRef<HTMLDivElement>(null);
 
   const m = view.meeting;
+  const speakerIndex = useMemo(
+    () => (m ? indexSpeakers(m.speakers) : new Map()),
+    [m?.speakers],
+  );
   const virtualizer = useVirtualizer({
     count: m?.segments.length ?? 0,
     getScrollElement: () => scrollRef.current,
@@ -46,7 +50,6 @@ export function MeetingDetail({
       </p>
     );
   }
-  const speakerIndex = indexSpeakers(m.speakers);
 
   return (
     <>

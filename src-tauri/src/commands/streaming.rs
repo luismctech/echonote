@@ -149,6 +149,7 @@ pub async fn start_streaming(
     let recorder = state.recorder.clone();
     let sessions_for_drain = state.sessions_handle();
     let join = tokio::spawn(async move {
+        let mut saw_terminal = false;
         loop {
             let mut guard = drain_handle.lock().await;
             let evt = guard.next_event().await;
@@ -162,15 +163,32 @@ pub async fn start_streaming(
                         evt,
                         TranscriptEvent::Stopped { .. } | TranscriptEvent::Failed { .. }
                     );
+                    if terminal {
+                        saw_terminal = true;
+                    }
                     if let Err(e) = on_event.send(evt) {
                         tracing::warn!(error = %e, %session_id, "frontend channel send failed");
                         break;
                     }
-                    if terminal {
+                    if saw_terminal {
                         break;
                     }
                 }
                 None => break,
+            }
+        }
+        // If the drain loop exited without a terminal event (e.g.
+        // frontend disconnected, channel returned None), synthesise a
+        // Failed event so the MeetingRecorder cleans up its session
+        // stats and finalises the meeting row.
+        if !saw_terminal {
+            tracing::warn!(%session_id, "drain loop exited without terminal event; synthesising Failed");
+            let synth = TranscriptEvent::Failed {
+                session_id,
+                message: "drain exited without terminal event".into(),
+            };
+            if let Err(e) = recorder.record(&synth).await {
+                tracing::warn!(error = %e, %session_id, "recorder.record(synth Failed) failed");
             }
         }
         if let Ok(mut map) = sessions_for_drain.lock() {
@@ -178,22 +196,22 @@ pub async fn start_streaming(
         }
     });
 
-    state
-        .sessions
-        .lock()
-        .map_err(|e| {
-            IpcError::new(
-                ErrorCode::SessionConflict,
-                format!("session map poisoned: {e}"),
-            )
-        })?
-        .insert(
-            session_id,
-            SessionEntry {
-                join,
-                handle: handle_arc,
-            },
-        );
+    let insert_result = state.sessions.lock().map_err(|e| {
+        // Abort the spawned drain task so it doesn't run detached
+        // with a live microphone and no way to stop it.
+        join.abort();
+        IpcError::new(
+            ErrorCode::SessionConflict,
+            format!("session map poisoned: {e}"),
+        )
+    });
+    insert_result?.insert(
+        session_id,
+        SessionEntry {
+            join,
+            handle: handle_arc,
+        },
+    );
 
     Ok(session_id)
 }

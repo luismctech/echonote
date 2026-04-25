@@ -2,12 +2,13 @@
 
 use serde::Serialize;
 use tauri::ipc::Channel;
+use tauri::State;
 
 use crate::ipc_error::{ErrorCode, IpcError};
 
 use futures::stream::StreamExt;
 
-use super::workspace_root;
+use super::{workspace_root, AppState};
 
 /// A downloadable model known to the app.
 #[derive(Debug, Clone, Serialize, specta::Type)]
@@ -183,12 +184,36 @@ pub enum DownloadEvent {
 ///
 /// When the catalog entry includes a SHA-256 digest the downloaded file
 /// is verified before being promoted from `*.part` to its final path.
+/// Concurrent downloads of the same model are rejected.
 #[tauri::command]
 #[specta::specta]
 pub async fn download_model(
+    state: State<'_, AppState>,
     model_id: String,
     on_event: Channel<DownloadEvent>,
 ) -> Result<(), IpcError> {
+    // ── Guard: reject concurrent downloads of the same model ─────
+    {
+        let mut guard = state
+            .in_flight_downloads
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        if !guard.insert(model_id.clone()) {
+            return Err(IpcError::new(
+                ErrorCode::SessionConflict,
+                format!("model {model_id} is already being downloaded"),
+            ));
+        }
+    }
+    let downloads_handle = state.in_flight_downloads.clone();
+    let mid = model_id.clone();
+    // Ensure the guard is removed on all exit paths.
+    let _cleanup = scopeguard::guard((), move |()| {
+        if let Ok(mut set) = downloads_handle.lock() {
+            set.remove(&mid);
+        }
+    });
+
     let catalog = model_catalog();
     let (_, url, expected_sha) = catalog
         .iter()
@@ -284,5 +309,19 @@ pub async fn download_model(
             });
             Err(e)
         }
+    }
+}
+
+/// Unload a lazily-loaded model to free memory. Accepted kinds:
+/// `"asr"`, `"llm"`, `"vad"`. Returns `true` if a model was actually
+/// unloaded, `false` if it wasn't loaded.
+#[tauri::command]
+#[specta::specta]
+pub async fn unload_model(state: State<'_, AppState>, kind: String) -> Result<bool, IpcError> {
+    match kind.as_str() {
+        "asr" => Ok(state.transcriber.unload().await),
+        "llm" => Ok(state.llm.unload().await),
+        "vad" => Ok(state.vad.unload().await),
+        _ => Err(IpcError::not_found(format!("unknown model kind: {kind}"))),
     }
 }

@@ -1,8 +1,10 @@
+import { memo } from "react";
+
 import { formatDate, formatDurationMs } from "../../lib/format";
 import type { MeetingId, MeetingSummary } from "../../types/meeting";
 
 /** Sidebar list of stored meetings; click to open, hover to delete. */
-export function MeetingsList({
+export const MeetingsList = memo(function MeetingsList({
   meetings,
   activeId,
   onSelect,
@@ -63,4 +65,4 @@ export function MeetingsList({
       })}
     </ul>
   );
-}
+});

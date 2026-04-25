@@ -49,6 +49,7 @@ futures = { workspace = true }
 reqwest = { workspace = true }
 dirs = "6"
 sha2 = "0.10"
+scopeguard = "1"
 tauri-plugin-dialog = "2.7.0"
 tauri-plugin-global-shortcut = "2.3.1"
 specta.workspace = true

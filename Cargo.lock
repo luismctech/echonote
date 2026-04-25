@@ -1405,6 +1405,7 @@ dependencies = [
  "futures",
  "libc",
  "reqwest 0.12.28",
+ "scopeguard",
  "serde",
  "serde_json",
  "sha2",

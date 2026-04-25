@@ -48,9 +48,22 @@ export function ChatPanel({
   const [input, setInput] = useState("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const rafRef = useRef<number | null>(null);
 
   const scrollToBottom = useCallback(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    // During streaming the text changes on every token (20-50/s).
+    // Debounce via rAF so we don't queue competing smooth-scroll
+    // animations.
+    if (rafRef.current != null) return;
+    rafRef.current = requestAnimationFrame(() => {
+      rafRef.current = null;
+      messagesEndRef.current?.scrollIntoView({ behavior: "instant" });
+    });
+  }, []);
+
+  // Clean up any pending rAF on unmount.
+  useEffect(() => () => {
+    if (rafRef.current != null) cancelAnimationFrame(rafRef.current);
   }, []);
 
   // Auto-scroll when new messages arrive or streaming text changes.
@@ -67,14 +80,18 @@ export function ChatPanel({
     }
   }, [chat.streaming]);
 
+  // Destructure stable refs to avoid `chat` object as dependency (it
+  // recreates on every render since it's a plain object return).
+  const { send, streaming } = chat;
+
   const handleSubmit = useCallback(
     (e: FormEvent) => {
       e.preventDefault();
-      if (!input.trim() || chat.streaming) return;
-      chat.send(input);
+      if (!input.trim() || streaming) return;
+      send(input);
       setInput("");
     },
-    [input, chat],
+    [input, send, streaming],
   );
 
   // Submit on Enter (without Shift). Shift+Enter inserts a newline.

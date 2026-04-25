@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { memo, useEffect, useState } from "react";
 
 import { displayName, paletteFor, shortTag } from "../../lib/speakers";
 import type { Speaker, SpeakerId } from "../../types/speaker";
@@ -11,7 +11,7 @@ import type { Speaker, SpeakerId } from "../../types/speaker";
  * canonical state still flows from props (the post-rename meeting)
  * so an external refresh would override stale local input.
  */
-export function SpeakerEditor({
+export const SpeakerEditor = memo(function SpeakerEditor({
   speaker,
   onRename,
 }: {
@@ -58,4 +58,4 @@ export function SpeakerEditor({
       />
     </div>
   );
-}
+});

@@ -72,6 +72,7 @@ impl SqliteMeetingStore {
 
         let pool = SqlitePoolOptions::new()
             .max_connections(8)
+            .acquire_timeout(std::time::Duration::from_secs(5))
             .connect_with(opts)
             .await
             .map_err(map_sqlx("open sqlite pool"))?;

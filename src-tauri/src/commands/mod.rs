@@ -77,6 +77,13 @@ impl<T: Send + Sync + 'static> LazyModel<T> {
         *guard = Some(Arc::clone(&arc));
         Ok(arc)
     }
+
+    /// Drop the cached model, freeing its memory. The next call to
+    /// `get_or_init` will re-load from disk. Returns `true` if a
+    /// model was actually unloaded.
+    pub async fn unload(&self) -> bool {
+        self.inner.lock().await.take().is_some()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -144,6 +151,9 @@ pub struct AppState {
     pub(crate) vad_model_path: PathBuf,
     /// Lazily-loaded Silero VAD template.
     pub(crate) vad: LazyModel<SileroVad>,
+    /// Model IDs currently being downloaded. Prevents concurrent
+    /// downloads of the same model from corrupting the `.part` file.
+    pub(crate) in_flight_downloads: Arc<Mutex<std::collections::HashSet<String>>>,
 }
 
 use echo_domain::StreamingSessionId;
@@ -238,6 +248,7 @@ impl AppState {
             llm: LazyModel::new(),
             vad_model_path,
             vad: LazyModel::new(),
+            in_flight_downloads: Arc::new(Mutex::new(std::collections::HashSet::new())),
         })
     }
 

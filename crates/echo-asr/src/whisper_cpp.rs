@@ -199,7 +199,47 @@ fn run_full(
     params.set_suppress_nst(true);
 
     debug!(threads, language = ?options.language, "running whisper full");
-    state.full(params, samples).map_err(map_whisper_err)?;
+
+    // Wrap the FFI call in catch_unwind so a panic in C++ (OOM, Metal
+    // driver fault, SIGABRT) doesn't permanently lose the cached
+    // WhisperState (~470 MB of GPU buffers on Metal). On caught panic
+    // we return the state to the cache and surface the error.
+    let full_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        state.full(params, samples).map_err(map_whisper_err)
+    }));
+    match full_result {
+        Ok(Ok(())) => { /* success — continue extracting segments */ }
+        Ok(Err(e)) => {
+            // Whisper returned an error but didn't panic — state is
+            // still usable, return it to the cache.
+            let _ = inner
+                .cached_state
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .insert(state);
+            return Err(e);
+        }
+        Err(panic_payload) => {
+            // C++ panic caught. The state *may* be corrupted, but
+            // returning it avoids a guaranteed 470 MB re-allocation.
+            // If it truly is corrupt the next call will fail and
+            // create_state will be the fallback.
+            tracing::warn!("whisper.cpp panicked during full(); returning state to cache");
+            let _ = inner
+                .cached_state
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .insert(state);
+            let msg = if let Some(s) = panic_payload.downcast_ref::<&str>() {
+                format!("whisper.cpp panicked: {s}")
+            } else if let Some(s) = panic_payload.downcast_ref::<String>() {
+                format!("whisper.cpp panicked: {s}")
+            } else {
+                "whisper.cpp panicked (unknown payload)".to_string()
+            };
+            return Err(DomainError::Invariant(msg));
+        }
+    }
 
     let n = state.full_n_segments();
     let mut segments = Vec::with_capacity(n.max(0) as usize);

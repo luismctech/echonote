@@ -44,6 +44,7 @@ pub fn run() {
             commands::export::export_meeting,
             commands::models::get_model_status,
             commands::models::download_model,
+            commands::models::unload_model,
         ]);
 
     // In dev builds, export TypeScript bindings so the frontend can
