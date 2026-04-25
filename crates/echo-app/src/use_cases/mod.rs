@@ -2,6 +2,7 @@
 //! Each file below will host one use case once its ports are ready.
 
 pub mod chat_with_transcript;
+pub mod export;
 pub mod generate_summary;
 pub mod rename_speaker;
 pub mod start_recording;

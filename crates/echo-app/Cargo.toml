@@ -32,3 +32,5 @@ specta.workspace = true
 # reason about for a 5-method trait. Reintroduce mockall when a use
 # case grows enough internal helpers that hand-rolling becomes painful.
 pretty_assertions.workspace = true
+echo-audio = { path = "../echo-audio" }
+echo-storage = { path = "../echo-storage" }
