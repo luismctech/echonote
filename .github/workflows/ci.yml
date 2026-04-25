@@ -38,7 +38,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
       - name: Install toolchain (honors rust-toolchain.toml)
         uses: dtolnay/rust-toolchain@stable
@@ -58,7 +58,7 @@ jobs:
     needs: fmt
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
       - name: Install toolchain (honors rust-toolchain.toml)
         uses: dtolnay/rust-toolchain@stable
@@ -66,15 +66,15 @@ jobs:
           components: rustfmt, clippy
 
       - name: Cache cargo registry and target
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
         with:
           shared-key: macos-14
 
       - name: Setup pnpm (version from packageManager field)
-        uses: pnpm/action-setup@v6
+        uses: pnpm/action-setup@5280c022466e8e5ea34ea201e2fda33875aeefdb # v6
 
       - name: Setup Node
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           node-version: 20
           cache: pnpm
@@ -116,7 +116,7 @@ jobs:
     needs: fmt
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
       - name: Install system dependencies (Tauri + ALSA + cmake/clang for whisper.cpp)
         run: |
@@ -138,15 +138,15 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache cargo registry and target
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
         with:
           shared-key: ubuntu-24.04
 
       - name: Setup pnpm (version from packageManager field)
-        uses: pnpm/action-setup@v6
+        uses: pnpm/action-setup@5280c022466e8e5ea34ea201e2fda33875aeefdb # v6
 
       - name: Setup Node
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           node-version: 20
           cache: pnpm
@@ -159,3 +159,34 @@ jobs:
 
       - name: cargo check
         run: cargo check --workspace --all-targets --locked
+
+  # ---------------------------------------------------------------------------
+  # audit — security vulnerability scan for Rust + npm dependencies.
+  # ---------------------------------------------------------------------------
+  audit:
+    name: Security audit
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: cargo audit
+        run: cargo audit
+
+      - name: Setup pnpm (version from packageManager field)
+        uses: pnpm/action-setup@5280c022466e8e5ea34ea201e2fda33875aeefdb # v6
+
+      - name: Setup Node
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: pnpm install (frozen lockfile)
+        run: pnpm install --frozen-lockfile
+
+      - name: pnpm audit
+        run: pnpm audit --prod

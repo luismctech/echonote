@@ -26,6 +26,28 @@ updates:
       serde:
         patterns: ["serde*"]
 
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: America/Mexico_City
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - javascript
+    commit-message:
+      prefix: deps
+      include: scope
+    groups:
+      react:
+        patterns: ["react*", "@types/react*"]
+      vite:
+        patterns: ["vite*", "vitest*"]
+      tailwind:
+        patterns: ["tailwindcss*", "postcss*", "autoprefixer*"]
+
   - package-ecosystem: github-actions
     directory: /
     schedule:
