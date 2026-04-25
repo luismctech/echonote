@@ -1266,7 +1266,9 @@ name = "echo-app"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "echo-audio",
  "echo-domain",
+ "echo-storage",
  "futures",
  "pretty_assertions",
  "serde",
