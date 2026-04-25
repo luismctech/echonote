@@ -1,6 +1,6 @@
 # EchoNote
 
-[![CI](https://github.com/AlbertoMZCruz/echonote/actions/workflows/ci.yml/badge.svg?branch=develop)](https://github.com/AlbertoMZCruz/echonote/actions/workflows/ci.yml)
+[![CI](https://github.com/luismctech/echonote/actions/workflows/ci.yml/badge.svg?branch=develop)](https://github.com/luismctech/echonote/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.88%2B-orange.svg?logo=rust)](./rust-toolchain.toml)
 
@@ -52,6 +52,57 @@ storage, the setup wizard, and the Lite/Quality hardware profiles.
 - **Chat with your meeting.** Ask questions; the LLM answers with citations back to segments.
 - **Full-text search** across every meeting via SQLite FTS5.
 - **Three hardware profiles** (Lite / Balanced / Quality) with a setup wizard that picks the right one.
+
+---
+
+## Installation
+
+Download the latest release for your platform from
+[**GitHub Releases**](https://github.com/luismctech/echonote/releases/latest).
+
+| Platform | File | Install |
+|----------|------|---------|
+| macOS (Apple Silicon) | `EchoNote_x.x.x_aarch64.dmg` | Open `.dmg`, drag to Applications |
+| macOS (Intel) | `EchoNote_x.x.x_x64.dmg` | Open `.dmg`, drag to Applications |
+| Windows | `EchoNote_x.x.x_x64-setup.exe` | Run the installer |
+| Linux (Debian/Ubuntu) | `EchoNote_x.x.x_amd64.deb` | `sudo dpkg -i EchoNote_*.deb` |
+| Linux (universal) | `EchoNote_x.x.x_amd64.AppImage` | `chmod +x` and run |
+
+Once installed, EchoNote checks for updates automatically on launch.
+
+### Platform notes
+
+<details>
+<summary><strong>macOS — "app is damaged" warning</strong></summary>
+
+Without Apple code signing, macOS Gatekeeper blocks the app. Run this once:
+
+```sh
+xattr -cr /Applications/EchoNote.app
+```
+
+Then open the app normally. This is safe — the app is open-source and you can
+audit the code yourself.
+</details>
+
+<details>
+<summary><strong>Windows — SmartScreen warning</strong></summary>
+
+Windows SmartScreen may show a warning for unsigned apps. Click **"More info"**
+→ **"Run anyway"**. This is expected for new open-source apps without a code
+signing certificate.
+</details>
+
+<details>
+<summary><strong>Linux — AppImage permissions</strong></summary>
+
+```sh
+chmod +x EchoNote_*.AppImage
+./EchoNote_*.AppImage
+```
+
+For `.deb`, install with `sudo dpkg -i` or double-click in a file manager.
+</details>
 
 ---
 
@@ -151,7 +202,7 @@ Windows and Linux are added in Phase 1 (weeks 12–15).
 ### First-time setup
 
 ```sh
-git clone https://github.com/AlbertoMZCruz/echonote.git
+git clone https://github.com/luismctech/echonote.git
 cd echonote
 git checkout develop
 ./scripts/bootstrap.sh          # verifies toolchain and wires up git hooks
