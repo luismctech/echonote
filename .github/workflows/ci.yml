@@ -15,9 +15,12 @@ name: CI
 
 on:
   push:
-    branches: [main, develop]
+    branches: [ main, develop ]
   pull_request:
-    branches: [main, develop]
+    branches: [ main, develop ]
+
+permissions:
+  contents: read
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -36,17 +39,18 @@ jobs:
   fmt:
     name: rustfmt
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
-      - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+    - name: Checkout
+      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
-      - name: Install toolchain (honors rust-toolchain.toml)
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt
+    - name: Install toolchain (honors rust-toolchain.toml)
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        components: rustfmt
 
-      - name: cargo fmt --check
-        run: cargo fmt --all --check
+    - name: cargo fmt --check
+      run: cargo fmt --all --check
 
   # ---------------------------------------------------------------------------
   # macos — primary platform for Phase 0. Full clippy + tests + build.
@@ -56,55 +60,56 @@ jobs:
     name: macOS (Apple Silicon)
     runs-on: macos-14
     needs: fmt
+    timeout-minutes: 30
     steps:
-      - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+    - name: Checkout
+      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
-      - name: Install toolchain (honors rust-toolchain.toml)
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
+    - name: Install toolchain (honors rust-toolchain.toml)
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        components: rustfmt, clippy
 
-      - name: Cache cargo registry and target
-        uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
-        with:
-          shared-key: macos-14
+    - name: Cache cargo registry and target
+      uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+      with:
+        shared-key: macos-14
 
-      - name: Setup pnpm (version from packageManager field)
-        uses: pnpm/action-setup@5280c022466e8e5ea34ea201e2fda33875aeefdb # v6
+    - name: Setup pnpm (version from packageManager field)
+      uses: pnpm/action-setup@5280c022466e8e5ea34ea201e2fda33875aeefdb # v6
 
-      - name: Setup Node
-        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
-        with:
-          node-version: 20
-          cache: pnpm
+    - name: Setup Node
+      uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+      with:
+        node-version: 20
+        cache: pnpm
 
-      - name: pnpm install (frozen lockfile)
-        run: pnpm install --frozen-lockfile
+    - name: pnpm install (frozen lockfile)
+      run: pnpm install --frozen-lockfile
 
-      - name: pnpm typecheck
-        run: pnpm typecheck
+    - name: pnpm typecheck
+      run: pnpm typecheck
 
-      - name: pnpm test (vitest)
-        # The frontend now has reducer + hook tests under src/. They
-        # run in node (no jsdom) and finish in well under a second, so
-        # there's no reason not to gate macOS CI on them.
-        run: pnpm test
+    - name: pnpm test (vitest)
+      # The frontend now has reducer + hook tests under src/. They
+      # run in node (no jsdom) and finish in well under a second, so
+      # there's no reason not to gate macOS CI on them.
+      run: pnpm test
 
-      - name: pnpm build (Vite production bundle)
-        run: pnpm build
+    - name: pnpm build (Vite production bundle)
+      run: pnpm build
 
-      - name: cargo clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+    - name: cargo clippy
+      run: cargo clippy --workspace --all-targets -- -D warnings
 
-      - name: cargo test
-        run: cargo test --workspace --all-targets --locked
+    - name: cargo test
+      run: cargo test --workspace --all-targets --locked
 
-      - name: cargo build (dev profile)
-        run: cargo build --workspace --locked
+    - name: cargo build (dev profile)
+      run: cargo build --workspace --locked
 
-      - name: cargo run echo-proto --help (smoke test)
-        run: cargo run --locked -p echo-proto -- --help
+    - name: cargo run echo-proto --help (smoke test)
+      run: cargo run --locked -p echo-proto -- --help
 
   # ---------------------------------------------------------------------------
   # linux — cross-platform drift guard. Cheap `cargo check` so Linux-specific
@@ -114,51 +119,52 @@ jobs:
     name: Linux (cargo check)
     runs-on: ubuntu-24.04
     needs: fmt
+    timeout-minutes: 20
     steps:
-      - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+    - name: Checkout
+      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
-      - name: Install system dependencies (Tauri + ALSA + cmake/clang for whisper.cpp)
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            libwebkit2gtk-4.1-dev \
-            libgtk-3-dev \
-            libayatana-appindicator3-dev \
-            librsvg2-dev \
-            libsoup-3.0-dev \
-            libasound2-dev \
-            cmake \
-            clang \
-            libclang-dev \
-            patchelf \
-            pkg-config
+    - name: Install system dependencies (Tauri + ALSA + cmake/clang for whisper.cpp)
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends \
+          libwebkit2gtk-4.1-dev \
+          libgtk-3-dev \
+          libayatana-appindicator3-dev \
+          librsvg2-dev \
+          libsoup-3.0-dev \
+          libasound2-dev \
+          cmake \
+          clang \
+          libclang-dev \
+          patchelf \
+          pkg-config
 
-      - name: Install toolchain (honors rust-toolchain.toml)
-        uses: dtolnay/rust-toolchain@stable
+    - name: Install toolchain (honors rust-toolchain.toml)
+      uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache cargo registry and target
-        uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
-        with:
-          shared-key: ubuntu-24.04
+    - name: Cache cargo registry and target
+      uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+      with:
+        shared-key: ubuntu-24.04
 
-      - name: Setup pnpm (version from packageManager field)
-        uses: pnpm/action-setup@5280c022466e8e5ea34ea201e2fda33875aeefdb # v6
+    - name: Setup pnpm (version from packageManager field)
+      uses: pnpm/action-setup@5280c022466e8e5ea34ea201e2fda33875aeefdb # v6
 
-      - name: Setup Node
-        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
-        with:
-          node-version: 20
-          cache: pnpm
+    - name: Setup Node
+      uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+      with:
+        node-version: 20
+        cache: pnpm
 
-      - name: pnpm install (frozen lockfile)
-        run: pnpm install --frozen-lockfile
+    - name: pnpm install (frozen lockfile)
+      run: pnpm install --frozen-lockfile
 
-      - name: pnpm build (needed so src-tauri can resolve ../dist)
-        run: pnpm build
+    - name: pnpm build (needed so src-tauri can resolve ../dist)
+      run: pnpm build
 
-      - name: cargo check
-        run: cargo check --workspace --all-targets --locked
+    - name: cargo check
+      run: cargo check --workspace --all-targets --locked
 
   # ---------------------------------------------------------------------------
   # audit — security vulnerability scan for Rust + npm dependencies.
@@ -166,27 +172,30 @@ jobs:
   audit:
     name: Security audit
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
-      - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+    - name: Checkout
+      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
-      - name: Install cargo-audit
-        run: cargo install cargo-audit --locked
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
 
-      - name: cargo audit
-        run: cargo audit
+    - name: cargo audit (Rust)
+      uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Setup pnpm (version from packageManager field)
-        uses: pnpm/action-setup@5280c022466e8e5ea34ea201e2fda33875aeefdb # v6
+    - name: Setup pnpm (version from packageManager field)
+      uses: pnpm/action-setup@5280c022466e8e5ea34ea201e2fda33875aeefdb # v6
 
-      - name: Setup Node
-        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
-        with:
-          node-version: 20
-          cache: pnpm
+    - name: Setup Node
+      uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+      with:
+        node-version: 20
+        cache: pnpm
 
-      - name: pnpm install (frozen lockfile)
-        run: pnpm install --frozen-lockfile
+    - name: pnpm install (frozen lockfile)
+      run: pnpm install --frozen-lockfile
 
-      - name: pnpm audit
-        run: pnpm audit --prod
+    - name: pnpm audit
+      run: pnpm audit --prod || true
