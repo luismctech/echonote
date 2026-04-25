@@ -15,6 +15,7 @@
 import { useCallback, useState } from "react";
 import { useTranslation } from "react-i18next";
 
+import { LogoMark } from "./components/Logo";
 import { HealthProbe } from "./features/live/HealthProbe";
 import { LivePane } from "./features/live/LivePane";
 import { MeetingDetail } from "./features/meetings/MeetingDetail";
@@ -124,13 +125,16 @@ export function App() {
   return (
     <main className="flex h-full w-full flex-col gap-3 overflow-hidden px-4 py-3 sm:px-6 sm:py-4">
       <header className="flex flex-shrink-0 items-end justify-between gap-4">
-        <div className="flex flex-col">
-          <h1 className="text-xl font-semibold tracking-tight sm:text-2xl">
-            {t("app.title")}
-          </h1>
-          <p className="hidden text-xs text-zinc-500 dark:text-zinc-400 sm:block">
-            {t("app.subtitle")}
-          </p>
+        <div className="flex items-center gap-2.5">
+          <LogoMark size={28} className="flex-shrink-0" />
+          <div className="flex flex-col">
+            <h1 className="text-xl font-semibold tracking-tight sm:text-2xl">
+              {t("app.title")}
+            </h1>
+            <p className="hidden text-xs text-zinc-500 dark:text-zinc-400 sm:block">
+              {t("app.subtitle")}
+            </p>
+          </div>
         </div>
         <div className="flex items-center gap-2">
           <LanguageSwitcher />

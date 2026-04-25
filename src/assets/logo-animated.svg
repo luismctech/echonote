@@ -1,0 +1,71 @@
+<svg width="512" height="512" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+  <rect width="512" height="512" fill="#000000"/>
+
+  <g fill="#3BE8A5">
+    <!-- Left dot -->
+    <circle cx="140" cy="256" r="16"/>
+
+    <!-- Bar 1 -->
+    <rect x="180" y="196" width="32" height="120" rx="16">
+      <animate attributeName="height"
+        values="120;160;120"
+        dur="1.2s"
+        begin="0s"
+        repeatCount="indefinite"
+        calcMode="spline"
+        keyTimes="0;0.5;1"
+        keySplines="0.4 0 0.2 1;0.4 0 0.2 1"/>
+      <animate attributeName="y"
+        values="196;176;196"
+        dur="1.2s"
+        begin="0s"
+        repeatCount="indefinite"
+        calcMode="spline"
+        keyTimes="0;0.5;1"
+        keySplines="0.4 0 0.2 1;0.4 0 0.2 1"/>
+    </rect>
+
+    <!-- Bar 2 -->
+    <rect x="240" y="156" width="32" height="200" rx="16">
+      <animate attributeName="height"
+        values="200;240;200"
+        dur="1.2s"
+        begin="0.2s"
+        repeatCount="indefinite"
+        calcMode="spline"
+        keyTimes="0;0.5;1"
+        keySplines="0.4 0 0.2 1;0.4 0 0.2 1"/>
+      <animate attributeName="y"
+        values="156;136;156"
+        dur="1.2s"
+        begin="0.2s"
+        repeatCount="indefinite"
+        calcMode="spline"
+        keyTimes="0;0.5;1"
+        keySplines="0.4 0 0.2 1;0.4 0 0.2 1"/>
+    </rect>
+
+    <!-- Bar 3 -->
+    <rect x="300" y="196" width="32" height="120" rx="16">
+      <animate attributeName="height"
+        values="120;160;120"
+        dur="1.2s"
+        begin="0.4s"
+        repeatCount="indefinite"
+        calcMode="spline"
+        keyTimes="0;0.5;1"
+        keySplines="0.4 0 0.2 1;0.4 0 0.2 1"/>
+      <animate attributeName="y"
+        values="196;176;196"
+        dur="1.2s"
+        begin="0.4s"
+        repeatCount="indefinite"
+        calcMode="spline"
+        keyTimes="0;0.5;1"
+        keySplines="0.4 0 0.2 1;0.4 0 0.2 1"/>
+    </rect>
+
+    <!-- Right dot -->
+    <circle cx="372" cy="256" r="16"/>
+  </g>
+</svg>

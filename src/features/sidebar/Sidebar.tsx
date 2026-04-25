@@ -11,6 +11,7 @@
 
 import { useTranslation } from "react-i18next";
 
+import { LogoMark } from "../../components/Logo";
 import { useMeetings } from "../../state/useMeetingsStore";
 import { MeetingsList } from "./MeetingsList";
 import { MeetingsSearchBox } from "./MeetingsSearchBox";
@@ -33,9 +34,12 @@ export function Sidebar({ onGoLive }: { onGoLive: () => void }) {
   return (
     <aside className="flex min-h-0 flex-col gap-2 overflow-hidden rounded-lg border border-zinc-200 bg-white p-3 shadow-sm dark:border-zinc-800 dark:bg-zinc-950">
       <header className="flex items-center justify-between">
-        <h2 className="text-sm font-semibold tracking-wide text-zinc-700 dark:text-zinc-200">
-          {t("sidebar.meetings")}
-        </h2>
+        <div className="flex items-center gap-1.5">
+          <LogoMark size={18} className="flex-shrink-0 opacity-60" />
+          <h2 className="text-sm font-semibold tracking-wide text-zinc-700 dark:text-zinc-200">
+            {t("sidebar.meetings")}
+          </h2>
+        </div>
         <button
           type="button"
           onClick={onGoLive}

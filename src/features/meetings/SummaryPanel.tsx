@@ -14,6 +14,7 @@
  * template on mount so "Regenerate" targets the right one.
  */
 
+import { LogoAnimated } from "../../components/Logo";
 import { formatDate } from "../../lib/format";
 import type { Summary, TemplateId } from "../../types/summary";
 import { TEMPLATE_IDS, TEMPLATE_LABELS } from "../../types/summary";
@@ -54,7 +55,10 @@ export function SummaryPanel({
       )}
 
       {loading && (
-        <p className="text-xs text-zinc-500">Loading summary…</p>
+        <div className="flex items-center gap-2">
+          <LogoAnimated size={20} className="opacity-40" />
+          <p className="text-xs text-zinc-500">Loading summary…</p>
+        </div>
       )}
       {!loading && summary && <SummaryBody summary={summary} />}
       {!loading && !summary && (

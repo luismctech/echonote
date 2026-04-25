@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import { useVirtualizer } from "@tanstack/react-virtual";
 
 import { useMeetingSummary } from "../../hooks/useMeetingSummary";
+import { LogoAnimated } from "../../components/Logo";
 import { formatDate, formatDurationMs } from "../../lib/format";
 import { indexSpeakers } from "../../lib/speakers";
 import type { SpeakerId } from "../../types/speaker";
@@ -41,7 +42,12 @@ export function MeetingDetail({
   });
 
   if (view.loading) {
-    return <p className="text-sm text-zinc-500">{t("meeting.loading")}</p>;
+    return (
+      <div className="flex flex-col items-center justify-center gap-3 py-12">
+        <LogoAnimated size={40} className="opacity-40" />
+        <p className="text-sm text-zinc-500">{t("meeting.loading")}</p>
+      </div>
+    );
   }
   if (view.error || !m) {
     return (

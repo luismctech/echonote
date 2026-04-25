@@ -2,6 +2,7 @@ import type { RefObject } from "react";
 import { useTranslation } from "react-i18next";
 import { useVirtualizer } from "@tanstack/react-virtual";
 
+import { LogoAnimated } from "../../components/Logo";
 import { StatsBar } from "../../components/StatsBar";
 import { statusLabel, type RecordingState } from "../../state/recording";
 import type { StreamLine } from "../../types/view";
@@ -152,11 +153,14 @@ export function LivePane({
         className="min-h-0 flex-1 overflow-y-auto rounded-md border border-zinc-100 bg-zinc-50 p-3 font-mono text-xs leading-relaxed dark:border-zinc-900 dark:bg-zinc-900/60"
       >
         {lines.length === 0 ? (
-          <p className="text-zinc-400">
-            {stream.kind === "recording"
-              ? t("live.listening")
-              : t("live.pressStart")}
-          </p>
+          <div className="flex flex-col items-center justify-center gap-3 py-8">
+            <LogoAnimated size={48} className="opacity-40" />
+            <p className="text-zinc-400">
+              {stream.kind === "recording"
+                ? t("live.listening")
+                : t("live.pressStart")}
+            </p>
+          </div>
         ) : (
           <ul
             className="relative w-full"

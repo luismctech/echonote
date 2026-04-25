@@ -12,6 +12,7 @@
  */
 
 import { Component, type ErrorInfo, type ReactNode } from "react";
+import { LogoGlow } from "./Logo";
 
 type Props = {
   /** Optional custom fallback. Defaults to {@link DefaultFallback}. */
@@ -62,7 +63,7 @@ export class ErrorBoundary extends Component<Props, State> {
 // Default fallback UI
 // ---------------------------------------------------------------------------
 
-const ISSUE_URL = "https://github.com/AlbertoMZCruz/echonote/issues/new";
+const ISSUE_URL = "https://github.com/luismctech/echonote/issues/new";
 
 function DefaultFallback({
   error,
@@ -103,7 +104,8 @@ function DefaultFallback({
 
   return (
     <main className="mx-auto flex min-h-screen max-w-2xl flex-col items-start gap-6 px-6 py-12">
-      <header className="flex flex-col gap-1">
+      <header className="flex flex-col gap-3">
+        <LogoGlow size={48} />
         <p className="font-mono text-xs uppercase tracking-wider text-rose-600 dark:text-rose-400">
           fatal — render error
         </p>
