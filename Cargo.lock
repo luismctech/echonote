@@ -582,9 +582,9 @@ dependencies = [
 
 [[package]]
 name = "cc"
-version = "1.2.60"
+version = "1.2.61"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "43c5703da9466b66a946814e1adf53ea2c90f10063b86290cc9eb67ce3478a20"
+checksum = "d16d90359e986641506914ba71350897565610e87ce0ad9e6f28569db3dd5c6d"
 dependencies = [
  "find-msvc-tools",
  "jobserver",
@@ -868,9 +868,9 @@ dependencies = [
 
 [[package]]
 name = "crc-catalog"
-version = "2.4.0"
+version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "19d374276b40fb8bbdee95aef7c7fa6b5316ec764510eb64b8dd0e2ed0d7e7f5"
+checksum = "217698eaf96b4a3f0bc4f3662aaa55bdf913cd54d7204591faa790070c6d0853"
 
 [[package]]
 name = "crc32fast"
@@ -1263,7 +1263,7 @@ checksum = "15401da73a9ed8c80e3b2d4dc05fe10e7b72d7243b9f614e516a44fa99986e88"
 
 [[package]]
 name = "echo-app"
-version = "0.1.0"
+version = "0.2.1"
 dependencies = [
  "async-trait",
  "echo-audio",
@@ -1283,7 +1283,7 @@ dependencies = [
 
 [[package]]
 name = "echo-asr"
-version = "0.1.0"
+version = "0.2.1"
 dependencies = [
  "async-trait",
  "echo-audio",
@@ -1300,7 +1300,7 @@ dependencies = [
 
 [[package]]
 name = "echo-audio"
-version = "0.1.0"
+version = "0.2.1"
 dependencies = [
  "async-trait",
  "cpal",
@@ -1319,7 +1319,7 @@ dependencies = [
 
 [[package]]
 name = "echo-diarize"
-version = "0.1.0"
+version = "0.2.1"
 dependencies = [
  "async-trait",
  "echo-domain",
@@ -1335,7 +1335,7 @@ dependencies = [
 
 [[package]]
 name = "echo-domain"
-version = "0.1.0"
+version = "0.2.1"
 dependencies = [
  "async-trait",
  "futures",
@@ -1351,7 +1351,7 @@ dependencies = [
 
 [[package]]
 name = "echo-llm"
-version = "0.1.0"
+version = "0.2.1"
 dependencies = [
  "async-trait",
  "echo-domain",
@@ -1368,7 +1368,7 @@ dependencies = [
 
 [[package]]
 name = "echo-proto"
-version = "0.1.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -1391,7 +1391,7 @@ dependencies = [
 
 [[package]]
 name = "echo-shell"
-version = "0.1.0"
+version = "0.2.1"
 dependencies = [
  "dirs",
  "echo-app",
@@ -1427,7 +1427,7 @@ dependencies = [
 
 [[package]]
 name = "echo-storage"
-version = "0.1.0"
+version = "0.2.1"
 dependencies = [
  "async-trait",
  "echo-domain",
@@ -1445,7 +1445,7 @@ dependencies = [
 
 [[package]]
 name = "echo-telemetry"
-version = "0.1.0"
+version = "0.2.1"
 dependencies = [
  "serde",
  "thiserror 2.0.18",
@@ -1464,14 +1464,14 @@ dependencies = [
 
 [[package]]
 name = "embed-resource"
-version = "3.0.8"
+version = "3.0.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "63a1d0de4f2249aa0ff5884d7080814f446bb241a559af6c170a41e878ed2d45"
+checksum = "c31a88c8d26de40ed18fe748c547845aa39de1db3afd958f8cb91579f3644bcb"
 dependencies = [
  "cc",
  "memchr",
  "rustc_version",
- "toml 0.9.12+spec-1.1.0",
+ "toml 1.1.2+spec-1.1.0",
  "vswhom",
  "winreg",
 ]
@@ -2907,9 +2907,9 @@ dependencies = [
 
 [[package]]
 name = "libc"
-version = "0.2.185"
+version = "0.2.186"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "52ff2c0fe9bc6cb6b14a0592c2ff4fa9ceb83eea9db979b0487cd054946a2b8f"
+checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 
 [[package]]
 name = "libloading"
@@ -3028,9 +3028,9 @@ checksum = "92daf443525c4cce67b150400bc2316076100ce0b3686209eb8cf3c31612e6f0"
 
 [[package]]
 name = "llama-cpp-2"
-version = "0.1.144"
+version = "0.1.145"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b2e7a3cc3ed741aa3d5e6e3ff1d84d5ab7ba13bf15c857be06a5d11517767616"
+checksum = "2e82b8c7a1c1a0ad97e1cc5cc28e01e9e14be73d4068e0fe9ac9d6c465001323"
 dependencies = [
  "encoding_rs",
  "enumflags2",
@@ -3042,9 +3042,9 @@ dependencies = [
 
 [[package]]
 name = "llama-cpp-sys-2"
-version = "0.1.144"
+version = "0.1.145"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0a2efa5c5675f4e2170c52c4418f71907d39b1e3931fd7566f8382cf9e166282"
+checksum = "9e1e5495433ca7487b9f8c7046f64e69937861d438b20f12ee3c524f35d55ad3"
 dependencies = [
  "bindgen",
  "cc",
@@ -4892,9 +4892,9 @@ dependencies = [
 
 [[package]]
 name = "rustls-pki-types"
-version = "1.14.0"
+version = "1.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "be040f8b0a225e40375822a563fa9524378b9d63112f53e19ffff34df5d33fdd"
+checksum = "30a7197ae7eb376e574fe940d068c30fe0462554a3ddbe4eca7838e049c937a9"
 dependencies = [
  "web-time",
  "zeroize",
@@ -6545,6 +6545,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "toml"
+version = "1.1.2+spec-1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "81f3d15e84cbcd896376e6730314d59fb5a87f31e4b038454184435cd57defee"
+dependencies = [
+ "indexmap 2.14.0",
+ "serde_core",
+ "serde_spanned 1.1.1",
+ "toml_datetime 1.1.1+spec-1.1.0",
+ "toml_parser",
+ "toml_writer",
+ "winnow 1.0.2",
+]
+
+[[package]]
 name = "toml_datetime"
 version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6604,7 +6619,7 @@ dependencies = [
  "indexmap 2.14.0",
  "toml_datetime 1.1.1+spec-1.1.0",
  "toml_parser",
- "winnow 1.0.1",
+ "winnow 1.0.2",
 ]
 
 [[package]]
@@ -6613,7 +6628,7 @@ version = "1.1.2+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2abe9b86193656635d2411dc43050282ca48aa31c2451210f4202550afb7526"
 dependencies = [
- "winnow 1.0.1",
+ "winnow 1.0.2",
 ]
 
 [[package]]
@@ -6918,9 +6933,9 @@ checksum = "bc7d623258602320d5c55d1bc22793b57daff0ec7efc270ea7d55ce1d5f5471c"
 
 [[package]]
 name = "typenum"
-version = "1.19.0"
+version = "1.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "562d481066bde0658276a35467c4af00bdc6ee726305698a55b86e61d7ad82bb"
+checksum = "40ce102ab67701b8526c123c1bab5cbe42d7040ccfd0f64af1a385808d2f43de"
 
 [[package]]
 name = "ucd-trie"
@@ -7316,9 +7331,9 @@ dependencies = [
 
 [[package]]
 name = "web_atoms"
-version = "0.2.3"
+version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "57a9779e9f04d2ac1ce317aee707aa2f6b773afba7b931222bff6983843b1576"
+checksum = "d7cff6eef815df1834fd250e3a2ff436044d82a9f1bc1980ca1dbdf07effc538"
 dependencies = [
  "phf 0.13.1",
  "phf_codegen 0.13.1",
@@ -8013,9 +8028,9 @@ dependencies = [
 
 [[package]]
 name = "winnow"
-version = "1.0.1"
+version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "09dac053f1cd375980747450bfc7250c264eaae0583872e845c0c7cd578872b5"
+checksum = "2ee1708bef14716a11bae175f579062d4554d95be2c6829f518df847b7b3fdd0"
 dependencies = [
  "memchr",
 ]

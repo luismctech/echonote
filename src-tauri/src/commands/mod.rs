@@ -21,7 +21,7 @@ pub mod streaming;
 // sub-modules directly: `commands::streaming::start_streaming`, etc.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
@@ -154,6 +154,11 @@ pub struct AppState {
     /// Model IDs currently being downloaded, mapped to a cancel flag.
     /// Setting the flag to `true` signals the download loop to abort.
     pub(crate) in_flight_downloads: Arc<Mutex<std::collections::HashMap<String, std::sync::Arc<std::sync::atomic::AtomicBool>>>>,
+    /// Root directory for model files and other data assets.
+    /// In debug builds this is the workspace root; in release builds
+    /// it falls back to the Tauri `appDataDir` so models are
+    /// downloaded to a writable, OS-standard location.
+    pub(crate) data_root: PathBuf,
 }
 
 use echo_domain::StreamingSessionId;
@@ -203,15 +208,27 @@ impl AppState {
     /// Build the shared state. Async because opening the SQLite database
     /// runs migrations, which is I/O.
     pub async fn initialize(app_data_dir: Option<PathBuf>) -> Result<Self, IpcError> {
+        // In release builds prefer the Tauri app-data directory so
+        // downloaded models land in an OS-writable location instead of
+        // the (non-existent) compile-time source tree.
+        let data_root = if cfg!(debug_assertions) {
+            workspace_root()
+        } else {
+            app_data_dir.clone().unwrap_or_else(workspace_root)
+        };
+        tracing::info!(data_root = %data_root.display(), "resolved data root for model assets");
+
         let model_path =
-            resolve_asset_path(std::env::var("ECHO_ASR_MODEL").ok(), preferred_asr_model());
+            resolve_asset_path(&data_root, std::env::var("ECHO_ASR_MODEL").ok(), preferred_asr_model(&data_root));
         let embed_model_path = resolve_asset_path(
+            &data_root,
             std::env::var("ECHO_EMBED_MODEL").ok(),
             "models/embedder/eres2net_en_voxceleb.onnx",
         );
         let llm_model_path =
-            resolve_asset_path(std::env::var("ECHO_LLM_MODEL").ok(), preferred_llm_model());
+            resolve_asset_path(&data_root, std::env::var("ECHO_LLM_MODEL").ok(), preferred_llm_model(&data_root));
         let vad_model_path = resolve_asset_path(
+            &data_root,
             std::env::var("ECHO_VAD_MODEL").ok(),
             "models/vad/silero_vad.onnx",
         );
@@ -249,6 +266,7 @@ impl AppState {
             vad_model_path,
             vad: LazyModel::new(),
             in_flight_downloads: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            data_root,
         })
     }
 
@@ -259,14 +277,16 @@ impl AppState {
     /// Lazily load the local LLM (concrete type for adapters).
     pub(crate) async fn ensure_llm_concrete(&self) -> Result<Arc<LlamaCppLlm>, IpcError> {
         let model_path = self.llm_model_path.clone();
+        let data_root = self.data_root.clone();
         self.llm
             .get_or_init(|| async move {
                 let path = if model_path.exists() {
                     model_path.clone()
                 } else {
                     let fresh = resolve_asset_path(
+                        &data_root,
                         std::env::var("ECHO_LLM_MODEL").ok(),
-                        preferred_llm_model(),
+                        preferred_llm_model(&data_root),
                     );
                     if !fresh.exists() {
                         return Err(IpcError::model_not_ready(format!(
@@ -377,14 +397,16 @@ impl AppState {
     /// Lazily load the whisper transcriber.
     pub(crate) async fn ensure_transcriber(&self) -> Result<Arc<dyn Transcriber>, IpcError> {
         let asr_path = self.model_path.clone();
+        let data_root = self.data_root.clone();
         self.transcriber
             .get_or_init(|| async move {
                 let path = if asr_path.exists() {
                     asr_path.clone()
                 } else {
                     let fresh = resolve_asset_path(
+                        &data_root,
                         std::env::var("ECHO_ASR_MODEL").ok(),
-                        preferred_asr_model(),
+                        preferred_asr_model(&data_root),
                     );
                     if !fresh.exists() {
                         return Err(IpcError::model_not_ready(format!(
@@ -440,7 +462,7 @@ fn resolve_db_path(app_data_dir: Option<PathBuf>) -> PathBuf {
     workspace_root().join("echonote.db")
 }
 
-fn preferred_llm_model() -> &'static str {
+fn preferred_llm_model(root: &Path) -> &'static str {
     const CANDIDATES: &[&str] = &[
         "models/llm/Qwen3-30B-A3B-Q4_K_M.gguf",
         "models/llm/Qwen3-14B-Q4_K_M.gguf",
@@ -448,7 +470,6 @@ fn preferred_llm_model() -> &'static str {
         "models/llm/qwen2.5-7b-instruct-q4_k_m.gguf",
         "models/llm/qwen2.5-3b-instruct-q4_k_m.gguf",
     ];
-    let root = workspace_root();
     for rel in CANDIDATES {
         if root.join(rel).exists() {
             return rel;
@@ -457,7 +478,7 @@ fn preferred_llm_model() -> &'static str {
     "models/llm/Qwen3-14B-Q4_K_M.gguf"
 }
 
-fn preferred_asr_model() -> &'static str {
+fn preferred_asr_model(root: &Path) -> &'static str {
     const CANDIDATES: &[&str] = &[
         "models/asr/ggml-large-v3-turbo-es.bin",
         "models/asr/ggml-large-v3-turbo.bin",
@@ -472,7 +493,6 @@ fn preferred_asr_model() -> &'static str {
         "models/asr/ggml-small.en.bin",
         "models/asr/ggml-tiny.en.bin",
     ];
-    let root = workspace_root();
     for rel in CANDIDATES {
         if root.join(rel).exists() {
             return rel;
@@ -481,26 +501,20 @@ fn preferred_asr_model() -> &'static str {
     "models/asr/ggml-large-v3-turbo.bin"
 }
 
-fn resolve_asset_path(override_value: Option<String>, default_relative: &str) -> PathBuf {
-    let workspace_root = workspace_root();
-
+fn resolve_asset_path(root: &Path, override_value: Option<String>, default_relative: &str) -> PathBuf {
     if let Some(raw) = override_value.filter(|s| !s.trim().is_empty()) {
         let raw_path = PathBuf::from(&raw);
         if raw_path.is_absolute() {
             return raw_path;
         }
-        let rooted = workspace_root.join(&raw_path);
+        let rooted = root.join(&raw_path);
         if rooted.exists() {
             return rooted;
         }
         return raw_path;
     }
 
-    let rooted = workspace_root.join(default_relative);
-    if rooted.exists() {
-        return rooted;
-    }
-    rooted
+    root.join(default_relative)
 }
 
 /// Best-effort workspace root: the directory above `src-tauri/`.

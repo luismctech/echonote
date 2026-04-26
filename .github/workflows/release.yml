@@ -90,7 +90,7 @@ jobs:
     - name: Cache cargo registry and target
       uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
       with:
-        shared-key: release-${{ matrix.label }}
+        shared-key: release-${{ matrix.label }}-v2
 
     # --- Linux system deps ---
     - name: Install system dependencies (Linux)
@@ -118,6 +118,7 @@ jobs:
       uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
       with:
         node-version: 22
+        check-latest: true
         cache: pnpm
 
     - name: pnpm install

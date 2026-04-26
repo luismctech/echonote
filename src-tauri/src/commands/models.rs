@@ -8,7 +8,7 @@ use crate::ipc_error::{ErrorCode, IpcError};
 
 use futures::stream::StreamExt;
 
-use super::{workspace_root, AppState};
+use super::AppState;
 
 /// A downloadable model known to the app.
 #[derive(Debug, Clone, Serialize, specta::Type)]
@@ -32,8 +32,7 @@ pub struct ModelInfo {
 /// Each entry carries an optional SHA-256 hex digest. When present,
 /// downloads are verified after completion and rejected on mismatch.
 /// Populate hashes by running `shasum -a 256 <model_file>`.
-fn model_catalog() -> Vec<(ModelInfo, &'static str, Option<&'static str>)> {
-    let root = workspace_root();
+fn model_catalog(root: &std::path::Path) -> Vec<(ModelInfo, &'static str, Option<&'static str>)> {
     let present = |rel: &str| root.join(rel).exists();
 
     vec![
@@ -158,8 +157,8 @@ fn model_dest_path(id: &str) -> Option<&'static str> {
 /// Return the status of all downloadable models.
 #[tauri::command]
 #[specta::specta]
-pub fn get_model_status() -> Vec<ModelInfo> {
-    model_catalog()
+pub fn get_model_status(state: State<'_, AppState>) -> Vec<ModelInfo> {
+    model_catalog(&state.data_root)
         .into_iter()
         .map(|(info, _, _)| info)
         .collect()
@@ -219,7 +218,7 @@ pub async fn download_model(
         }
     });
 
-    let catalog = model_catalog();
+    let catalog = model_catalog(&state.data_root);
     let (_, url, expected_sha) = catalog
         .iter()
         .find(|(info, _, _)| info.id == model_id)
@@ -229,7 +228,7 @@ pub async fn download_model(
 
     let rel_path = model_dest_path(&model_id)
         .ok_or_else(|| IpcError::not_found(format!("no dest path for model: {model_id}")))?;
-    let dest = workspace_root().join(rel_path);
+    let dest = state.data_root.join(rel_path);
 
     if let Some(parent) = dest.parent() {
         tokio::fs::create_dir_all(parent)
@@ -372,7 +371,7 @@ pub async fn delete_model(
 ) -> Result<(), IpcError> {
     let rel_path = model_dest_path(&model_id)
         .ok_or_else(|| IpcError::not_found(format!("unknown model: {model_id}")))?;
-    let dest = workspace_root().join(rel_path);
+    let dest = state.data_root.join(rel_path);
 
     if !dest.exists() {
         return Err(IpcError::not_found(format!(
