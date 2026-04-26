@@ -34,13 +34,13 @@ use echo_domain::{AudioCapture, AudioSource, AudioStream, CaptureSpec, DeviceInf
 use crate::CpalMicrophoneCapture;
 
 #[cfg(target_os = "macos")]
-use crate::ScreenCaptureKitCapture;
+use super::ScreenCaptureKitCapture;
 
 #[cfg(target_os = "windows")]
-use crate::WasapiLoopbackCapture;
+use super::WasapiLoopbackCapture;
 
 #[cfg(target_os = "linux")]
-use crate::PulseMonitorCapture;
+use super::PulseMonitorCapture;
 
 /// Composite [`AudioCapture`] that delegates to a per-source adapter.
 ///
