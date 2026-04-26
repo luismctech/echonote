@@ -8,7 +8,7 @@
 #   3. linux     — `cargo check` only, to catch platform-specific drift early
 #
 # Phase 0 runs macOS-only as the primary dev target. Linux and Windows get
-# full pipelines in Phase 1 per DEVELOPMENT_PLAN §5.3 (weeks 12-15).
+# full pipelines in Phase 1 (weeks 12-15).
 # -----------------------------------------------------------------------------
 
 name: CI

@@ -373,7 +373,7 @@ export type ChatRole =
 "assistant"
 /**
  * A term/definition pair extracted from a lecture or class
- * (DEVELOPMENT_PLAN.md §3.2.6).
+
  */
 export type Definition = { 
 /**
@@ -482,7 +482,7 @@ target: string;
 commit: string }
 /**
  * A notable quote attributed to a speaker, used by the Interview
- * template (DEVELOPMENT_PLAN.md §3.2.4).
+ * template.
  */
 export type InterviewQuote = { 
 /**

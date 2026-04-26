@@ -10,7 +10,7 @@
  * `id`, `meetingId`, `model`, `language`, `createdAt`. Add a new
  * variant here whenever a new template ships in the domain layer
  * (kept in lockstep manually until `tauri-specta` lands — see ADR
- * note in `docs/adr/0002-rust-plus-react-stack.md`).
+ * note in the architecture docs).
  */
 
 import type { MeetingId } from "./meeting";

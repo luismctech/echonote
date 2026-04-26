@@ -4,8 +4,7 @@
 //! All entities are serializable so they can be persisted by the storage
 //! adapter and emitted to the frontend across the Tauri IPC boundary.
 //!
-//! Concrete types will be fleshed out during Sprint 0 days 5-9 (see
-//! `docs/DEVELOPMENT_PLAN.md` §6.2, epic E2 onwards).
+//! Concrete types are fleshed out in each submodule.
 
 pub mod meeting;
 pub mod segment;

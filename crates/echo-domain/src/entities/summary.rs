@@ -4,7 +4,7 @@
 //! produced by the local LLM (CU-04 in the development plan). Six
 //! templates are implemented: General (default), OneOnOne, SprintReview,
 //! Interview, SalesCall, and Lecture — each as a variant of
-//! [`SummaryContent`] (DEVELOPMENT_PLAN.md §3.2).
+//! [`SummaryContent`].
 //!
 //! ## Why "content" is a discriminated union
 //!
@@ -78,7 +78,7 @@ pub struct ActionItem {
 }
 
 /// A notable quote attributed to a speaker, used by the Interview
-/// template (DEVELOPMENT_PLAN.md §3.2.4).
+/// template.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct InterviewQuote {
@@ -92,7 +92,7 @@ pub struct InterviewQuote {
 }
 
 /// A term/definition pair extracted from a lecture or class
-/// (DEVELOPMENT_PLAN.md §3.2.6).
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct Definition {
@@ -105,7 +105,7 @@ pub struct Definition {
 /// Discriminated union over the body of a summary, keyed on the
 /// template that produced it.
 ///
-/// Six content templates are implemented (DEVELOPMENT_PLAN.md §3.2).
+/// Six content templates are implemented.
 /// The `#[non_exhaustive]` attribute means consumers must `_ => …`
 /// when matching, so adding new variants later is non-breaking.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]

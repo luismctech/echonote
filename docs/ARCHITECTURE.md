@@ -1097,24 +1097,18 @@ fn refinement_completes_in_under_90s_for_30min_audio() { ... }
 
 ---
 
-## 14. Decisiones arquitectónicas (ADRs)
+## 14. Key Architecture Decisions
 
-Los ADRs (Architecture Decision Records) se mantienen en `docs/adr/`. Formato MADR.
-
-### ADRs iniciales
-
-- **ADR-001:** Usar Tauri 2.x sobre Electron
-- **ADR-002:** Rust + React como stack base
-- **ADR-003:** whisper.cpp sobre faster-whisper
-- **ADR-004:** llama.cpp sobre Ollama como runtime embebido
-- **ADR-005:** Captura de pistas de audio separadas (mic y sistema)
-- **ADR-006:** Pipeline híbrido streaming + refinamiento
-- **ADR-007:** Diarización por embeddings ONNX (3D-Speaker) sobre pyannote
-- **ADR-008:** Zustand + TanStack Query sobre Redux
-- **ADR-009:** SQLite + FTS5 con SQLCipher opcional
-- **ADR-010:** Clean Architecture con puertos y adaptadores
-
-Cada ADR documenta: contexto, decisión, alternativas consideradas, consecuencias positivas y negativas, y estado (propuesto/aceptado/deprecated/superseded).
+- Tauri 2.x over Electron
+- Rust + React as the base stack
+- whisper.cpp over faster-whisper
+- llama.cpp over Ollama as embedded runtime
+- Separate audio track capture (mic and system)
+- Hybrid streaming + refinement pipeline
+- Speaker diarization via ONNX embeddings (3D-Speaker) over pyannote
+- Zustand + TanStack Query over Redux
+- SQLite + FTS5 with optional SQLCipher
+- Clean Architecture with ports and adapters
 
 ---
 
