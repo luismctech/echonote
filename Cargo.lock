@@ -1263,7 +1263,7 @@ checksum = "15401da73a9ed8c80e3b2d4dc05fe10e7b72d7243b9f614e516a44fa99986e88"
 
 [[package]]
 name = "echo-app"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "echo-audio",
@@ -1283,7 +1283,7 @@ dependencies = [
 
 [[package]]
 name = "echo-asr"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "echo-audio",
@@ -1300,7 +1300,7 @@ dependencies = [
 
 [[package]]
 name = "echo-audio"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "cpal",
@@ -1319,7 +1319,7 @@ dependencies = [
 
 [[package]]
 name = "echo-diarize"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "echo-domain",
@@ -1335,7 +1335,7 @@ dependencies = [
 
 [[package]]
 name = "echo-domain"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "futures",
@@ -1351,7 +1351,7 @@ dependencies = [
 
 [[package]]
 name = "echo-llm"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "echo-domain",
@@ -1368,7 +1368,7 @@ dependencies = [
 
 [[package]]
 name = "echo-proto"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1391,7 +1391,7 @@ dependencies = [
 
 [[package]]
 name = "echo-shell"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "dirs",
  "echo-app",
@@ -1427,7 +1427,7 @@ dependencies = [
 
 [[package]]
 name = "echo-storage"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "echo-domain",
@@ -1445,7 +1445,7 @@ dependencies = [
 
 [[package]]
 name = "echo-telemetry"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "thiserror 2.0.18",
@@ -2907,9 +2907,9 @@ dependencies = [
 
 [[package]]
 name = "libc"
-version = "0.2.185"
+version = "0.2.186"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "52ff2c0fe9bc6cb6b14a0592c2ff4fa9ceb83eea9db979b0487cd054946a2b8f"
+checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 
 [[package]]
 name = "libloading"
