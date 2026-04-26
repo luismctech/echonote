@@ -1,7 +1,7 @@
 # EchoNote
 
 [![CI](https://github.com/luismctech/echonote/actions/workflows/ci.yml/badge.svg?branch=develop)](https://github.com/luismctech/echonote/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
+[![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](./LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.88%2B-orange.svg?logo=rust)](./rust-toolchain.toml)
 
 > Private, local-first meeting transcription and AI summaries.
@@ -442,4 +442,4 @@ Branching model is described in `DEVELOPMENT_PLAN.md §11.1`.
 
 ## License
 
-[MIT](./LICENSE) © 2026 Alberto Cruz
+[AGPL-3.0](./LICENSE) © 2026 Alberto Cruz
