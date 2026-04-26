@@ -14,7 +14,7 @@ seriously.
 
 **Please do NOT open a public GitHub issue for security concerns.**
 
-Instead, email **albertomzcruz@gmail.com** with:
+Instead, email **luismctechdev@gmail.com** with:
 
 1. A description of the vulnerability or privacy concern.
 2. Steps to reproduce (or a proof of concept).

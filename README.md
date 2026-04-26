@@ -1,12 +1,10 @@
 # EchoNote
 
-[![CI](https://github.com/luismctech/echonote/actions/workflows/ci.yml/badge.svg?branch=develop)](https://github.com/luismctech/echonote/actions/workflows/ci.yml)
+[![CI](https://github.com/luismctech/echonote/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/luismctech/echonote/actions/workflows/ci.yml)
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](./LICENSE)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey)]()
 
 **EchoNote** is a free, open-source desktop app that transcribes and summarizes your meetings using AI — entirely on your device. No cloud services, no bots joining your calls, no subscriptions.
-
-> **Status:** Early alpha. Core features work on macOS; Windows and Linux builds are available but less tested.
 
 ---
 
@@ -129,8 +127,6 @@ Models are downloaded automatically on first use.
 - [ ] Setup wizard with hardware profile detection
 - [ ] More summary templates (1:1, sprint review, interview, sales call)
 
-See [docs/DEVELOPMENT_PLAN.md](./docs/DEVELOPMENT_PLAN.md) for the full roadmap.
-
 ---
 
 ## Built with
@@ -150,105 +146,10 @@ See [docs/DEVELOPMENT_PLAN.md](./docs/DEVELOPMENT_PLAN.md) for the full roadmap.
 
 ## Contributing
 
-EchoNote is in active early development. Contributions are welcome — see [CONTRIBUTING.md](./CONTRIBUTING.md) for guidelines.
-
-Commits follow [Conventional Commits](https://www.conventionalcommits.org/).
-
----
-
-<details>
-<summary><h2>Developer guide</h2></summary>
-
-### Prerequisites
-
-- macOS 12.3+, Windows 10+, or Linux (Ubuntu 22.04+)
-- Rust 1.88+ (pinned in `rust-toolchain.toml`)
-- Node 20+ and pnpm 10+
-- CMake, Clang (required by whisper.cpp / llama.cpp)
-
-On macOS:
-```sh
-brew install cmake ninja
-xcode-select --install
-```
-
-### Setup
-
-```sh
-git clone https://github.com/luismctech/echonote.git
-cd echonote
-./scripts/bootstrap.sh      # verifies toolchain, sets up git hooks
-pnpm install                # frontend dependencies
-cargo build --workspace     # backend dependencies
-```
-
-### Development
-
-```sh
-pnpm tauri:dev              # full app with hot-reload
-pnpm dev                    # frontend only (browser, no Tauri IPC)
-
-# Backend checks (same as CI)
-cargo fmt --all --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace --all-targets
-```
-
-### CLI tool
-
-`echo-proto` is a headless CLI for recording, transcription, streaming, and benchmarks:
-
-```sh
-cargo run -p echo-proto -- --help
-cargo run -p echo-proto -- record --duration 5 --output /tmp/sample.wav
-cargo run -p echo-proto -- transcribe /tmp/sample.wav
-cargo run -p echo-proto -- stream --duration 30
-cargo run -p echo-proto -- meetings list
-```
-
-### Download models
-
-```sh
-./scripts/download-models.sh          # Whisper large-v3-turbo (default)
-./scripts/download-models.sh --all    # all models (ASR + VAD + embeddings)
-```
-
-### Repository structure
-
-```
-echonote/
-├── src/                  React frontend (TypeScript)
-├── src-tauri/            Tauri shell (Rust)
-├── crates/               Rust library crates
-│   ├── echo-app/         Application services
-│   ├── echo-asr/         Whisper speech-to-text
-│   ├── echo-audio/       Audio capture & processing
-│   ├── echo-diarize/     Speaker identification
-│   ├── echo-domain/      Core types & ports
-│   ├── echo-llm/         LLM integration
-│   ├── echo-proto/       CLI tool
-│   ├── echo-storage/     SQLite persistence
-│   └── echo-telemetry/   Logging & tracing
-├── docs/                 Architecture, design, ADRs
-├── models/               AI models (git-ignored)
-├── scripts/              Build & setup scripts
-└── fixtures/             Test audio & transcripts
-```
-
-### Project documentation
-
-| Document | Description |
-|----------|-------------|
-| [ARCHITECTURE.md](./docs/ARCHITECTURE.md) | System design and technical decisions |
-| [DESIGN.md](./docs/DESIGN.md) | UI/UX design system |
-| [DEVELOPMENT_PLAN.md](./docs/DEVELOPMENT_PLAN.md) | Phased roadmap (28 weeks) |
-| [docs/adr/](./docs/adr/) | Architecture Decision Records |
-| [docs/benchmarks/](./docs/benchmarks/) | ASR quality benchmarks |
-
-</details>
+EchoNote is open-source and contributions are welcome — see [CONTRIBUTING.md](./CONTRIBUTING.md) for guidelines.
 
 ---
 
 ## License
 
-[AGPL-3.0](./LICENSE) © 2026 Alberto Cruz
+[AGPL-3.0](./LICENSE) © 2026 Luis MC

@@ -81,7 +81,7 @@ export type ChatEvent =
        * `false` when {@link citations} is empty after validation.
        * Lets the UI surface "respuesta sin citas verificables"
        * without re-checking `citations.length`. An empty list is
-       * NOT an error; per `docs/SPRINT-1-STATUS.md` §8.4 we never
+       * NOT an error; we never
        * re-prompt the model to add citations.
        */
       hadCitations: boolean;

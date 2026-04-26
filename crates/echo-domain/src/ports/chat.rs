@@ -7,7 +7,7 @@
 //!
 //! ## Why a stream
 //!
-//! CU-05 (`docs/DEVELOPMENT_PLAN.md` §3.1) explicitly requires
+//! CU-05 explicitly requires
 //! incremental token rendering: "Sistema streamea la respuesta al
 //! usuario (tokens aparecen incrementalmente)". A non-streaming `String`
 //! return would force the whole reply to be buffered before the user

@@ -794,16 +794,15 @@ Entra desde abajo con slide + fade. Auto-dismiss en 4 s. Slide out al hacer swip
 
 ---
 
-## Apéndice A — Mockups visuales
+## Apéndice A — Pantallas principales
 
-Se adjuntan archivos HTML interactivos con mockups de las pantallas clave:
+Las pantallas clave de la aplicación:
 
-1. **mockup-home.html** — Home / Library
-2. **mockup-recording.html** — Recording activo
-3. **mockup-meeting.html** — Meeting view con resumen
-4. **mockup-onboarding.html** — Flujo de onboarding
-5. **mockup-settings.html** — Settings
-6. **mockup-design-system.html** — Design system showcase
+1. **Home / Library** — Lista de reuniones y búsqueda
+2. **Recording** — Vista de grabación activa
+3. **Meeting view** — Transcripción con resumen
+4. **Onboarding** — Flujo de configuración inicial
+5. **Settings** — Preferencias de la aplicación
 
 ## Apéndice B — Referencias visuales
 
