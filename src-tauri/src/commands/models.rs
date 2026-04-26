@@ -127,13 +127,15 @@ fn model_catalog(root: &std::path::Path) -> Vec<(ModelInfo, &'static str, Option
         (
             ModelInfo {
                 id: "vad-silero".into(),
-                label: "Silero VAD v5 (2 MB)".into(),
+                label: "Silero VAD v5 (1.2 MB, simplified for tract)".into(),
                 kind: "vad".into(),
                 present: present("models/vad/silero_vad.onnx"),
-                size_bytes: 2_200_000,
+                size_bytes: 1_200_000,
             },
-            "https://github.com/snakers4/silero-vad/raw/v5.1.2/src/silero_vad/data/silero_vad.onnx",
-            None, // TODO: populate sha256
+            // Pre-simplified ONNX (If nodes inlined for 16 kHz, BASIC-optimised).
+            // The upstream file has ONNX `If` ops that tract cannot execute.
+            "https://github.com/luismctech/echonote/releases/download/v0.2.1/silero_vad.onnx",
+            Some("d224cf508fbaf8bb1a49f333120b536dbaa1ed2b0ab49bed059d6e44a4f8305c"),
         ),
     ]
 }
