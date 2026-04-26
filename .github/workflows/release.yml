@@ -124,14 +124,17 @@ jobs:
       run: pnpm install --frozen-lockfile
 
     # --- macOS code signing setup (optional) ---
-    - name: Write Apple API key to disk
-      if: runner.os == 'macOS' && env.APPLE_API_KEY_CONTENT != ''
-      env:
-        APPLE_API_KEY_CONTENT: ${{ secrets.APPLE_API_KEY_CONTENT }}
-      shell: bash
-      run: |
-        mkdir -p ~/private_keys
-        echo "$APPLE_API_KEY_CONTENT" > ~/private_keys/AuthKey.p8
+    # Uncomment the steps below when Apple Developer secrets are configured:
+    #   APPLE_CERTIFICATE, APPLE_CERTIFICATE_PASSWORD, APPLE_SIGNING_IDENTITY,
+    #   APPLE_API_ISSUER, APPLE_API_KEY, APPLE_API_KEY_CONTENT
+    # - name: Write Apple API key to disk
+    #   if: runner.os == 'macOS' && env.APPLE_API_KEY_CONTENT != ''
+    #   env:
+    #     APPLE_API_KEY_CONTENT: ${{ secrets.APPLE_API_KEY_CONTENT }}
+    #   shell: bash
+    #   run: |
+    #     mkdir -p ~/private_keys
+    #     echo "$APPLE_API_KEY_CONTENT" > ~/private_keys/AuthKey.p8
 
     # --- Build + publish ---
     - name: Build Tauri app and upload to release
@@ -141,13 +144,6 @@ jobs:
         # Updater signing (required for auto-update)
         TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
         TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        # macOS code signing (optional — remove if no Apple Developer account)
-        APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-        APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-        APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-        APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
-        APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
-        APPLE_API_KEY_PATH: ${{ runner.os == 'macOS' && '~/private_keys/AuthKey.p8' || '' }}
         # ggml (whisper.cpp) hardcodes CMAKE_OSX_DEPLOYMENT_TARGET=10.13 with
         # FORCE, which makes std::filesystem unavailable on Xcode 15+ SDKs.
         # We disable libc++ availability checks since our real target is 11.0+.

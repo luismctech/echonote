@@ -102,7 +102,9 @@ jobs:
     - name: cargo clippy
       run: cargo clippy --workspace --all-targets -- -D warnings
 
-    - name: Resolve Swift runtime path (for screencapturekit dylib)
+    # screencapturekit crate links Swift Concurrency. On GH runners the
+    # dylib lives inside the Xcode toolchain, not in the dyld shared cache.
+    - name: Resolve Swift runtime path
       id: swift
       run: echo "lib_dir=$(dirname $(xcrun --toolchain default -f swiftc))/../lib/swift/macosx" >> "$GITHUB_OUTPUT"
 
@@ -115,6 +117,8 @@ jobs:
       run: cargo build --workspace --locked
 
     - name: cargo run echo-proto --help (smoke test)
+      env:
+        DYLD_FALLBACK_LIBRARY_PATH: /usr/lib/swift:${{ steps.swift.outputs.lib_dir }}
       run: cargo run --locked -p echo-proto -- --help
 
   # ---------------------------------------------------------------------------
@@ -187,9 +191,9 @@ jobs:
       uses: dtolnay/rust-toolchain@stable
 
     - name: cargo audit (Rust)
-      uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
-      with:
-        token: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        cargo install cargo-audit --locked
+        cargo audit
 
     - name: Setup pnpm (version from packageManager field)
       uses: pnpm/action-setup@5280c022466e8e5ea34ea201e2fda33875aeefdb # v6
