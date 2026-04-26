@@ -81,7 +81,7 @@ jobs:
     - name: Setup Node
       uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
       with:
-        node-version: 20
+        node-version: 22
         cache: pnpm
 
     - name: pnpm install (frozen lockfile)
@@ -102,7 +102,13 @@ jobs:
     - name: cargo clippy
       run: cargo clippy --workspace --all-targets -- -D warnings
 
+    - name: Resolve Swift runtime path (for screencapturekit dylib)
+      id: swift
+      run: echo "lib_dir=$(dirname $(xcrun --toolchain default -f swiftc))/../lib/swift/macosx" >> "$GITHUB_OUTPUT"
+
     - name: cargo test
+      env:
+        DYLD_FALLBACK_LIBRARY_PATH: /usr/lib/swift:${{ steps.swift.outputs.lib_dir }}
       run: cargo test --workspace --all-targets --locked
 
     - name: cargo build (dev profile)
@@ -154,7 +160,7 @@ jobs:
     - name: Setup Node
       uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
       with:
-        node-version: 20
+        node-version: 22
         cache: pnpm
 
     - name: pnpm install (frozen lockfile)
@@ -191,7 +197,7 @@ jobs:
     - name: Setup Node
       uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
       with:
-        node-version: 20
+        node-version: 22
         cache: pnpm
 
     - name: pnpm install (frozen lockfile)

@@ -117,7 +117,7 @@ jobs:
     - name: Setup Node
       uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
       with:
-        node-version: 20
+        node-version: 22
         cache: pnpm
 
     - name: pnpm install
@@ -148,6 +148,11 @@ jobs:
         APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
         APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
         APPLE_API_KEY_PATH: ${{ runner.os == 'macOS' && '~/private_keys/AuthKey.p8' || '' }}
+        # ggml (whisper.cpp) hardcodes CMAKE_OSX_DEPLOYMENT_TARGET=10.13 with
+        # FORCE, which makes std::filesystem unavailable on Xcode 15+ SDKs.
+        # We disable libc++ availability checks since our real target is 11.0+.
+        CXXFLAGS: ${{ runner.os == 'macOS' && '-D_LIBCPP_DISABLE_AVAILABILITY' || '' }}
+        CFLAGS: ${{ runner.os == 'macOS' && '-D_LIBCPP_DISABLE_AVAILABILITY' || '' }}
       with:
         tagName: ${{ github.ref_name }}
         releaseName: "EchoNote ${{ github.ref_name }}"
