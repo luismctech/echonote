@@ -26,11 +26,18 @@
     "security": {
       "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src ipc: http://ipc.localhost",
       "capabilities": ["default"]
+    },
+    "trayIcon": {
+      "id": "main-tray",
+      "iconPath": "icons/tray-icon.png",
+      "iconAsTemplate": true,
+      "tooltip": "EchoNote"
     }
   },
   "bundle": {
     "active": true,
     "targets": "all",
+    "createUpdaterArtifacts": true,
     "category": "Productivity",
     "shortDescription": "Private, local-first meeting transcription",
     "longDescription": "EchoNote is a privacy-first desktop app that transcribes meetings and generates AI summaries entirely on-device.",
@@ -39,7 +46,20 @@
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
-      "icons/icon.png"
+      "icons/icon.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
     ]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDk3OEQ5QTYxOEE1RkE1RkIKUldUN3BWK0tZWnFObHdCbXZQemxrTVJtWGdxaG1TQVpwb2xiL3F3WXZkVnlsWlBCSnorZTYyUUoK",
+      "endpoints": [
+        "https://github.com/luismctech/echonote/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }

@@ -30,9 +30,46 @@ pub enum DomainError {
     #[error("model not loaded: {0}")]
     ModelNotLoaded(String),
 
+    /// Voice activity detection failed at runtime (model inference,
+    /// state corruption, sample-rate mismatch).
+    #[error("voice activity detection failed: {0}")]
+    VadFailed(String),
+
+    /// Speaker diarization failed (embedding inference, clustering
+    /// degeneration, or sample-rate mismatch).
+    #[error("speaker diarization failed: {0}")]
+    DiarizationFailed(String),
+
     /// The requested session does not exist or is in an invalid state.
     #[error("invalid session state: {0}")]
     InvalidSessionState(String),
+
+    /// A persistent record (meeting, segment, speaker, …) was not found.
+    /// `entity` is a short noun ("meeting", "segment", …); `id` is the
+    /// stringified identifier the caller used. Adapters return this
+    /// from "get/delete/finalize" calls when the row is missing so the
+    /// caller can distinguish "not found" from a real storage failure.
+    #[error("{entity} {id} not found")]
+    NotFound {
+        /// Short noun naming the kind of record (e.g. "meeting").
+        entity: &'static str,
+        /// Stringified identifier the caller looked up.
+        id: String,
+    },
+
+    /// Persistent storage (database, filesystem) reported an error that
+    /// is not "not found". Use this for sqlx errors, I/O failures, or
+    /// migration issues — anything where the storage layer is the
+    /// source of the problem rather than invalid input.
+    #[error("storage error: {0}")]
+    Storage(String),
+
+    /// The local LLM adapter failed at runtime (load error, decoding
+    /// crash, context-window overflow, OOM). Mapped from
+    /// `llama-cpp-rs` errors at the infrastructure boundary so the
+    /// application layer can react to summary failures uniformly.
+    #[error("llm inference failed: {0}")]
+    LlmFailed(String),
 
     /// Generic invariant violation. Prefer adding a specific variant when
     /// the error recurs in multiple places.

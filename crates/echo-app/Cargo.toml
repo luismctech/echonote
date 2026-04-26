@@ -14,12 +14,23 @@ echo-domain.workspace = true
 
 tokio.workspace = true
 async-trait.workspace = true
+# Used by `chat_with_transcript` to bridge the `ChatAssistant` token stream
+# into the use-case-level `AskAboutMeetingEvent` stream. Trait surface only
+# (`Stream`, `BoxStream`); no executor pulled in here.
+futures.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 uuid.workspace = true
 time = { workspace = true, features = ["formatting"] }
+specta.workspace = true
 
 [dev-dependencies]
-mockall.workspace = true
+# Tests in this crate use hand-rolled fakes (see meeting_recorder.rs,
+# rename_speaker.rs) instead of mockall — explicit Stores are easier to
+# reason about for a 5-method trait. Reintroduce mockall when a use
+# case grows enough internal helpers that hand-rolling becomes painful.
 pretty_assertions.workspace = true
+echo-audio = { path = "../echo-audio" }
+echo-storage = { path = "../echo-storage" }

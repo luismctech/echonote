@@ -1,0 +1,155 @@
+{
+  "app": {
+    "title": "EchoNote",
+    "subtitle": "Private, local-first meeting transcription and AI summaries."
+  },
+  "sidebar": {
+    "meetings": "Meetings",
+    "live": "+ Live",
+    "searchPlaceholder": "Search transcripts…",
+    "searchLabel": "Search meeting transcripts",
+    "clearSearch": "Clear search",
+    "noMeetings": "No meetings yet. Press Start to record one.",
+    "seg": "seg",
+    "deleteConfirm": "Delete {{title}}"
+  },
+  "search": {
+    "failed": "Search failed:",
+    "searching": "Searching…",
+    "noMatches": "No matches for \"{{query}}\".",
+    "rank": "rank"
+  },
+  "live": {
+    "title": "Live transcript",
+    "description": "5-second windows · whisper.cpp · {{label}}",
+    "langHint": "Hint passed to whisper. 'auto' lets the model detect.",
+    "langLabel": "Lang",
+    "langTooltip": "Transcription language",
+    "langAuto": "auto",
+    "diarize": "Diarize",
+    "starting": "Starting…",
+    "start": "Start",
+    "stopping": "Stopping…",
+    "stop": "Stop",
+    "error": "error:",
+    "fatal": "fatal:",
+    "dismiss": "dismiss",
+    "listening": "Listening… speak into the microphone.",
+    "pressStart": "Press Start or ⌘⇧R to begin a session.",
+    "modelLoads": "model loads on first start",
+    "silence": "silence",
+    "noSpeech": "[no speech]"
+  },
+  "health": {
+    "warmingUp": "warming up…",
+    "probing": "probing backend…",
+    "offline": "offline",
+    "ok": "backend ok · v{{version}}",
+    "tooltip": "v{{version}} · {{target}} · {{commit}}"
+  },
+  "meeting": {
+    "loading": "Loading meeting…",
+    "unavailable": "Meeting unavailable.",
+    "segments": "segments",
+    "noSegments": "No segments persisted for this meeting.",
+    "noSpeech": "[no speech]"
+  },
+  "export": {
+    "markdown": "Markdown (.md)",
+    "text": "Text (.txt)",
+    "title": "Export meeting",
+    "exporting": "Exporting…",
+    "button": "Export ▾"
+  },
+  "speakers": {
+    "label": "Speakers",
+    "speaker": "Speaker {{n}}",
+    "rename": "Rename {{name}}"
+  },
+  "summary": {
+    "label": "Summary",
+    "loading": "Loading summary…",
+    "empty": "No summary yet. Pick a template and click Generate.",
+    "generate": "Generate",
+    "generating": "Generating…",
+    "regenerate": "Regenerate",
+    "unknown": "Unknown template. Try regenerating with a known template.",
+    "emptySummary": "[empty summary]",
+    "sections": {
+      "keyPoints": "Key points",
+      "decisions": "Decisions",
+      "openQuestions": "Open questions",
+      "actionItems": "Action items",
+      "wins": "Wins",
+      "blockers": "Blockers",
+      "growthFeedback": "Growth feedback",
+      "nextSteps": "Next steps",
+      "followUp": "Follow-up topics",
+      "completed": "Completed",
+      "carryOver": "Carry-over",
+      "risks": "Risks",
+      "nextSprintPriorities": "Next sprint priorities",
+      "themes": "Themes",
+      "painPoints": "Pain points",
+      "opportunities": "Opportunities",
+      "customerContext": "Customer context",
+      "interestSignals": "Interest signals",
+      "objections": "Objections",
+      "dealStage": "Deal stage:",
+      "conceptsCovered": "Concepts covered",
+      "examples": "Examples",
+      "homeworkNext": "Homework / next",
+      "notableQuotes": "Notable quotes",
+      "definitions": "Definitions"
+    }
+  },
+  "chat": {
+    "label": "Chat",
+    "placeholder": "Ask about this meeting…",
+    "send": "Send",
+    "noVerifiableCitations": "respuesta sin citas verificables",
+    "scrollToSegment": "Scroll to segment {{id}}…",
+    "description": "Ask a question about this meeting's transcript."
+  },
+  "models": {
+    "title": "Models",
+    "close": "Close",
+    "loading": "Loading model status…",
+    "asr": "Speech Recognition (Whisper)",
+    "llm": "Language Model (Summary & Chat)",
+    "vad": "Voice Activity Detection",
+    "embedder": "Speaker Embedder",
+    "connecting": "Connecting…",
+    "installed": "Installed",
+    "downloading": "Downloading…",
+    "download": "Download ({{size}})"
+  },
+  "errors": {
+    "renderCrash": "fatal — render error",
+    "crashMessage": "Something broke in the EchoNote UI.",
+    "crashDetail": "The current session is safe — your meetings on disk are untouched. You can copy the error and try again, or open a bug report.",
+    "stackTrace": "Stack trace + component tree",
+    "tryAgain": "Try again",
+    "reloadWindow": "Reload window",
+    "copyError": "Copy error",
+    "reportBug": "Report bug",
+    "streamingFailed": "Streaming failed — you can retry.",
+    "streamingStopFailed": "Streaming failed mid-stop. Some audio may not have been persisted.",
+    "summaryFailed": "Couldn't generate summary.",
+    "outsideTauri": "Running outside Tauri — IPC is unavailable in pnpm dev. Use pnpm tauri:dev.",
+    "healthFailed": "Backend health check failed."
+  },
+  "toast": {
+    "copied": "copied",
+    "copy": "copy",
+    "dismiss": "Dismiss notification",
+    "meetingSaved": "Meeting saved",
+    "meetingDetail": "{{segments}} segments · {{seconds}} s"
+  },
+  "stats": {
+    "status": "status",
+    "chunks": "chunks",
+    "skipped": "skipped",
+    "audio": "audio"
+  }
+}

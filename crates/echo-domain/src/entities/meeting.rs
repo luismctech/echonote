@@ -15,11 +15,12 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::entities::segment::Segment;
+use crate::entities::speaker::Speaker;
 use crate::ports::audio::AudioFormat;
 
 /// Strongly-typed identifier for a [`Meeting`]. UUIDv7 keeps lexical
 /// ordering aligned with creation time.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, specta::Type)]
 #[serde(transparent)]
 pub struct MeetingId(pub Uuid);
 
@@ -45,7 +46,7 @@ impl std::fmt::Display for MeetingId {
 
 /// Lightweight projection used by listing endpoints. Holds only what
 /// the UI needs to render a row in the sidebar — *not* the segments.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct MeetingSummary {
     /// Stable identifier.
@@ -69,9 +70,33 @@ pub struct MeetingSummary {
     pub segment_count: u32,
 }
 
+/// One hit returned by the search port. Carries the meeting summary
+/// (so the sidebar can render it without an extra round-trip), the
+/// FTS5 BM25 rank (smaller = better, by SQLite convention) and a
+/// pre-rendered snippet around the strongest match. Snippet
+/// boundaries are decided by SQLite's `snippet()` function and use
+/// the markers chosen by the storage adapter — typically `<mark>` /
+/// `</mark>` so the UI can render them as highlights.
+///
+/// `serde(rename_all = "camelCase")` keeps the wire format aligned
+/// with the rest of the IPC surface.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct MeetingSearchHit {
+    /// Meeting matched by the query.
+    pub meeting: MeetingSummary,
+    /// Highlighted excerpt of the segment that matched.
+    pub snippet: String,
+    /// FTS5 BM25 rank — *smaller is better* (negative numbers are
+    /// strongest matches). The UI should sort ascending; tests assert
+    /// the same. We keep the raw value rather than mapping to a
+    /// `[0,1]` score so consumers can decide their own normalisation.
+    pub rank: f64,
+}
+
 /// Full meeting aggregate. Returned by point lookups and includes the
-/// segment list. Speakers/summary come later.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// segment list and any diarized speakers.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct Meeting {
     /// Summary projection.
@@ -79,8 +104,15 @@ pub struct Meeting {
     pub summary: MeetingSummary,
     /// Audio format negotiated with the device.
     pub input_format: AudioFormat,
-    /// Decoded segments, ordered by `start_ms`.
+    /// Decoded segments, ordered by `start_ms`. Each segment may
+    /// reference a `speaker_id` from `speakers`.
     pub segments: Vec<Segment>,
+    /// Diarized speakers persisted for this meeting, ordered by
+    /// `slot`. Empty when no diarizer was wired into the pipeline.
+    /// `serde(default)` keeps older payloads (pre-Sprint 1 day 7)
+    /// loadable without speakers.
+    #[serde(default)]
+    pub speakers: Vec<Speaker>,
 }
 
 #[cfg(test)]

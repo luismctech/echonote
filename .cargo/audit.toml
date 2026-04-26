@@ -1,0 +1,50 @@
+# =============================================================================
+# cargo-audit advisory ignore list
+# =============================================================================
+# All entries are TRANSITIVE dependencies from Tauri 2.x or sqlx that we cannot
+# upgrade directly. Reviewed: 2026-04-26.
+# Re-evaluate when upgrading Tauri or sqlx major versions.
+# =============================================================================
+
+[advisories]
+ignore = [
+    # ── Vulnerability ────────────────────────────────────────────────────────
+    # rsa 0.9.10 — Marvin Attack timing sidechannel (CVSS 5.9 medium)
+    # Path: rsa ← sqlx-mysql. We use SQLite only; no MySQL/TLS exposure.
+    # No fixed version available upstream.
+    "RUSTSEC-2023-0071",
+
+    # ── Unmaintained: GTK3 bindings (Linux, required by Tauri → wry) ────────
+    "RUSTSEC-2024-0411", # gdkwayland-sys 0.18.2
+    "RUSTSEC-2024-0412", # gdk 0.18.2
+    "RUSTSEC-2024-0413", # atk 0.18.2
+    "RUSTSEC-2024-0414", # gdkx11-sys 0.18.2
+    "RUSTSEC-2024-0415", # gtk 0.18.2
+    "RUSTSEC-2024-0416", # atk-sys 0.18.2
+    "RUSTSEC-2024-0417", # gdkx11 0.18.2
+    "RUSTSEC-2024-0418", # gdk-sys 0.18.2
+    "RUSTSEC-2024-0419", # gtk3-macros 0.18.2
+    "RUSTSEC-2024-0420", # gtk-sys 0.18.2
+
+    # ── Unmaintained: other transitive Tauri deps ────────────────────────────
+    "RUSTSEC-2024-0370", # proc-macro-error 1.0.4
+    "RUSTSEC-2024-0436", # paste 1.0.15
+    "RUSTSEC-2025-0057", # fxhash 0.2.1 (tauri-utils → kuchikiki → selectors)
+
+    # ── Unmaintained: unic-* Unicode crates (via Tauri) ──────────────────────
+    "RUSTSEC-2025-0075", # unic-char-range 0.9.0
+    "RUSTSEC-2025-0080", # unic-common 0.9.0
+    "RUSTSEC-2025-0081", # unic-char-property 0.9.0
+    "RUSTSEC-2025-0098", # unic-ucd-version 0.9.0
+    "RUSTSEC-2025-0100", # unic-ucd-ident 0.9.0
+
+    # ── Unsound ──────────────────────────────────────────────────────────────
+    # glib 0.18.5 — VariantStrIter iterator unsoundness (GTK3, Linux only)
+    "RUSTSEC-2024-0429",
+    # rand 0.7.3 — rand::rng() unsound with custom logger
+    # Via phf_generator → tauri-utils. We never use rand::rng() or custom loggers.
+    "RUSTSEC-2026-0097",
+]
+
+# Warn (but don't fail) on unmaintained crates not in the ignore list
+informational_warnings = ["unmaintained", "unsound"]

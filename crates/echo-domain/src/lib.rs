@@ -25,11 +25,18 @@ pub use ports::audio::{
     AudioCapture, AudioFormat, AudioFrame, AudioSource, AudioStream, CaptureSpec, DeviceInfo,
     Sample,
 };
+pub use ports::chat::{ChatAssistant, ChatMessage, ChatOptions, ChatRequest, ChatRole, ChatToken};
+pub use ports::diarizer::Diarizer;
+pub use ports::llm::{GenerateOptions, LlmModel};
 pub use ports::resampler::Resampler;
 pub use ports::transcriber::{TranscribeOptions, Transcriber, Transcript};
+pub use ports::vad::{Vad, VoiceState};
 
-pub use entities::meeting::{Meeting, MeetingId, MeetingSummary};
+pub use entities::meeting::{Meeting, MeetingId, MeetingSearchHit, MeetingSummary};
 pub use entities::segment::{Segment, SegmentId};
-pub use entities::speaker::SpeakerId;
+pub use entities::speaker::{Speaker, SpeakerId};
 pub use entities::streaming::{StreamingOptions, StreamingSessionId, TranscriptEvent};
+pub use entities::summary::{
+    ActionItem, Definition, InterviewQuote, Summary, SummaryContent, SummaryId, TEMPLATE_IDS,
+};
 pub use ports::storage::{CreateMeeting, FinalizeMeeting, MeetingStore};

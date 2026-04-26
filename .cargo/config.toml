@@ -1,0 +1,27 @@
+# Workspace-wide cargo configuration.
+#
+# Swift runtime resolution for `screencapturekit` (vendored Swift
+# bridge, pulled in by `echo-audio` on macOS):
+#
+# - `/usr/lib/swift` is OS-shipped and present on every macOS install
+#   from 12 onwards. The Concurrency dylib lives in the dyld shared
+#   cache, so it isn't visible via `ls` but dyld resolves it from
+#   that path. This is the only entry we *want* on a fresh user box.
+#
+# - The CommandLineTools / Xcode toolchain entries are guarded by an
+#   environment variable so developers who hit a Swift mismatch can
+#   opt back in (`ECHO_SWIFT_TOOLCHAIN_RPATH=1 cargo …`). They are
+#   *off by default* because mixing the OS Concurrency with the
+#   toolchain copy triggers `objc[…]: Class … is implemented in both`
+#   warnings and "spurious casting failures and mysterious crashes"
+#   per Apple's own dyld diagnostic.
+
+[target.aarch64-apple-darwin]
+rustflags = [
+    "-C", "link-arg=-Wl,-rpath,/usr/lib/swift",
+]
+
+[target.x86_64-apple-darwin]
+rustflags = [
+    "-C", "link-arg=-Wl,-rpath,/usr/lib/swift",
+]

@@ -28,9 +28,9 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.88"
 authors = ["Alberto Cruz <albertomzcruz@gmail.com>"]
-license = "MIT"
-repository = "https://github.com/AlbertoMZCruz/echonote"
-homepage = "https://github.com/AlbertoMZCruz/echonote"
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/luismctech/echonote"
+homepage = "https://github.com/luismctech/echonote"
 readme = "README.md"
 keywords = ["transcription", "whisper", "llm", "local-first", "privacy"]
 categories = ["multimedia", "multimedia::audio"]
@@ -55,7 +55,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-toml = "0.8"
+toml = "0.9"
 
 # IDs & time
 uuid = { version = "1.11", features = ["v7", "serde"] }
@@ -69,6 +69,22 @@ clap = { version = "4.5", features = ["derive", "env"] }
 cpal = "0.15"
 hound = "3.5"
 rubato = "0.16"
+# macOS-only system audio capture (ScreenCaptureKit). Pulled in conditionally
+# by echo-audio via [target.'cfg(target_os = "macos")'.dependencies].
+screencapturekit = "1.5"
+
+# ML inference
+# Pure-Rust ONNX inference. Used by echo-audio for the Silero VAD v5
+# adapter (Sprint 1 day 4). Avoids the FFI / shared-lib dance of
+# onnxruntime — fine for tiny models. We may swap to `ort` for larger
+# diarization / TTS models if performance becomes an issue.
+tract-onnx = { version = "0.22", default-features = false }
+
+# Speaker-embedding feature extraction. Pure-Rust port of kaldi-native-fbank
+# providing 80-mel filterbank features compatible with the 3D-Speaker
+# preprocessing. Used by echo-diarize for the ERes2Net adapter
+# (Sprint 1 day 6).
+mel_spec = "0.3"
 
 # Storage
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "macros", "migrate"] }
@@ -78,8 +94,25 @@ sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio",
 # is enabled per-crate on macOS only (see crates/echo-asr/Cargo.toml).
 whisper-rs = { version = "0.16", default-features = false, features = ["tracing_backend"] }
 
+# LLM
+# llama-cpp-2 provides safe bindings to llama.cpp. We disable the default
+# feature set to opt out of `openmp` (which would force libomp at link
+# time on macOS) and `android-shared-stdcxx` (Android-only). Metal is
+# pulled in automatically by `llama-cpp-sys-2` when building on macOS
+# arm64, so no extra feature flag is required for Apple Silicon. CUDA /
+# Vulkan stay opt-in for downstream packagers.
+llama-cpp-2 = { version = "0.1", default-features = false }
+encoding_rs = "0.8"
+
+# HTTP (model downloads)
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+
+# Type-safe IPC bindings (tauri-specta)
+specta = { version = "=2.0.0-rc.22", features = ["derive", "uuid", "time", "function"] }
+specta-typescript = "0.0.9"
+tauri-specta = { version = "=2.0.0-rc.21", features = ["derive", "typescript"] }
+
 # Testing
-mockall = "0.13"
 pretty_assertions = "1.4"
 tempfile = "3.10"
 

@@ -13,16 +13,8 @@
 //! invoking Whisper. A neural VAD (Silero) lands in Sprint 2 when
 //! diarization needs sharper boundaries.
 
-use echo_domain::Sample;
-
-/// Voice / non-voice classification of an audio span.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum VoiceState {
-    /// Speech is likely present.
-    Voiced,
-    /// Below the energy floor.
-    Silence,
-}
+use async_trait::async_trait;
+use echo_domain::{DomainError, Sample, Vad, VoiceState};
 
 /// Tunable knobs for [`EnergyVad`]. Defaults are tuned for a desk mic
 /// in a quiet-ish room (laptop coffeeshop / home office).
@@ -166,6 +158,24 @@ impl EnergyVad {
                 }
             }
         }
+    }
+}
+
+#[async_trait]
+impl Vad for EnergyVad {
+    fn sample_rate_hz(&self) -> u32 {
+        EnergyVad::sample_rate_hz(self)
+    }
+
+    async fn push(&mut self, samples: &[Sample]) -> Result<VoiceState, DomainError> {
+        // RMS classification is infallible — there is no I/O, no model
+        // to load, no shape mismatch. We surface the inherent state
+        // change directly. Wrap in `Ok` to satisfy the port contract.
+        Ok(EnergyVad::push(self, samples))
+    }
+
+    fn reset(&mut self) {
+        EnergyVad::reset(self);
     }
 }
 

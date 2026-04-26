@@ -1,0 +1,18 @@
+<svg width="512" height="512" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+  <rect width="512" height="512" fill="#000000"/>
+
+  <!-- Left dot -->
+  <circle cx="140" cy="256" r="16" fill="#3BE8A5"/>
+
+  <!-- Left bar -->
+  <rect x="180" y="196" width="32" height="120" rx="16" fill="#3BE8A5"/>
+
+  <!-- Center bar (taller) -->
+  <rect x="240" y="156" width="32" height="200" rx="16" fill="#3BE8A5"/>
+
+  <!-- Right bar -->
+  <rect x="300" y="196" width="32" height="120" rx="16" fill="#3BE8A5"/>
+
+  <!-- Right dot -->
+  <circle cx="372" cy="256" r="16" fill="#3BE8A5"/>
+</svg>

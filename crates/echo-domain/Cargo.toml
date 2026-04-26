@@ -17,7 +17,13 @@ serde.workspace = true
 uuid.workspace = true
 time.workspace = true
 async-trait.workspace = true
+specta.workspace = true
+# Used by `ports::chat` for the `BoxStream` return type. We only depend on the
+# pure trait surface (`Stream`, `Pin<Box<...>>`) — no executor, no I/O —
+# which keeps the domain layer side-effect-free per the lib.rs contract.
+futures.workspace = true
 
 [dev-dependencies]
 pretty_assertions.workspace = true
 serde_json.workspace = true
+tokio = { workspace = true, features = ["macros", "rt"] }

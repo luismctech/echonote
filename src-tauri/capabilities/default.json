@@ -7,6 +7,11 @@
     "core:default",
     "core:window:default",
     "core:app:default",
-    "core:event:default"
+    "core:event:default",
+    "dialog:default",
+    "global-shortcut:allow-register",
+    "global-shortcut:allow-unregister",
+    "updater:default",
+    "process:allow-restart"
   ]
 }

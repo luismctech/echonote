@@ -49,7 +49,13 @@ pub enum AudioSource {
 }
 
 /// Sample-rate / channel configuration of a stream.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+///
+/// Wire format uses `camelCase` so the JSON that crosses the Tauri /
+/// CLI boundary matches the TypeScript `AudioFormat` (`sampleRateHz`,
+/// `channels`). SQLite persistence uses dedicated columns and does
+/// not go through serde, so this rename is purely an IPC concern.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
 pub struct AudioFormat {
     /// Sampling frequency in hertz.
     pub sample_rate_hz: u32,

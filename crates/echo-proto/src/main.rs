@@ -4,7 +4,7 @@
 //! the capture, ASR and LLM crates together to prove the end-to-end
 //! pipeline on macOS before any UI work begins.
 //!
-//! Subcommands (incrementally wired during Sprint 0):
+//! Subcommands (incrementally wired during Sprints 0 and 1):
 //!
 //! - `record --duration N` — capture N seconds of dual audio to WAV.
 //!   (Wired Sprint 0 day 5.)
@@ -14,6 +14,12 @@
 //!   (Wired Sprint 0 day 7.)
 //! - `run --duration N` — full end-to-end record → transcribe → summarize.
 //!   (Wired Sprint 0 day 8.)
+//! - `stream --duration N` — live capture → resample → whisper streaming,
+//!   optionally diarized; persists into the SQLite store the desktop
+//!   shell shares. (Wired Sprint 0 day 9; diarize flag added Sprint 1.)
+//! - `meetings list|get|delete` — inspect / clean up the SQLite store
+//!   from the terminal without launching the UI.
+//!   (Wired Sprint 0 day 10.)
 //! - `bench wer` / `bench llm` — Phase 0 benchmarks.
 //!   (Wired Sprint 0 day 9-10.)
 //!
@@ -25,20 +31,24 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 use echo_app::{
-    compute_wer, FrameSink, MeetingRecorder, RecordToSink, StreamingPipeline, WerStats,
+    compute_wer, FrameSink, MeetingRecorder, RecordToSink, StreamingPipeline, SummarizeMeeting,
+    SummarizeMeetingError, WerStats,
 };
 use echo_asr::WhisperCppTranscriber;
 use echo_audio::{
-    resample_to_whisper, CpalMicrophoneCapture, RubatoResamplerAdapter, WavSink, WriteOptions,
-    WHISPER_SAMPLE_RATE,
+    resample_to_whisper, CpalMicrophoneCapture, RoutingAudioCapture, RubatoResamplerAdapter,
+    SileroVad, WavSink, WriteOptions, WHISPER_SAMPLE_RATE,
 };
+use echo_diarize::{Eres2NetEmbedder, OnlineDiarizer};
 use echo_domain::{
-    AudioCapture, AudioFormat, AudioFrame, AudioSource, CaptureSpec, DomainError, MeetingId,
-    MeetingStore, Resampler, StreamingOptions, TranscribeOptions, Transcriber, TranscriptEvent,
+    AudioCapture, AudioFormat, AudioFrame, AudioSource, CaptureSpec, Diarizer, DomainError,
+    LlmModel, MeetingId, MeetingStore, Resampler, StreamingOptions, SummaryContent,
+    TranscribeOptions, Transcriber, TranscriptEvent,
 };
+use echo_llm::{LlamaCppLlm, LoadOptions as LlamaLoadOptions};
 use echo_storage::SqliteMeetingStore;
 
 /// EchoNote CLI prototype.
@@ -88,7 +98,8 @@ enum Command {
         /// Path to any RIFF/WAV file (mono or stereo, any sample rate).
         input: PathBuf,
         /// Path to a `ggml-*.bin` Whisper model. Defaults to the
-        /// `ECHO_ASR_MODEL` env var or `./models/asr/ggml-base.en.bin`.
+        /// `ECHO_ASR_MODEL` env var, then the largest installed
+        /// multilingual ggml model under `./models/asr/`.
         #[arg(long, env = "ECHO_ASR_MODEL")]
         model: Option<PathBuf>,
         /// ISO-639-1 language hint (e.g. `en`, `es`). Auto-detect if
@@ -103,21 +114,29 @@ enum Command {
         json: bool,
     },
 
-    /// Live mic → resample → whisper streaming. Prints transcript
+    /// Live capture → resample → whisper streaming. Prints transcript
     /// events to stdout as they arrive.
     ///
     /// Useful as a head-less smoke test of the same pipeline that the
-    /// Tauri shell drives in the UI.
+    /// Tauri shell drives in the UI. With `--source system-output` it
+    /// captures the system audio mix on macOS via ScreenCaptureKit
+    /// (Sprint 1 day 3) — Screen Recording permission required.
     Stream {
         /// Capture duration, in seconds. The pipeline stops cleanly
         /// after the deadline.
         #[arg(long, default_value_t = 30)]
         duration: u64,
         /// Path to a `ggml-*.bin` Whisper model. Defaults to the
-        /// `ECHO_ASR_MODEL` env var or `./models/asr/ggml-base.en.bin`.
+        /// `ECHO_ASR_MODEL` env var, then the largest installed
+        /// multilingual ggml model under `./models/asr/`.
         #[arg(long, env = "ECHO_ASR_MODEL")]
         model: Option<PathBuf>,
+        /// Capture source. `microphone` is portable; `system-output`
+        /// requires macOS 13+ with Screen Recording permission.
+        #[arg(long, value_enum, default_value_t = SourceArg::Microphone)]
+        source: SourceArg,
         /// Optional input device name. Use `record-devices` to discover.
+        /// Ignored when `--source system-output`.
         #[arg(long)]
         device: Option<String>,
         /// ISO-639-1 language hint. Auto-detect if omitted.
@@ -128,18 +147,57 @@ enum Command {
         #[arg(long, default_value_t = 5_000)]
         chunk_ms: u32,
         /// Skip transcription of chunks below this RMS. `0.0` disables
-        /// the gate.
-        #[arg(long, default_value_t = 0.005)]
+        /// the gate. Default 0.02 (~ -34 dBFS); raise it if room noise
+        /// is sneaking past, lower it for very quiet speakers.
+        #[arg(long, default_value_t = 0.02)]
         silence_threshold: f32,
+        /// Attach a speaker diarizer to the pipeline. Each chunk is
+        /// also fed through ERes2Net + online clustering and the
+        /// resulting speaker is printed alongside the transcript.
+        #[arg(long, default_value_t = false)]
+        diarize: bool,
+        /// Path to the ERes2Net ONNX export. Defaults to the
+        /// `ECHO_EMBED_MODEL` env var or
+        /// `./models/embedder/eres2net_en_voxceleb.onnx`.
+        /// Only consulted when `--diarize` is set.
+        #[arg(long, env = "ECHO_EMBED_MODEL")]
+        embed_model: Option<PathBuf>,
+        /// Path to the Silero VAD ONNX. Defaults to the
+        /// `ECHO_VAD_MODEL` env var or `./models/vad/silero_vad.onnx`.
+        /// When the file is present (and `--no-neural-vad` is not
+        /// passed) the pipeline gates Whisper behind Silero — sharply
+        /// reducing hallucinations on silent / noisy chunks.
+        #[arg(long, env = "ECHO_VAD_MODEL")]
+        vad_model: Option<PathBuf>,
+        /// Disable the neural VAD and rely only on the energy-based
+        /// RMS gate. Useful for benchmarking the old behaviour or
+        /// when a soft speaker is being misclassified as silence.
+        #[arg(long, default_value_t = false)]
+        no_neural_vad: bool,
     },
 
-    /// Summarize a transcript using the local LLM.
+    /// Summarize a stored meeting using the local LLM (Sprint 1 day 9).
+    ///
+    /// Loads the persisted meeting, prompts the LLM with the structured
+    /// transcript, parses the JSON payload (with one corrective retry
+    /// and free-text fallback), and upserts the resulting `Summary`.
+    /// The summary is also printed to stdout — JSON when `--json`,
+    /// a plain text rendering otherwise.
     Summarize {
-        /// Path to a plain-text transcript.
-        input: String,
-        /// Template id (general, one_on_one, sprint_review, ...).
-        #[arg(long, default_value = "general")]
-        template: String,
+        /// Meeting UUIDv7 (positional form).
+        #[arg(value_name = "ID")]
+        id_positional: Option<String>,
+        /// Meeting UUIDv7 (flag form).
+        #[arg(long = "id", value_name = "ID", conflicts_with = "id_positional")]
+        id_flag: Option<String>,
+        /// Path to the GGUF LLM model. Defaults to `ECHO_LLM_MODEL`
+        /// or the highest-priority installed Qwen GGUF under
+        /// `models/llm/` (Qwen 3 first, Qwen 2.5 as legacy fallback).
+        #[arg(long, env = "ECHO_LLM_MODEL")]
+        model: Option<PathBuf>,
+        /// Emit the full `Summary` as JSON instead of plain text.
+        #[arg(long)]
+        json: bool,
     },
 
     /// Full end-to-end pipeline: record → transcribe → summarize.
@@ -162,6 +220,27 @@ enum Command {
     },
 }
 
+/// CLI mirror of [`echo_domain::AudioSource`]. Kept separate so the
+/// `clap` value parser can derive friendly kebab-case names without
+/// coupling the domain enum to clap.
+#[derive(ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum SourceArg {
+    /// Default microphone input via cpal.
+    #[default]
+    Microphone,
+    /// System audio loopback. macOS 13+ only (ScreenCaptureKit).
+    SystemOutput,
+}
+
+impl From<SourceArg> for AudioSource {
+    fn from(value: SourceArg) -> Self {
+        match value {
+            SourceArg::Microphone => AudioSource::Microphone,
+            SourceArg::SystemOutput => AudioSource::SystemOutput,
+        }
+    }
+}
+
 #[derive(Subcommand, Debug)]
 enum MeetingsKind {
     /// List meetings, newest first.
@@ -174,17 +253,46 @@ enum MeetingsKind {
         json: bool,
     },
     /// Show one meeting (header + segments).
+    ///
+    /// Accept the meeting id either as a positional arg
+    /// (`meetings show 019d…`) or via the `--id` flag
+    /// (`meetings show --id 019d…`) — both work, exactly one is required.
     Show {
-        /// Meeting UUIDv7.
-        id: String,
+        /// Meeting UUIDv7 (positional form).
+        #[arg(value_name = "ID")]
+        id_positional: Option<String>,
+        /// Meeting UUIDv7 (flag form).
+        #[arg(long = "id", value_name = "ID", conflicts_with = "id_positional")]
+        id_flag: Option<String>,
         /// Emit JSON instead of plain text.
         #[arg(long)]
         json: bool,
     },
     /// Delete a meeting and its segments.
+    ///
+    /// Accept the meeting id either as a positional arg or via `--id`.
     Delete {
-        /// Meeting UUIDv7.
-        id: String,
+        /// Meeting UUIDv7 (positional form).
+        #[arg(value_name = "ID")]
+        id_positional: Option<String>,
+        /// Meeting UUIDv7 (flag form).
+        #[arg(long = "id", value_name = "ID", conflicts_with = "id_positional")]
+        id_flag: Option<String>,
+    },
+    /// Full-text search over segment text. Returns one hit per
+    /// meeting, ordered by FTS5 BM25 rank (best match first).
+    Search {
+        /// Search query. Quote multi-word phrases at the shell level
+        /// (`echo-proto meetings search "design review"`); FTS5
+        /// operators in the input are stripped before matching.
+        #[arg(value_name = "QUERY")]
+        query: String,
+        /// Maximum hits to return. `0` = unlimited.
+        #[arg(long, default_value_t = 20)]
+        limit: u32,
+        /// Emit JSON instead of a human-readable table.
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -201,7 +309,8 @@ enum BenchKind {
         #[arg(long, default_value = "./fixtures")]
         fixtures: PathBuf,
         /// Path to a `ggml-*.bin` Whisper model. Defaults to the
-        /// `ECHO_ASR_MODEL` env var or `./models/asr/ggml-base.en.bin`.
+        /// `ECHO_ASR_MODEL` env var, then the largest installed
+        /// multilingual ggml model under `./models/asr/`.
         #[arg(long, env = "ECHO_ASR_MODEL")]
         model: Option<PathBuf>,
         /// ISO-639-1 hint passed to whisper.
@@ -251,29 +360,37 @@ async fn main() -> Result<()> {
         Command::Stream {
             duration,
             model,
+            source,
             device,
             language,
             chunk_ms,
             silence_threshold,
+            diarize,
+            embed_model,
+            vad_model,
+            no_neural_vad,
         } => {
             run_stream(
                 duration,
                 model,
+                source,
                 device,
                 language,
                 chunk_ms,
                 silence_threshold,
+                diarize,
+                embed_model,
+                vad_model,
+                no_neural_vad,
             )
             .await
         }
-        Command::Summarize { input, template } => {
-            tracing::info!(
-                input = %input,
-                template = %template,
-                "summarize subcommand not yet wired (Sprint 0 day 7)"
-            );
-            Ok(())
-        }
+        Command::Summarize {
+            id_positional,
+            id_flag,
+            model,
+            json,
+        } => run_summarize(id_positional, id_flag, model, json).await,
         Command::Run { duration } => {
             tracing::info!(
                 duration_secs = duration,
@@ -400,15 +517,7 @@ async fn run_transcribe(
     translate: bool,
     json: bool,
 ) -> Result<()> {
-    let model_path = model
-        .or_else(|| Some(PathBuf::from("./models/asr/ggml-base.en.bin")))
-        .filter(|p| p.exists())
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "no model found. Set --model or ECHO_ASR_MODEL, or run \
-                 `scripts/download-models.sh base.en` to fetch the default."
-            )
-        })?;
+    let model_path = resolve_asr_model(model)?;
 
     let (samples, source_format) = load_wav_as_pcm(&input)
         .with_context(|| format!("failed to read wav: {}", input.display()))?;
@@ -473,23 +582,21 @@ async fn run_transcribe(
 // `stream` subcommand
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 async fn run_stream(
     duration_secs: u64,
     model: Option<PathBuf>,
+    source_arg: SourceArg,
     device: Option<String>,
     language: Option<String>,
     chunk_ms: u32,
     silence_threshold: f32,
+    diarize: bool,
+    embed_model: Option<PathBuf>,
+    vad_model: Option<PathBuf>,
+    no_neural_vad: bool,
 ) -> Result<()> {
-    let model_path = model
-        .or_else(|| Some(PathBuf::from("./models/asr/ggml-base.en.bin")))
-        .filter(|p| p.exists())
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "no model found. Set --model or ECHO_ASR_MODEL, or run \
-                 `scripts/download-models.sh base.en` to fetch the default."
-            )
-        })?;
+    let model_path = resolve_asr_model(model)?;
 
     let load_started = std::time::Instant::now();
     let transcriber = WhisperCppTranscriber::load(&model_path)
@@ -501,13 +608,29 @@ async fn run_stream(
         "whisper context ready"
     );
 
-    let capture: Arc<dyn AudioCapture> = Arc::new(CpalMicrophoneCapture::new());
-    let resampler: Arc<dyn Resampler> = Arc::new(RubatoResamplerAdapter);
+    // The router holds both adapters and dispatches per source. Same
+    // facade serves the cpal mic and the macOS ScreenCaptureKit
+    // loopback adapter without any branching at the call site.
+    let capture: Arc<dyn AudioCapture> = Arc::new(RoutingAudioCapture::with_default_adapters());
+    let resampler: Arc<dyn Resampler> = Arc::new(RubatoResamplerAdapter::new());
     let transcriber: Arc<dyn Transcriber> = Arc::new(transcriber);
 
+    let source: AudioSource = source_arg.into();
+    // ScreenCaptureKit identifies the loopback target by display, not
+    // by named device. Surfacing `--device` for it would be misleading.
+    let device_id = match source {
+        AudioSource::Microphone => device,
+        AudioSource::SystemOutput => {
+            if device.is_some() {
+                tracing::warn!("--device is ignored when --source system-output");
+            }
+            None
+        }
+    };
+
     let spec = CaptureSpec {
-        source: AudioSource::Microphone,
-        device_id: device,
+        source,
+        device_id,
         preferred_format: AudioFormat::WHISPER,
     };
     let options = StreamingOptions {
@@ -519,17 +642,79 @@ async fn run_stream(
     let store: Arc<dyn MeetingStore> = Arc::new(open_cli_store().await?);
     let recorder = MeetingRecorder::with_default_title(store.clone());
 
-    let pipeline = StreamingPipeline::new(capture, resampler, transcriber);
+    let mut pipeline = StreamingPipeline::new(capture, resampler, transcriber);
+    if diarize {
+        let embed_path = embed_model
+            .or_else(|| {
+                // Matches what `scripts/download-models.sh embed` writes.
+                Some(PathBuf::from("./models/embedder/eres2net_en_voxceleb.onnx"))
+            })
+            .filter(|p| p.exists())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "no speaker embedder found. Set --embed-model or ECHO_EMBED_MODEL, or run \
+                     `scripts/download-models.sh embed` to fetch the default."
+                )
+            })?;
+        let embed_started = std::time::Instant::now();
+        let embedder = Eres2NetEmbedder::new(&embed_path)
+            .map_err(anyhow::Error::from)
+            .context("failed to load ERes2Net embedder")?;
+        tracing::info!(
+            model = %embed_path.display(),
+            load_ms = embed_started.elapsed().as_millis() as u64,
+            "speaker embedder ready"
+        );
+        let diarizer: Box<dyn Diarizer> =
+            Box::new(OnlineDiarizer::with_defaults(Box::new(embedder)));
+        pipeline = pipeline.with_diarizer(diarizer);
+    }
+
+    let vad_active = if no_neural_vad {
+        tracing::info!("--no-neural-vad set; using RMS gate only");
+        false
+    } else {
+        let vad_path = vad_model
+            .or_else(|| Some(PathBuf::from("./models/vad/silero_vad.onnx")))
+            .filter(|p| p.exists());
+        match vad_path {
+            Some(path) => {
+                let started = std::time::Instant::now();
+                let vad = SileroVad::for_meetings(&path)
+                    .map_err(anyhow::Error::from)
+                    .context("failed to load Silero VAD")?;
+                tracing::info!(
+                    model = %path.display(),
+                    load_ms = started.elapsed().as_millis() as u64,
+                    "Silero VAD ready"
+                );
+                pipeline = pipeline.with_vad(Box::new(vad));
+                true
+            }
+            None => {
+                tracing::warn!(
+                    "Silero VAD model not found at ./models/vad/silero_vad.onnx; \
+                     falling back to RMS gate. Run `scripts/download-models.sh vad` \
+                     for sharper voice/non-voice discrimination."
+                );
+                false
+            }
+        }
+    };
+
     let mut handle = pipeline
         .start_with_spec(spec, options)
         .await
         .context("failed to start streaming pipeline")?;
 
     println!(
-        "▶ streaming session {} — {}s window {}ms — Ctrl-C or wait to stop",
+        "▶ streaming session {} — source={:?} — {}s window {}ms — diarize={} — vad={} — Ctrl-C or wait to stop",
         handle.session_id(),
+        source,
         duration_secs,
-        chunk_ms
+        chunk_ms,
+        diarize,
+        if vad_active { "silero" } else { "rms" },
     );
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(duration_secs);
@@ -570,6 +755,7 @@ async fn run_stream(
                 segments,
                 language,
                 rtf,
+                speaker_slot,
                 ..
             }) => {
                 total_chunks += 1;
@@ -585,7 +771,25 @@ async fn run_stream(
                 } else {
                     &text
                 };
-                println!("  [{chunk_index:>2}] +{offset_ms:>5} ms  rtf={rtf:.2}  {lang} → {body}");
+                let speaker_tag = match speaker_slot {
+                    Some(slot) => format!("S{}", slot + 1),
+                    None if diarize => "S?".to_string(),
+                    None => "  ".to_string(),
+                };
+                // RTF is meaningless when whisper produced no segments
+                // (e.g. <no speech> on a tail chunk of ~10ms): the
+                // ratio explodes because the divisor is the *audio*
+                // duration, not the wall clock. Render `rtf= --` in
+                // that case so the column stays aligned but doesn't
+                // mislead the eye.
+                let rtf_cell = if text.is_empty() {
+                    "rtf=  --".to_string()
+                } else {
+                    format!("rtf={rtf:.2}")
+                };
+                println!(
+                    "  [{chunk_index:>2}] +{offset_ms:>5} ms  {rtf_cell}  {speaker_tag}  {lang} → {body}"
+                );
             }
             Some(TranscriptEvent::Skipped {
                 chunk_index,
@@ -615,6 +819,193 @@ async fn run_stream(
     }
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// `summarize` subcommand (Sprint 1 day 9)
+// ---------------------------------------------------------------------------
+
+/// Resolve the GGUF model path: `--model`, then `ECHO_LLM_MODEL`,
+/// then the highest-priority installed Qwen GGUF under `models/llm/`.
+/// Mirrors the resolution order the Tauri shell uses (Qwen 3 first,
+/// Qwen 2.5 as legacy fallback).
+fn resolve_llm_model(explicit: Option<PathBuf>) -> Result<PathBuf> {
+    if let Some(p) = explicit {
+        if !p.exists() {
+            anyhow::bail!("LLM model not found at {}", p.display());
+        }
+        return Ok(p);
+    }
+    // Qwen 3 filenames mirror the official Qwen team's HF naming
+    // convention (`Qwen3-<size>-Q4_K_M.gguf`, capital `Q`, no
+    // `-Instruct-` infix). Keep the legacy lowercase Qwen 2.5 paths
+    // for back-compat with day-9 setups.
+    const CANDIDATES: &[&str] = &[
+        "./models/llm/Qwen3-30B-A3B-Q4_K_M.gguf",
+        "./models/llm/Qwen3-14B-Q4_K_M.gguf",
+        "./models/llm/Qwen3-8B-Q4_K_M.gguf",
+        "./models/llm/qwen2.5-7b-instruct-q4_k_m.gguf",
+        "./models/llm/qwen2.5-3b-instruct-q4_k_m.gguf",
+    ];
+    for rel in CANDIDATES {
+        let p = PathBuf::from(rel);
+        if p.exists() {
+            return Ok(p);
+        }
+    }
+    anyhow::bail!(
+        "no GGUF LLM model found. Set --model or ECHO_LLM_MODEL, or run \
+         `scripts/download-models.sh llm` to fetch the default Qwen 3 14B."
+    )
+}
+
+/// Resolve the Whisper ggml model path used by `transcribe`, `stream`
+/// and `bench wer`. Same priority as the Tauri shell's
+/// `preferred_asr_model`: Spanish fine-tune > multilingual (turbo →
+/// large → medium → small → base → tiny) > English-only fallbacks.
+/// Returning `Result` (instead of falling back silently) keeps the
+/// CLI honest about missing setup.
+fn resolve_asr_model(explicit: Option<PathBuf>) -> Result<PathBuf> {
+    if let Some(p) = explicit {
+        if !p.exists() {
+            anyhow::bail!("ASR model not found at {}", p.display());
+        }
+        return Ok(p);
+    }
+    const CANDIDATES: &[&str] = &[
+        "./models/asr/ggml-large-v3-turbo-es.bin",
+        "./models/asr/ggml-large-v3-turbo.bin",
+        "./models/asr/ggml-large-v3.bin",
+        "./models/asr/ggml-medium.bin",
+        "./models/asr/ggml-small.bin",
+        "./models/asr/ggml-base.bin",
+        "./models/asr/ggml-tiny.bin",
+        "./models/asr/ggml-base.en.bin",
+        "./models/asr/ggml-small.en.bin",
+        "./models/asr/ggml-tiny.en.bin",
+    ];
+    for rel in CANDIDATES {
+        let p = PathBuf::from(rel);
+        if p.exists() {
+            return Ok(p);
+        }
+    }
+    anyhow::bail!(
+        "no Whisper ggml model found. Set --model or ECHO_ASR_MODEL, or run \
+         `scripts/download-models.sh` to fetch the default multilingual large-v3-turbo."
+    )
+}
+
+async fn run_summarize(
+    id_positional: Option<String>,
+    id_flag: Option<String>,
+    model: Option<PathBuf>,
+    json: bool,
+) -> Result<()> {
+    let meeting_id = resolve_meeting_id(id_positional, id_flag)?;
+    let model_path = resolve_llm_model(model)?;
+
+    // Load model on the blocking pool (mmap + ggml init are sync and
+    // expensive). The Tauri shell uses the exact same pattern.
+    println!("loading LLM: {}", model_path.display());
+    let load_started = std::time::Instant::now();
+    let llm = tokio::task::spawn_blocking({
+        let p = model_path.clone();
+        move || LlamaCppLlm::load_with(&p, LlamaLoadOptions::default())
+    })
+    .await
+    .context("LLM load task panicked")?
+    .map_err(anyhow::Error::from)
+    .with_context(|| format!("failed to load LLM at {}", model_path.display()))?;
+    tracing::info!(
+        model = %model_path.display(),
+        load_ms = load_started.elapsed().as_millis() as u64,
+        "llm ready"
+    );
+    let llm: Arc<dyn LlmModel> = Arc::new(llm);
+
+    let store: Arc<dyn MeetingStore> = Arc::new(open_cli_store().await?);
+    let use_case = SummarizeMeeting::new(llm, store);
+
+    let started = std::time::Instant::now();
+    let summary = use_case
+        .execute(meeting_id, "general")
+        .await
+        .map_err(|e| match e {
+            SummarizeMeetingError::NotFound(id) => {
+                anyhow::anyhow!("meeting {id} not found")
+            }
+            SummarizeMeetingError::EmptyTranscript(id) => {
+                anyhow::anyhow!("meeting {id} has no segments to summarise")
+            }
+            SummarizeMeetingError::InvalidTemplate(t) => {
+                anyhow::anyhow!("invalid template: {t}")
+            }
+            SummarizeMeetingError::Llm(err) => anyhow::anyhow!("llm: {err}"),
+            SummarizeMeetingError::Storage(err) => anyhow::anyhow!("storage: {err}"),
+        })?;
+    let elapsed = started.elapsed();
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&summary)?);
+        return Ok(());
+    }
+
+    println!(
+        "\nsummary {} (model={} · {:.2}s)",
+        summary.id.0,
+        summary.model,
+        elapsed.as_secs_f64(),
+    );
+    if let Some(lang) = &summary.language {
+        println!("language: {lang}");
+    }
+    println!();
+
+    match &summary.content {
+        SummaryContent::General {
+            summary: text,
+            key_points,
+            decisions,
+            action_items,
+            open_questions,
+        } => {
+            println!("## Summary\n{text}\n");
+            print_section("Key points", key_points);
+            print_section("Decisions", decisions);
+            if !action_items.is_empty() {
+                println!("## Action items");
+                for it in action_items {
+                    let owner = it.owner.as_deref().unwrap_or("-");
+                    let due = it.due.as_deref().unwrap_or("-");
+                    println!("  · {} (owner={owner}, due={due})", it.task);
+                }
+                println!();
+            }
+            print_section("Open questions", open_questions);
+        }
+        SummaryContent::FreeText { text } => {
+            println!("## Summary (free text — JSON parse failed)\n{text}");
+        }
+        // SummaryContent is `#[non_exhaustive]`; future templates will
+        // need an explicit branch here, but for now we match all known
+        // variants and serde would have caught any unknown one earlier.
+        _ => {
+            println!("(unknown summary template — re-run with --json to inspect)");
+        }
+    }
+    Ok(())
+}
+
+fn print_section(title: &str, items: &[String]) {
+    if items.is_empty() {
+        return;
+    }
+    println!("## {title}");
+    for it in items {
+        println!("  · {it}");
+    }
+    println!();
 }
 
 // ---------------------------------------------------------------------------
@@ -658,8 +1049,12 @@ async fn run_meetings(kind: MeetingsKind) -> Result<()> {
                 );
             }
         }
-        MeetingsKind::Show { id, json } => {
-            let id = parse_meeting_id(&id)?;
+        MeetingsKind::Show {
+            id_positional,
+            id_flag,
+            json,
+        } => {
+            let id = resolve_meeting_id(id_positional, id_flag)?;
             let Some(meeting) = store.get(id).await? else {
                 anyhow::bail!("meeting {id} not found");
             };
@@ -668,7 +1063,7 @@ async fn run_meetings(kind: MeetingsKind) -> Result<()> {
                 return Ok(());
             }
             let s = &meeting.summary;
-            println!("# {}\nid: {}\nstarted: {}\nended:   {}\nlanguage: {}\nduration: {:.2} s\nsegments: {}\nformat:   {} Hz × {} ch\n",
+            println!("# {}\nid: {}\nstarted: {}\nended:   {}\nlanguage: {}\nduration: {:.2} s\nsegments: {}\nspeakers: {}\nformat:   {} Hz × {} ch\n",
                 s.title,
                 s.id,
                 s.started_at.format(&time::format_description::well_known::Rfc3339).unwrap_or_default(),
@@ -676,25 +1071,82 @@ async fn run_meetings(kind: MeetingsKind) -> Result<()> {
                 s.language.as_deref().unwrap_or("?"),
                 (s.duration_ms as f64) / 1_000.0,
                 s.segment_count,
+                meeting.speakers.len(),
                 meeting.input_format.sample_rate_hz,
                 meeting.input_format.channels,
             );
+            if !meeting.speakers.is_empty() {
+                println!("Speakers:");
+                for sp in &meeting.speakers {
+                    println!("  S{}  {}  ({})", sp.slot + 1, sp.display_name(), sp.id);
+                }
+                println!();
+            }
+            // Index speakers by id so each segment line can render
+            // its tag in O(1) without a linear scan per row.
+            let speaker_tags: std::collections::HashMap<_, _> = meeting
+                .speakers
+                .iter()
+                .map(|sp| (sp.id, format!("S{}", sp.slot + 1)))
+                .collect();
             for seg in &meeting.segments {
+                let tag = seg
+                    .speaker_id
+                    .and_then(|sid| speaker_tags.get(&sid))
+                    .map(|s| s.as_str())
+                    .unwrap_or("  ");
                 println!(
-                    "  [{:>6}-{:>6} ms] {}",
+                    "  [{:>6}-{:>6} ms] {}  {}",
                     seg.start_ms,
                     seg.end_ms,
+                    tag,
                     seg.text.trim()
                 );
             }
         }
-        MeetingsKind::Delete { id } => {
-            let id = parse_meeting_id(&id)?;
+        MeetingsKind::Delete {
+            id_positional,
+            id_flag,
+        } => {
+            let id = resolve_meeting_id(id_positional, id_flag)?;
             let removed = store.delete(id).await?;
             if removed {
                 println!("deleted {id}");
             } else {
                 println!("not found: {id}");
+            }
+        }
+        MeetingsKind::Search { query, limit, json } => {
+            let hits = store.search(&query, limit).await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&hits)?);
+                return Ok(());
+            }
+            if hits.is_empty() {
+                println!("(no matches for {query:?})");
+                return Ok(());
+            }
+            println!(
+                "{:<38}  {:>9}  {:<25}  title / snippet",
+                "id", "rank", "started_at"
+            );
+            for hit in &hits {
+                let started = hit
+                    .meeting
+                    .started_at
+                    .format(&time::format_description::well_known::Rfc3339)
+                    .unwrap_or_default();
+                // Strip the <mark> markers for the plain CLI; the JSON
+                // path keeps them so downstream tools can still highlight.
+                let snippet = hit
+                    .snippet
+                    .replace("<mark>", "")
+                    .replace("</mark>", "")
+                    .replace('\n', " ");
+                println!(
+                    "{:<38}  {:>9.3}  {:<25}  {}\n{:<76}{}",
+                    hit.meeting.id, hit.rank, started, hit.meeting.title, "", snippet,
+                );
             }
         }
     }
@@ -704,6 +1156,17 @@ async fn run_meetings(kind: MeetingsKind) -> Result<()> {
 fn parse_meeting_id(s: &str) -> Result<MeetingId> {
     let uuid = uuid::Uuid::parse_str(s).with_context(|| format!("invalid meeting id: {s:?}"))?;
     Ok(MeetingId(uuid))
+}
+
+/// Accept the meeting id either as a positional value or via the `--id`
+/// flag. `clap` already enforces `conflicts_with`, so at most one of the
+/// two is `Some`; here we just collapse them and surface a friendly
+/// error when both are absent.
+fn resolve_meeting_id(positional: Option<String>, flag: Option<String>) -> Result<MeetingId> {
+    let raw = positional.or(flag).ok_or_else(|| {
+        anyhow::anyhow!("missing meeting id: pass it as the positional arg or with `--id <UUID>`")
+    })?;
+    parse_meeting_id(&raw)
 }
 
 // ---------------------------------------------------------------------------
@@ -750,15 +1213,7 @@ async fn run_bench_wer(
         anyhow::bail!("--max-wer must be in [0, 1], got {max_wer}");
     }
 
-    let model_path = model
-        .or_else(|| Some(PathBuf::from("./models/asr/ggml-base.en.bin")))
-        .filter(|p| p.exists())
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "no model found. Set --model or ECHO_ASR_MODEL, or run \
-                 `scripts/download-models.sh base.en` to fetch the default."
-            )
-        })?;
+    let model_path = resolve_asr_model(model)?;
 
     let pairs = discover_fixture_pairs(&fixtures)?;
     if pairs.is_empty() {

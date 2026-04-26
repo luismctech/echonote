@@ -29,6 +29,16 @@ hound.workspace = true
 # Sample-rate conversion (any rate -> 16 kHz mono for Whisper).
 rubato.workspace = true
 
+# Pure-Rust ONNX inference for the Silero VAD v5 adapter
+# (preprocess::silero_vad).
+tract-onnx.workspace = true
+
+# macOS system-audio capture via ScreenCaptureKit. Provides loopback of any
+# app's audio (Zoom, Teams, browser tabs) without virtual devices.
+[target.'cfg(target_os = "macos")'.dependencies]
+screencapturekit.workspace = true
+
+
 [dev-dependencies]
 pretty_assertions.workspace = true
 tempfile.workspace = true

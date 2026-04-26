@@ -1,0 +1,172 @@
+# -----------------------------------------------------------------------------
+# EchoNote — Release & Package
+# -----------------------------------------------------------------------------
+# Triggered by pushing a version tag (e.g. v0.1.0). Builds signed Tauri
+# bundles for macOS (ARM + Intel), Linux (x64), and Windows (x64), then
+# creates a draft GitHub Release with all artifacts + updater JSON.
+#
+# Usage:
+#   git tag v0.2.0 && git push origin v0.2.0
+#
+# Secrets required (set in repo Settings → Secrets):
+#   TAURI_SIGNING_PRIVATE_KEY   — updater signature key (from `tauri signer`)
+#   TAURI_SIGNING_PRIVATE_KEY_PASSWORD — password for the key (can be empty)
+#
+# Optional macOS code signing secrets (for notarized .dmg):
+#   APPLE_CERTIFICATE           — base64 .p12 Developer ID certificate
+#   APPLE_CERTIFICATE_PASSWORD  — .p12 password
+#   APPLE_SIGNING_IDENTITY      — e.g. "Developer ID Application: Name (TEAMID)"
+#   APPLE_API_ISSUER            — App Store Connect API Issuer ID
+#   APPLE_API_KEY               — App Store Connect API Key ID
+#   APPLE_API_KEY_PATH          — written to disk at runtime from APPLE_API_KEY_CONTENT
+# -----------------------------------------------------------------------------
+
+name: Release
+
+on:
+  push:
+    tags:
+    - "v[0-9]+.[0-9]+.[0-9]+*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  MACOSX_DEPLOYMENT_TARGET: "11.0"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Build matrix — one job per (OS, arch) combination.
+  # ---------------------------------------------------------------------------
+  build:
+    name: Build (${{ matrix.label }})
+    timeout-minutes: 60
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        # macOS — Apple Silicon (primary)
+        - label: macOS-arm64
+          runner: macos-14
+          rust-targets: aarch64-apple-darwin
+          tauri-args: "--target aarch64-apple-darwin"
+
+        # macOS — Intel
+        - label: macOS-x64
+          runner: macos-14
+          rust-targets: x86_64-apple-darwin
+          tauri-args: "--target x86_64-apple-darwin"
+
+        # Linux — x64
+        - label: Linux-x64
+          runner: ubuntu-22.04
+          rust-targets: ""
+          tauri-args: ""
+
+        # Windows — x64
+        - label: Windows-x64
+          runner: windows-latest
+          rust-targets: ""
+          tauri-args: ""
+
+    runs-on: ${{ matrix.runner }}
+    steps:
+    - name: Checkout
+      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        targets: ${{ matrix.rust-targets }}
+
+    - name: Cache cargo registry and target
+      uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+      with:
+        shared-key: release-${{ matrix.label }}
+
+    # --- Linux system deps ---
+    - name: Install system dependencies (Linux)
+      if: runner.os == 'Linux'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends \
+          libwebkit2gtk-4.1-dev \
+          libgtk-3-dev \
+          libayatana-appindicator3-dev \
+          librsvg2-dev \
+          libsoup-3.0-dev \
+          libasound2-dev \
+          cmake \
+          clang \
+          libclang-dev \
+          patchelf \
+          pkg-config
+
+    # --- Frontend ---
+    - name: Setup pnpm
+      uses: pnpm/action-setup@5280c022466e8e5ea34ea201e2fda33875aeefdb # v6
+
+    - name: Setup Node
+      uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+      with:
+        node-version: 22
+        cache: pnpm
+
+    - name: pnpm install
+      run: pnpm install --frozen-lockfile
+
+    # --- macOS code signing setup (optional) ---
+    # Uncomment the steps below when Apple Developer secrets are configured:
+    #   APPLE_CERTIFICATE, APPLE_CERTIFICATE_PASSWORD, APPLE_SIGNING_IDENTITY,
+    #   APPLE_API_ISSUER, APPLE_API_KEY, APPLE_API_KEY_CONTENT
+    # - name: Write Apple API key to disk
+    #   if: runner.os == 'macOS' && env.APPLE_API_KEY_CONTENT != ''
+    #   env:
+    #     APPLE_API_KEY_CONTENT: ${{ secrets.APPLE_API_KEY_CONTENT }}
+    #   shell: bash
+    #   run: |
+    #     mkdir -p ~/private_keys
+    #     echo "$APPLE_API_KEY_CONTENT" > ~/private_keys/AuthKey.p8
+
+    # --- Build + publish ---
+    - name: Build Tauri app and upload to release
+      uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0.6.2
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # Updater signing (required for auto-update)
+        TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        # ggml (whisper.cpp) hardcodes CMAKE_OSX_DEPLOYMENT_TARGET=10.13 with
+        # FORCE, which makes std::filesystem unavailable on Xcode 15+ SDKs.
+        # We disable libc++ availability checks since our real target is 11.0+.
+        CXXFLAGS: ${{ runner.os == 'macOS' && '-D_LIBCPP_DISABLE_AVAILABILITY' || '' }}
+        CFLAGS: ${{ runner.os == 'macOS' && '-D_LIBCPP_DISABLE_AVAILABILITY' || '' }}
+      with:
+        tagName: ${{ github.ref_name }}
+        releaseName: "EchoNote ${{ github.ref_name }}"
+        releaseBody: |
+          ## What's Changed
+
+          See [CHANGELOG](https://github.com/luismctech/echonote/blob/develop/CHANGELOG.md) for details.
+
+          ### Install
+
+          | Platform | Download |
+          |----------|----------|
+          | macOS (Apple Silicon) | `.dmg` |
+          | macOS (Intel) | `.dmg` |
+          | Windows | `.msi` or `.exe` |
+          | Linux (Debian/Ubuntu) | `.deb` |
+          | Linux (universal) | `.AppImage` |
+        releaseDraft: true
+        prerelease: ${{ contains(github.ref_name, '-') }}
+        args: ${{ matrix.tauri-args }}
+        updaterJsonPreferNsis: true

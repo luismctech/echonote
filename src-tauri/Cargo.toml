@@ -20,13 +20,18 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+tauri-plugin-single-instance = "2"
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
 
 # Workspace-level crates — the application and its adapters.
 echo-app = { path = "../crates/echo-app" }
 echo-asr = { path = "../crates/echo-asr" }
 echo-audio = { path = "../crates/echo-audio" }
+echo-diarize = { path = "../crates/echo-diarize" }
 echo-domain = { path = "../crates/echo-domain" }
+echo-llm = { path = "../crates/echo-llm" }
 echo-storage = { path = "../crates/echo-storage" }
 echo-telemetry = { path = "../crates/echo-telemetry" }
 
@@ -37,11 +42,32 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 time = { workspace = true, features = ["formatting"] }
 thiserror = { workspace = true }
+# Used by `ask_about_meeting` to drain the `BoxStream<AskAboutMeetingEvent>`
+# returned by the use case (`StreamExt::next`). Trait surface only — tokio
+# remains the runtime.
+futures = { workspace = true }
+reqwest = { workspace = true }
+dirs = "6"
+sha2 = "0.10"
+scopeguard = "1"
+tauri-plugin-dialog = "2.7.0"
+tauri-plugin-global-shortcut = "2.3.1"
+specta.workspace = true
+specta-typescript.workspace = true
+tauri-specta.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [features]
 # Default features are left empty; the shell opts in to platform backends
 # per build.
 default = []
+# GPU acceleration forwarded to the ASR and LLM crates.
+# Build with: cargo tauri build --features cuda
+#         or: cargo tauri build --features vulkan
+cuda   = ["echo-asr/cuda", "echo-llm/cuda"]
+vulkan = ["echo-asr/vulkan", "echo-llm/vulkan"]
 
 # Debug-only — lints we want turned up inside this crate without blocking
 # the rest of the workspace. Clippy treats this section via Cargo profile

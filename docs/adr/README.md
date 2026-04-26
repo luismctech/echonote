@@ -29,6 +29,8 @@ Gaps are not reused.
 | [ADR-0001](./0001-tauri-over-electron.md) | Tauri 2.x over Electron for the desktop shell | accepted |
 | [ADR-0002](./0002-rust-plus-react-stack.md) | Rust + React + TypeScript as the base stack | accepted |
 | [ADR-0003](./0003-whisper-cpp-over-faster-whisper.md) | whisper.cpp via whisper-rs for on-device ASR | accepted |
+| [ADR-0007](./0007-diarization-via-onnx-eres2net.md) | Diarization via ONNX embeddings (3D-Speaker ERes2Net) with online clustering | accepted |
+| [ADR-0008](./0008-silero-vad-tract-onnx-with-pre-simplification.md) | Silero VAD v5.1.2 over tract-onnx, made loadable by a Python pre-simplification step | accepted |
 
 ### Pending (see `DEVELOPMENT_PLAN.md` §14)
 
@@ -37,7 +39,8 @@ The following ADRs will be authored as the corresponding work starts:
 - ADR-0004 — llama.cpp over Ollama as the embedded LLM runtime
 - ADR-0005 — Separate audio tracks for microphone and system output
 - ADR-0006 — Hybrid pipeline: streaming ASR + full-file refinement
-- ADR-0007 — Diarization via ONNX embeddings (3D-Speaker ERes2Net)
-- ADR-0008 — Zustand + TanStack Query over Redux for frontend state
 - ADR-0009 — SQLite + FTS5 with optional SQLCipher for persistence
 - ADR-0010 — Clean Architecture with ports and adapters as the layering
+- ADR-0011 — Zustand + TanStack Query over Redux for frontend state
+  (was originally reserved as ADR-0008; renumbered when ADR-0008 was
+  taken by the Silero VAD decision)

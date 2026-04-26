@@ -13,7 +13,7 @@ use crate::entities::speaker::SpeakerId;
 /// Strongly-typed identifier for a [`Segment`]. UUIDv7 keeps lexical
 /// ordering aligned with creation time, which simplifies SQLite
 /// indexing later on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, specta::Type)]
 #[serde(transparent)]
 pub struct SegmentId(pub Uuid);
 
@@ -32,7 +32,14 @@ impl Default for SegmentId {
 }
 
 /// One contiguous transcription span.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+///
+/// `serde(rename_all = "camelCase")` keeps the wire format aligned
+/// with the TypeScript `Segment` type in `src/types/segment.ts`, so
+/// the `Meeting` aggregate returned by `get_meeting` exposes
+/// `startMs` (not `start_ms`) — the same convention the streaming
+/// `Chunk` event already uses for the segments it carries.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
 pub struct Segment {
     /// Stable identifier.
     pub id: SegmentId,

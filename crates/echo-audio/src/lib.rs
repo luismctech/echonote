@@ -24,9 +24,15 @@ pub mod capture;
 pub mod preprocess;
 pub mod sink;
 
-pub use capture::CpalMicrophoneCapture;
+pub use buffer::SamplePool;
+pub use capture::{CpalMicrophoneCapture, RoutingAudioCapture};
+#[cfg(target_os = "macos")]
+pub use capture::{ScreenCaptureKitCapture, SYSTEM_OUTPUT_DEVICE_ID};
 pub use preprocess::resample::{
     resample_to_whisper, ResampleError, RubatoResamplerAdapter, WHISPER_SAMPLE_RATE,
 };
-pub use preprocess::vad::{rms, EnergyVad, VadConfig, VoiceState};
+pub use preprocess::silero_vad::{
+    SileroVad, SileroVadConfig, SILERO_FRAME_SAMPLES, SILERO_SAMPLE_RATE,
+};
+pub use preprocess::vad::{rms, EnergyVad, VadConfig};
 pub use sink::{WavSink, WriteOptions};

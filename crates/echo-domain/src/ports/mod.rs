@@ -8,8 +8,10 @@
 //! llama, SQLite or platform-specific audio APIs.
 
 pub mod audio;
+pub mod chat;
 pub mod diarizer;
 pub mod llm;
 pub mod resampler;
 pub mod storage;
 pub mod transcriber;
+pub mod vad;
