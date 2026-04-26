@@ -214,6 +214,16 @@ export async function downloadModel(
   return invoke<void>("download_model", { modelId, onEvent: channel });
 }
 
+/** Cancel an in-flight model download. Returns true if a download was found. */
+export async function cancelDownload(modelId: string): Promise<boolean> {
+  return invoke<boolean>("cancel_download", { modelId });
+}
+
+/** Delete a downloaded model from disk. */
+export async function deleteModel(modelId: string): Promise<void> {
+  return invoke<void>("delete_model", { modelId });
+}
+
 // ---------------------------------------------------------------------------
 // Chat with transcript (Sprint 1 day 10 — CU-05)
 // ---------------------------------------------------------------------------

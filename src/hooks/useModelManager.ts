@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { downloadModel, getModelStatus } from "../ipc/client";
+import { cancelDownload, deleteModel, downloadModel, getModelStatus } from "../ipc/client";
+import { isIpcError } from "../types/ipc-error";
 import type { DownloadEvent, ModelInfo } from "../types/models";
 
 export type DownloadProgress = {
@@ -15,6 +16,8 @@ export type UseModelManager = {
   error: string | null;
   refresh: () => void;
   download: (modelId: string) => void;
+  cancelDl: (modelId: string) => void;
+  remove: (modelId: string) => void;
 };
 
 export function useModelManager(): UseModelManager {
@@ -33,7 +36,11 @@ export function useModelManager(): UseModelManager {
       })
       .catch((err) => {
         if (mountedRef.current) {
-          setError(err instanceof Error ? err.message : String(err));
+          let msg: string;
+          if (isIpcError(err)) msg = err.message;
+          else if (err instanceof Error) msg = err.message;
+          else msg = String(err);
+          setError(msg);
         }
       })
       .finally(() => {
@@ -69,18 +76,52 @@ export function useModelManager(): UseModelManager {
             setDownloading(null);
             setError(event.error);
             break;
+          case "cancelled":
+            setDownloading(null);
+            break;
         }
       };
 
       downloadModel(modelId, onEvent).catch((err) => {
         if (mountedRef.current) {
           setDownloading(null);
-          setError(err instanceof Error ? err.message : String(err));
+          let msg: string;
+          if (isIpcError(err)) msg = err.message;
+          else if (err instanceof Error) msg = err.message;
+          else msg = String(err);
+          setError(msg);
         }
       });
     },
     [downloading, fetchStatus],
   );
 
-  return { models, loading, downloading, error, refresh: fetchStatus, download };
+  const cancelDl = useCallback(
+    (modelId: string) => {
+      cancelDownload(modelId).catch(() => {});
+    },
+    [],
+  );
+
+  const remove = useCallback(
+    (modelId: string) => {
+      setError(null);
+      deleteModel(modelId)
+        .then(() => {
+          if (mountedRef.current) fetchStatus();
+        })
+        .catch((err) => {
+          if (mountedRef.current) {
+            let msg: string;
+            if (isIpcError(err)) msg = err.message;
+            else if (err instanceof Error) msg = err.message;
+            else msg = String(err);
+            setError(msg);
+          }
+        });
+    },
+    [fetchStatus],
+  );
+
+  return { models, loading, downloading, error, refresh: fetchStatus, download, cancelDl, remove };
 }

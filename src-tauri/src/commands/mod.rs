@@ -151,9 +151,9 @@ pub struct AppState {
     pub(crate) vad_model_path: PathBuf,
     /// Lazily-loaded Silero VAD template.
     pub(crate) vad: LazyModel<SileroVad>,
-    /// Model IDs currently being downloaded. Prevents concurrent
-    /// downloads of the same model from corrupting the `.part` file.
-    pub(crate) in_flight_downloads: Arc<Mutex<std::collections::HashSet<String>>>,
+    /// Model IDs currently being downloaded, mapped to a cancel flag.
+    /// Setting the flag to `true` signals the download loop to abort.
+    pub(crate) in_flight_downloads: Arc<Mutex<std::collections::HashMap<String, std::sync::Arc<std::sync::atomic::AtomicBool>>>>,
 }
 
 use echo_domain::StreamingSessionId;
@@ -248,7 +248,7 @@ impl AppState {
             llm: LazyModel::new(),
             vad_model_path,
             vad: LazyModel::new(),
-            in_flight_downloads: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            in_flight_downloads: Arc::new(Mutex::new(std::collections::HashMap::new())),
         })
     }
 

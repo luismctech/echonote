@@ -178,6 +178,9 @@ pub enum DownloadEvent {
     /// Download failed.
     #[serde(rename = "failed")]
     Failed { error: String },
+    /// Download was cancelled by the user.
+    #[serde(rename = "cancelled")]
+    Cancelled,
 }
 
 /// Download a model by id, streaming progress events to the frontend.
@@ -193,24 +196,26 @@ pub async fn download_model(
     on_event: Channel<DownloadEvent>,
 ) -> Result<(), IpcError> {
     // ── Guard: reject concurrent downloads of the same model ─────
+    let cancel_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     {
         let mut guard = state
             .in_flight_downloads
             .lock()
             .unwrap_or_else(|p| p.into_inner());
-        if !guard.insert(model_id.clone()) {
+        if guard.contains_key(&model_id) {
             return Err(IpcError::new(
                 ErrorCode::SessionConflict,
                 format!("model {model_id} is already being downloaded"),
             ));
         }
+        guard.insert(model_id.clone(), cancel_flag.clone());
     }
     let downloads_handle = state.in_flight_downloads.clone();
     let mid = model_id.clone();
     // Ensure the guard is removed on all exit paths.
     let _cleanup = scopeguard::guard((), move |()| {
-        if let Ok(mut set) = downloads_handle.lock() {
-            set.remove(&mid);
+        if let Ok(mut map) = downloads_handle.lock() {
+            map.remove(&mid);
         }
     });
 
@@ -259,6 +264,14 @@ pub async fn download_model(
         let mut hasher = Sha256::new();
         let mut last_report = std::time::Instant::now();
         while let Some(chunk) = stream.next().await {
+            // ── Check cancel flag ────────────────────────────────
+            if cancel_flag.load(std::sync::atomic::Ordering::Relaxed) {
+                drop(file);
+                let _ = tokio::fs::remove_file(&tmp).await;
+                let _ = on_event.send(DownloadEvent::Cancelled);
+                return Ok(());
+            }
+
             let chunk =
                 chunk.map_err(|e| IpcError::network(format!("download stream error: {e}")))?;
             file.write_all(&chunk)
@@ -324,4 +337,61 @@ pub async fn unload_model(state: State<'_, AppState>, kind: String) -> Result<bo
         "vad" => Ok(state.vad.unload().await),
         _ => Err(IpcError::not_found(format!("unknown model kind: {kind}"))),
     }
+}
+
+/// Cancel an in-flight model download.
+///
+/// Sets the cancel flag for the download loop, which will clean up the
+/// `.part` file and send a `Cancelled` event.
+#[tauri::command]
+#[specta::specta]
+pub async fn cancel_download(
+    state: State<'_, AppState>,
+    model_id: String,
+) -> Result<bool, IpcError> {
+    let guard = state
+        .in_flight_downloads
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    if let Some(flag) = guard.get(&model_id) {
+        flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
+/// Delete a downloaded model from disk.
+///
+/// If the model is currently loaded in memory, it is unloaded first.
+#[tauri::command]
+#[specta::specta]
+pub async fn delete_model(
+    state: State<'_, AppState>,
+    model_id: String,
+) -> Result<(), IpcError> {
+    let rel_path = model_dest_path(&model_id)
+        .ok_or_else(|| IpcError::not_found(format!("unknown model: {model_id}")))?;
+    let dest = workspace_root().join(rel_path);
+
+    if !dest.exists() {
+        return Err(IpcError::not_found(format!(
+            "model file not found: {model_id}"
+        )));
+    }
+
+    // Unload the model from memory if it's currently loaded.
+    let kind = model_id.split('-').next().unwrap_or("");
+    match kind {
+        "asr" => { state.transcriber.unload().await; }
+        "llm" => { state.llm.unload().await; }
+        "vad" => { state.vad.unload().await; }
+        _ => {}
+    }
+
+    tokio::fs::remove_file(&dest)
+        .await
+        .map_err(|e| IpcError::storage(format!("failed to delete model: {e}")))?;
+
+    Ok(())
 }

@@ -122,7 +122,9 @@
     "connecting": "Connecting…",
     "installed": "Installed",
     "downloading": "Downloading…",
-    "download": "Download ({{size}})"
+    "download": "Download ({{size}})",
+    "cancel": "Cancel",
+    "delete": "Delete model"
   },
   "errors": {
     "renderCrash": "fatal — render error",
