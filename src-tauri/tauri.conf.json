@@ -39,6 +39,9 @@
     "targets": "all",
     "createUpdaterArtifacts": true,
     "category": "Productivity",
+    "macOS": {
+      "minimumSystemVersion": "11.0"
+    },
     "shortDescription": "Private, local-first meeting transcription",
     "longDescription": "EchoNote is a privacy-first desktop app that transcribes meetings and generates AI summaries entirely on-device.",
     "copyright": "Copyright © 2026 Luis MC",
