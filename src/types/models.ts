@@ -11,4 +11,5 @@ export type ModelInfo = {
 export type DownloadEvent =
   | { kind: "progress"; downloaded: number; total: number }
   | { kind: "finished" }
-  | { kind: "failed"; error: string };
+  | { kind: "failed"; error: string }
+  | { kind: "cancelled" };

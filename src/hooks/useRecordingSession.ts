@@ -26,6 +26,7 @@ import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 
 import { useToast } from "../components/Toaster";
 import { startStreaming, stopStreaming } from "../ipc/client";
+import { isIpcError } from "../types/ipc-error";
 import {
   canStart as selectCanStart,
   canStop as selectCanStop,
@@ -219,10 +220,11 @@ export function useRecordingSession({
           handleEvent,
         );
       } catch (err) {
-        dispatch({
-          type: "BACKEND_ERROR",
-          message: err instanceof Error ? err.message : String(err),
-        });
+        let msg: string;
+        if (isIpcError(err)) msg = err.message;
+        else if (err instanceof Error) msg = err.message;
+        else msg = String(err);
+        dispatch({ type: "BACKEND_ERROR", message: msg });
       }
     },
     [handleEvent],
@@ -235,10 +237,11 @@ export function useRecordingSession({
     try {
       await stopStreaming(id);
     } catch (err) {
-      dispatch({
-        type: "BACKEND_ERROR",
-        message: err instanceof Error ? err.message : String(err),
-      });
+      let msg: string;
+      if (isIpcError(err)) msg = err.message;
+      else if (err instanceof Error) msg = err.message;
+      else msg = String(err);
+      dispatch({ type: "BACKEND_ERROR", message: msg });
     }
   }, [stream]);
 
