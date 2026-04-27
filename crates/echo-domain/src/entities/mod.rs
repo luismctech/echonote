@@ -6,6 +6,7 @@
 //!
 //! Concrete types are fleshed out in each submodule.
 
+pub mod custom_template;
 pub mod meeting;
 pub mod segment;
 pub mod speaker;

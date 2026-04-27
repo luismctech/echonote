@@ -15,6 +15,7 @@ pub mod llm;
 pub mod meetings;
 pub mod models;
 pub mod streaming;
+pub mod templates;
 
 // Re-export public items for non-macro usage (e.g. `commands::AppState`).
 // The `tauri_specta::collect_commands!` macro in `lib.rs` references
@@ -133,7 +134,9 @@ pub struct AppState {
     pub(crate) resampler: Arc<dyn Resampler>,
     /// Lazily-loaded whisper transcriber (concrete so `LazyModel<T>` stays `Sized`).
     pub(crate) transcriber: LazyModel<WhisperCppTranscriber>,
-    pub(crate) model_path: PathBuf,
+    /// Path to the local ASR model. Behind a `RwLock` so
+    /// `set_active_asr` can switch models at runtime.
+    pub(crate) model_path: std::sync::RwLock<PathBuf>,
     /// Where to find the speaker embedder ONNX.
     pub(crate) embed_model_path: PathBuf,
     pub(crate) store: Arc<dyn MeetingStore>,
@@ -141,8 +144,9 @@ pub struct AppState {
     pub(crate) rename_speaker: Arc<RenameSpeaker>,
     /// In-flight streaming sessions.
     pub(crate) sessions: Arc<Mutex<HashMap<StreamingSessionId, SessionEntry>>>,
-    /// Path to the local LLM (.gguf).
-    pub(crate) llm_model_path: PathBuf,
+    /// Path to the local LLM (.gguf). Behind a `RwLock` so
+    /// `set_active_llm` can switch models at runtime.
+    pub(crate) llm_model_path: std::sync::RwLock<PathBuf>,
     /// Lazily-loaded LLM, held as the concrete [`LlamaCppLlm`] so we
     /// can derive both `LlmModel` and `ChatAssistant` from the same
     /// loaded weights.
@@ -153,7 +157,9 @@ pub struct AppState {
     pub(crate) vad: LazyModel<SileroVad>,
     /// Model IDs currently being downloaded, mapped to a cancel flag.
     /// Setting the flag to `true` signals the download loop to abort.
-    pub(crate) in_flight_downloads: Arc<Mutex<std::collections::HashMap<String, std::sync::Arc<std::sync::atomic::AtomicBool>>>>,
+    pub(crate) in_flight_downloads: Arc<
+        Mutex<std::collections::HashMap<String, std::sync::Arc<std::sync::atomic::AtomicBool>>>,
+    >,
     /// Root directory for model files and other data assets.
     /// In debug builds this is the workspace root; in release builds
     /// it falls back to the Tauri `appDataDir` so models are
@@ -172,6 +178,29 @@ impl AppState {
     /// Cheap clone of the session-map handle.
     pub(crate) fn sessions_handle(&self) -> Arc<Mutex<HashMap<StreamingSessionId, SessionEntry>>> {
         self.sessions.clone()
+    }
+
+    /// Update the LLM model path at runtime. Must be called after
+    /// `llm.unload()` so the next `ensure_llm()` loads the new model.
+    pub(crate) fn set_llm_model_path(&self, path: PathBuf) {
+        *self.llm_model_path.write().unwrap() = path;
+    }
+
+    /// Read the current LLM model path.
+    pub(crate) fn active_llm_path(&self) -> PathBuf {
+        self.llm_model_path.read().unwrap().clone()
+    }
+
+    /// Update the ASR model path at runtime. Must be called after
+    /// `transcriber.unload()` so the next `ensure_transcriber()` loads
+    /// the new model.
+    pub(crate) fn set_asr_model_path(&self, path: PathBuf) {
+        *self.model_path.write().unwrap() = path;
+    }
+
+    /// Read the current ASR model path.
+    pub(crate) fn active_asr_path(&self) -> PathBuf {
+        self.model_path.read().unwrap().clone()
     }
 
     /// Ordered shutdown sequence invoked from the Tauri `Exit` hook.
@@ -218,15 +247,21 @@ impl AppState {
         };
         tracing::info!(data_root = %data_root.display(), "resolved data root for model assets");
 
-        let model_path =
-            resolve_asset_path(&data_root, std::env::var("ECHO_ASR_MODEL").ok(), preferred_asr_model(&data_root));
+        let model_path = resolve_asset_path(
+            &data_root,
+            std::env::var("ECHO_ASR_MODEL").ok(),
+            preferred_asr_model(&data_root),
+        );
         let embed_model_path = resolve_asset_path(
             &data_root,
             std::env::var("ECHO_EMBED_MODEL").ok(),
             "models/embedder/eres2net_en_voxceleb.onnx",
         );
-        let llm_model_path =
-            resolve_asset_path(&data_root, std::env::var("ECHO_LLM_MODEL").ok(), preferred_llm_model(&data_root));
+        let llm_model_path = resolve_asset_path(
+            &data_root,
+            std::env::var("ECHO_LLM_MODEL").ok(),
+            preferred_llm_model(&data_root),
+        );
         let vad_model_path = resolve_asset_path(
             &data_root,
             std::env::var("ECHO_VAD_MODEL").ok(),
@@ -255,13 +290,13 @@ impl AppState {
             capture: Arc::new(RoutingAudioCapture::with_default_adapters()),
             resampler: Arc::new(RubatoResamplerAdapter::new()),
             transcriber: LazyModel::new(),
-            model_path,
+            model_path: std::sync::RwLock::new(model_path),
             embed_model_path,
             store,
             recorder,
             rename_speaker,
             sessions: Arc::new(Mutex::new(HashMap::new())),
-            llm_model_path,
+            llm_model_path: std::sync::RwLock::new(llm_model_path),
             llm: LazyModel::new(),
             vad_model_path,
             vad: LazyModel::new(),
@@ -276,7 +311,7 @@ impl AppState {
 
     /// Lazily load the local LLM (concrete type for adapters).
     pub(crate) async fn ensure_llm_concrete(&self) -> Result<Arc<LlamaCppLlm>, IpcError> {
-        let model_path = self.llm_model_path.clone();
+        let model_path = self.llm_model_path.read().unwrap().clone();
         let data_root = self.data_root.clone();
         self.llm
             .get_or_init(|| async move {
@@ -396,7 +431,7 @@ impl AppState {
 
     /// Lazily load the whisper transcriber.
     pub(crate) async fn ensure_transcriber(&self) -> Result<Arc<dyn Transcriber>, IpcError> {
-        let asr_path = self.model_path.clone();
+        let asr_path = self.model_path.read().unwrap().clone();
         let data_root = self.data_root.clone();
         self.transcriber
             .get_or_init(|| async move {
@@ -501,7 +536,11 @@ fn preferred_asr_model(root: &Path) -> &'static str {
     "models/asr/ggml-large-v3-turbo.bin"
 }
 
-fn resolve_asset_path(root: &Path, override_value: Option<String>, default_relative: &str) -> PathBuf {
+fn resolve_asset_path(
+    root: &Path,
+    override_value: Option<String>,
+    default_relative: &str,
+) -> PathBuf {
     if let Some(raw) = override_value.filter(|s| !s.trim().is_empty()) {
         let raw_path = PathBuf::from(&raw);
         if raw_path.is_absolute() {

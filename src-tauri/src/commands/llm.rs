@@ -6,7 +6,7 @@ use tauri::State;
 use crate::ipc_error::IpcError;
 
 use echo_app::{AskAboutMeeting, AskAboutMeetingEvent, SummarizeMeeting};
-use echo_domain::{ChatMessage, MeetingId, Summary};
+use echo_domain::{ChatMessage, CustomTemplateId, MeetingId, Summary};
 use futures::stream::StreamExt;
 
 use super::AppState;
@@ -48,6 +48,33 @@ pub async fn get_summary(
         .get_summary(meeting_id)
         .await
         .map_err(|e| IpcError::storage(format!("get summary: {e}")))
+}
+
+/// Generate a summary using a user-defined custom template.
+///
+/// Loads the custom template by `template_id`, then runs the LLM with
+/// the user's prompt. The result is stored as
+/// [`echo_domain::SummaryContent::Custom`].
+#[tauri::command]
+#[specta::specta]
+pub async fn summarize_with_custom_template(
+    state: State<'_, AppState>,
+    meeting_id: MeetingId,
+    template_id: CustomTemplateId,
+) -> Result<Summary, IpcError> {
+    // Load the custom template from disk.
+    let templates = super::templates::read_templates_from(&state)?;
+    let custom = templates
+        .iter()
+        .find(|t| t.id == template_id)
+        .ok_or_else(|| IpcError::not_found(format!("custom template {template_id} not found")))?;
+
+    let llm = state.ensure_llm().await?;
+    let use_case = SummarizeMeeting::new(llm, state.store.clone());
+    use_case
+        .execute_custom(meeting_id, custom)
+        .await
+        .map_err(IpcError::from)
 }
 
 /// Run one chat turn against a meeting's transcript.

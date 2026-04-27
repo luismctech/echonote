@@ -367,10 +367,7 @@ pub async fn cancel_download(
 /// If the model is currently loaded in memory, it is unloaded first.
 #[tauri::command]
 #[specta::specta]
-pub async fn delete_model(
-    state: State<'_, AppState>,
-    model_id: String,
-) -> Result<(), IpcError> {
+pub async fn delete_model(state: State<'_, AppState>, model_id: String) -> Result<(), IpcError> {
     let rel_path = model_dest_path(&model_id)
         .ok_or_else(|| IpcError::not_found(format!("unknown model: {model_id}")))?;
     let dest = state.data_root.join(rel_path);
@@ -384,9 +381,15 @@ pub async fn delete_model(
     // Unload the model from memory if it's currently loaded.
     let kind = model_id.split('-').next().unwrap_or("");
     match kind {
-        "asr" => { state.transcriber.unload().await; }
-        "llm" => { state.llm.unload().await; }
-        "vad" => { state.vad.unload().await; }
+        "asr" => {
+            state.transcriber.unload().await;
+        }
+        "llm" => {
+            state.llm.unload().await;
+        }
+        "vad" => {
+            state.vad.unload().await;
+        }
         _ => {}
     }
 
@@ -395,4 +398,126 @@ pub async fn delete_model(
         .map_err(|e| IpcError::storage(format!("failed to delete model: {e}")))?;
 
     Ok(())
+}
+
+/// Set the active LLM model. Unloads the currently loaded model (if
+/// any) and switches the path so the next `ensure_llm()` call loads
+/// the selected model.
+///
+/// `model_id` must be an `"llm-*"` id from the catalog whose model
+/// file is already downloaded.
+#[tauri::command]
+#[specta::specta]
+pub async fn set_active_llm(state: State<'_, AppState>, model_id: String) -> Result<(), IpcError> {
+    let rel_path = model_dest_path(&model_id)
+        .ok_or_else(|| IpcError::not_found(format!("unknown model: {model_id}")))?;
+
+    if !model_id.starts_with("llm-") {
+        return Err(IpcError::new(
+            ErrorCode::InvalidInput,
+            format!("{model_id} is not an LLM model"),
+        ));
+    }
+
+    let dest = state.data_root.join(rel_path);
+    if !dest.exists() {
+        return Err(IpcError::not_found(format!(
+            "model not downloaded: {model_id}"
+        )));
+    }
+
+    // Unload the currently loaded LLM (if any).
+    state.llm.unload().await;
+
+    // SAFETY: We hold an exclusive reference via `State` in the Tauri
+    // runtime; this is the only writer. The `unsafe` block is required
+    // because `llm_model_path` is not behind an async mutex (to keep
+    // it cheap to read). The Tauri command pipeline guarantees single-
+    // writer semantics per command invocation.
+    //
+    // We use an interior-mutability pattern via a small helper below
+    // to update the path.
+    state.set_llm_model_path(dest);
+
+    tracing::info!(model_id = %model_id, "active LLM switched");
+    Ok(())
+}
+
+/// Return the model id of the currently configured LLM, or `null`
+/// when no LLM model file exists on disk.
+#[tauri::command]
+#[specta::specta]
+pub fn get_active_llm(state: State<'_, AppState>) -> Option<String> {
+    let path = state.active_llm_path();
+    if !path.exists() {
+        return None;
+    }
+    // Reverse-lookup the catalog id from the filename.
+    let catalog = model_catalog(&state.data_root);
+    for (info, _, _) in &catalog {
+        if info.kind == "llm" {
+            let rel = model_dest_path(&info.id).unwrap_or("");
+            if state.data_root.join(rel) == path {
+                return Some(info.id.clone());
+            }
+        }
+    }
+    None
+}
+
+/// Set the active ASR (speech recognition) model. Unloads the currently
+/// loaded transcriber (if any) and switches the path so the next
+/// `ensure_transcriber()` call loads the selected model.
+///
+/// `model_id` must be an `"asr-*"` id from the catalog whose model
+/// file is already downloaded.
+#[tauri::command]
+#[specta::specta]
+pub async fn set_active_asr(state: State<'_, AppState>, model_id: String) -> Result<(), IpcError> {
+    let rel_path = model_dest_path(&model_id)
+        .ok_or_else(|| IpcError::not_found(format!("unknown model: {model_id}")))?;
+
+    if !model_id.starts_with("asr-") {
+        return Err(IpcError::new(
+            ErrorCode::InvalidInput,
+            format!("{model_id} is not an ASR model"),
+        ));
+    }
+
+    let dest = state.data_root.join(rel_path);
+    if !dest.exists() {
+        return Err(IpcError::not_found(format!(
+            "model not downloaded: {model_id}"
+        )));
+    }
+
+    // Unload the currently loaded transcriber (if any).
+    state.transcriber.unload().await;
+
+    state.set_asr_model_path(dest);
+
+    tracing::info!(model_id = %model_id, "active ASR switched");
+    Ok(())
+}
+
+/// Return the model id of the currently configured ASR model, or `null`
+/// when no ASR model file exists on disk.
+#[tauri::command]
+#[specta::specta]
+pub fn get_active_asr(state: State<'_, AppState>) -> Option<String> {
+    let path = state.active_asr_path();
+    if !path.exists() {
+        return None;
+    }
+    // Reverse-lookup the catalog id from the filename.
+    let catalog = model_catalog(&state.data_root);
+    for (info, _, _) in &catalog {
+        if info.kind == "asr" {
+            let rel = model_dest_path(&info.id).unwrap_or("");
+            if state.data_root.join(rel) == path {
+                return Some(info.id.clone());
+            }
+        }
+    }
+    None
 }

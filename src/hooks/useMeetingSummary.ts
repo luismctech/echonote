@@ -25,18 +25,24 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { getSummary, summarizeMeeting } from "../ipc/client";
+import { getSummary, summarizeMeeting, summarizeWithCustomTemplate } from "../ipc/client";
 import { useIpcAction } from "../ipc/useIpcAction";
 import type { MeetingId } from "../types/meeting";
 import type { Summary, TemplateId } from "../types/summary";
+import type { CustomTemplateId } from "../types/custom-template";
+
+/** The template selector can pick a built-in or a custom template. */
+export type SelectedTemplate =
+  | { kind: "builtin"; id: TemplateId }
+  | { kind: "custom"; id: CustomTemplateId; name: string };
 
 export type UseMeetingSummary = {
   summary: Summary | null;
   loading: boolean;
   generating: boolean;
   error: string | null;
-  selectedTemplate: TemplateId;
-  setSelectedTemplate: (t: TemplateId) => void;
+  selectedTemplate: SelectedTemplate;
+  setSelectedTemplate: (t: SelectedTemplate) => void;
   generate: () => Promise<Summary | undefined>;
 };
 
@@ -45,7 +51,10 @@ export function useMeetingSummary(meetingId: MeetingId | null): UseMeetingSummar
   const [loading, setLoading] = useState(false);
   const [generating, setGenerating] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [selectedTemplate, setSelectedTemplate] = useState<TemplateId>("general");
+  const [selectedTemplate, setSelectedTemplate] = useState<SelectedTemplate>({
+    kind: "builtin",
+    id: "general",
+  });
 
   const requestedRef = useRef<MeetingId | null>(null);
 
@@ -69,7 +78,15 @@ export function useMeetingSummary(meetingId: MeetingId | null): UseMeetingSummar
         // Sync the selector to the loaded template so "Regenerate"
         // targets the right one.
         if (fetched) {
-          setSelectedTemplate(fetched.template as TemplateId);
+          if (fetched.template === "custom") {
+            setSelectedTemplate({
+              kind: "custom",
+              id: "", // id unknown from stored summary
+              name: (fetched as { templateName?: string }).templateName ?? "Custom",
+            });
+          } else {
+            setSelectedTemplate({ kind: "builtin", id: fetched.template as TemplateId });
+          }
         }
       } catch (err) {
         if (cancelled || requestedRef.current !== meetingId) return;
@@ -86,16 +103,26 @@ export function useMeetingSummary(meetingId: MeetingId | null): UseMeetingSummar
     };
   }, [meetingId]);
 
-  const generateCall = useIpcAction(
+  const generateBuiltinCall = useIpcAction(
     "Couldn't generate summary.",
     summarizeMeeting,
+  );
+
+  const generateCustomCall = useIpcAction(
+    "Couldn't generate summary.",
+    summarizeWithCustomTemplate,
   );
 
   const generate = useCallback(async (): Promise<Summary | undefined> => {
     if (!meetingId) return undefined;
     setGenerating(true);
     try {
-      const fresh = await generateCall(meetingId, selectedTemplate);
+      let fresh: Summary | undefined;
+      if (selectedTemplate.kind === "custom") {
+        fresh = await generateCustomCall(meetingId, selectedTemplate.id);
+      } else {
+        fresh = await generateBuiltinCall(meetingId, selectedTemplate.id);
+      }
       if (fresh && requestedRef.current === meetingId) {
         setSummary(fresh);
       }
@@ -103,7 +130,7 @@ export function useMeetingSummary(meetingId: MeetingId | null): UseMeetingSummar
     } finally {
       setGenerating(false);
     }
-  }, [meetingId, selectedTemplate, generateCall]);
+  }, [meetingId, selectedTemplate, generateBuiltinCall, generateCustomCall]);
 
   return {
     summary,

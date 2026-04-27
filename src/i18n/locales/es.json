@@ -124,7 +124,25 @@
     "downloading": "Descargando…",
     "download": "Descargar ({{size}})",
     "cancel": "Cancelar",
-    "delete": "Eliminar modelo"
+    "delete": "Eliminar modelo",
+    "use": "Usar",
+    "active": "Activo"
+  },
+  "templates": {
+    "title": "Plantillas personalizadas",
+    "close": "Cerrar",
+    "loading": "Cargando plantillas…",
+    "empty": "Sin plantillas personalizadas aún. Crea una para usar tus propios prompts.",
+    "new": "+ Nueva plantilla",
+    "edit": "Editar plantilla",
+    "delete": "Eliminar plantilla",
+    "cancel": "Cancelar",
+    "save": "Guardar",
+    "create": "Crear",
+    "saving": "Guardando…",
+    "namePlaceholder": "Nombre de la plantilla…",
+    "promptPlaceholder": "Escribe tu prompt de resumen aquí… La transcripción de la reunión se agregará automáticamente.",
+    "manage": "Gestionar plantillas"
   },
   "errors": {
     "renderCrash": "fatal — error de renderizado",
