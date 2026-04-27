@@ -172,6 +172,9 @@ use echo_domain::StreamingSessionId;
 pub(crate) struct SessionEntry {
     pub join: JoinHandle<()>,
     pub handle: Arc<AsyncMutex<StreamingHandle>>,
+    /// RAII guard — prevents the OS from sleeping while recording.
+    /// Dropped automatically when the session entry is removed.
+    pub _keep_awake: Option<keepawake::KeepAwake>,
 }
 
 impl AppState {

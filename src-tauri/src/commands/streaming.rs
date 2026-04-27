@@ -210,6 +210,14 @@ pub async fn start_streaming(
         SessionEntry {
             join,
             handle: handle_arc,
+            _keep_awake: keepawake::Builder::default()
+                .idle(true)
+                .reason("Recording audio session")
+                .app_name("EchoNote")
+                .app_reverse_domain("com.echonote.app")
+                .create()
+                .map_err(|e| tracing::warn!("keep-awake unavailable: {e}"))
+                .ok(),
         },
     );
 

@@ -6,6 +6,7 @@
   "sidebar": {
     "meetings": "Meetings",
     "live": "+ Live",
+    "recording": "Recording",
     "searchPlaceholder": "Search transcripts…",
     "searchLabel": "Search meeting transcripts",
     "clearSearch": "Clear search",
@@ -29,6 +30,7 @@
     "diarize": "Diarize",
     "starting": "Starting…",
     "start": "Start",
+    "recording": "Recording…",
     "stopping": "Stopping…",
     "stop": "Stop",
     "error": "error:",
@@ -44,7 +46,7 @@
     "warmingUp": "warming up…",
     "probing": "probing backend…",
     "offline": "offline",
-    "ok": "backend ok · v{{version}}",
+    "ok": "✓ v{{version}}",
     "tooltip": "v{{version}} · {{target}} · {{commit}}"
   },
   "meeting": {

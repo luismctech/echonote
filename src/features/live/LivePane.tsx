@@ -109,14 +109,28 @@ export function LivePane({
             />
             <span className="text-zinc-600 dark:text-zinc-300">{t("live.diarize")}</span>
           </label>
-          <button
-            type="button"
-            onClick={onStart}
-            disabled={!canStart}
-            className="rounded-md bg-emerald-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-emerald-500 disabled:cursor-not-allowed disabled:bg-zinc-300 dark:disabled:bg-zinc-700"
-          >
-            {stream.kind === "starting" ? t("live.starting") : t("live.start")}
-          </button>
+          {stream.kind === "recording" ? (
+            <span className="flex items-center gap-2 rounded-md bg-rose-600/10 px-3 py-1.5 text-sm font-medium text-rose-600 ring-1 ring-rose-500/30 dark:bg-rose-500/10 dark:text-rose-400 dark:ring-rose-500/20">
+              <span className="relative flex h-2 w-2">
+                <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-rose-500 opacity-75" />
+                <span className="relative inline-flex h-2 w-2 rounded-full bg-rose-500" />
+              </span>
+              {t("live.recording")}
+            </span>
+          ) : (
+            <button
+              type="button"
+              onClick={onStart}
+              disabled={!canStart}
+              className={`rounded-md px-3 py-1.5 text-sm font-medium text-white ${
+                stream.kind === "starting"
+                  ? "animate-pulse bg-emerald-500"
+                  : "bg-emerald-600 hover:bg-emerald-500 disabled:cursor-not-allowed disabled:bg-zinc-300 dark:disabled:bg-zinc-700"
+              }`}
+            >
+              {stream.kind === "starting" ? t("live.starting") : t("live.start")}
+            </button>
+          )}
           <button
             type="button"
             onClick={onStop}

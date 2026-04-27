@@ -26,9 +26,13 @@ Most meeting transcription tools send your audio to the cloud. EchoNote doesn't.
 | **Live transcription** | Real-time speech-to-text as you speak, powered by [Whisper](https://github.com/ggerganov/whisper.cpp) |
 | **Speaker identification** | Automatically detects and labels different speakers in the conversation |
 | **AI summaries** | Generate meeting summaries with one click using a local LLM (no cloud API) |
+| **Custom summary templates** | Create your own prompt templates for tailored summaries (1:1, sprint review, sales call, or anything you need) |
+| **Model selection** | Download multiple ASR or LLM models and switch between them at runtime — no restart required |
 | **Meeting search** | Full-text search across all your past meetings |
+| **Conversational chat** | Ask follow-up questions about any meeting using the local LLM |
 | **Multiple languages** | Supports 90+ languages via Whisper; optimized for English and Spanish |
 | **Cross-platform** | Available for macOS (Apple Silicon & Intel), Windows, and Linux |
+| **Sleep prevention** | Automatically prevents OS sleep while recording so you never lose a session |
 | **Auto-updates** | The app checks for new versions on launch |
 
 ---
@@ -121,11 +125,12 @@ Models are downloaded automatically on first use.
 - [x] Speaker identification (diarization)
 - [x] Meeting persistence and search
 - [x] Local LLM summaries
+- [x] Conversational chat ("What did Maria say about the deadline?")
+- [x] Custom summary templates (create your own prompts)
+- [x] Runtime model selection (switch ASR/LLM models without restarting)
 - [ ] System audio capture (transcribe the other side of the call)
-- [ ] Conversational chat ("What did Maria say about the deadline?")
 - [ ] Encrypted local storage
 - [ ] Setup wizard with hardware profile detection
-- [ ] More summary templates (1:1, sprint review, interview, sales call)
 
 ---
 

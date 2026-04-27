@@ -6,6 +6,7 @@
   "sidebar": {
     "meetings": "Reuniones",
     "live": "+ En vivo",
+    "recording": "Grabando",
     "searchPlaceholder": "Buscar transcripciones…",
     "searchLabel": "Buscar transcripciones de reuniones",
     "clearSearch": "Limpiar búsqueda",
@@ -29,6 +30,7 @@
     "diarize": "Diarizar",
     "starting": "Iniciando…",
     "start": "Iniciar",
+    "recording": "Grabando…",
     "stopping": "Deteniendo…",
     "stop": "Detener",
     "error": "error:",
@@ -44,7 +46,7 @@
     "warmingUp": "calentando…",
     "probing": "verificando backend…",
     "offline": "desconectado",
-    "ok": "backend ok · v{{version}}",
+    "ok": "✓ v{{version}}",
     "tooltip": "v{{version}} · {{target}} · {{commit}}"
   },
   "meeting": {

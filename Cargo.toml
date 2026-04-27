@@ -24,7 +24,7 @@ members = [
 # Shared package metadata inherited by member crates via `package.xxx.workspace = true`
 # -----------------------------------------------------------------------------
 [workspace.package]
-version = "0.3.0"
+version = "0.3.1"
 edition = "2021"
 rust-version = "1.88"
 authors = ["Luis MC <luismctechdev@gmail.com>"]

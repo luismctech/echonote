@@ -152,7 +152,14 @@ export function App() {
       )}
 
       <div className="grid min-h-0 flex-1 grid-cols-1 gap-4 md:grid-cols-[260px_1fr]">
-        <Sidebar onGoLive={handleGoLive} />
+        <Sidebar
+          onGoLive={handleGoLive}
+          isRecording={
+            recording.stream.kind === "starting" ||
+            recording.stream.kind === "recording" ||
+            recording.stream.kind === "stopping"
+          }
+        />
 
         <section className="flex min-h-0 min-w-0 flex-col gap-3 overflow-hidden rounded-lg border border-zinc-200 bg-white p-4 shadow-sm dark:border-zinc-800 dark:bg-zinc-950">
           {view.kind === "live" ? (
