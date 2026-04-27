@@ -75,6 +75,27 @@ export async function stopStreaming(
   return invoke<boolean>("stop_streaming", { sessionId });
 }
 
+/**
+ * Pause a running streaming session. Audio capture keeps running but
+ * frames are discarded. Returns `true` when actually paused, `false`
+ * when unknown or already paused.
+ */
+export async function pauseStreaming(
+  sessionId: StreamingSessionId,
+): Promise<boolean> {
+  return invoke<boolean>("pause_streaming", { sessionId });
+}
+
+/**
+ * Resume a paused streaming session. Returns `true` when actually
+ * resumed, `false` when unknown or not paused.
+ */
+export async function resumeStreaming(
+  sessionId: StreamingSessionId,
+): Promise<boolean> {
+  return invoke<boolean>("resume_streaming", { sessionId });
+}
+
 // ---------------------------------------------------------------------------
 // Meetings
 // ---------------------------------------------------------------------------

@@ -10,11 +10,18 @@ import { TranscriptRow } from "./TranscriptRow";
 
 /** Subtitle text under the live pane title — model + input format. */
 function modelLabel(stream: RecordingState): string {
-  if (stream.kind === "recording" && stream.inputFormat) {
+  if ((stream.kind === "recording" || stream.kind === "paused") && stream.inputFormat) {
     const { sampleRateHz, channels } = stream.inputFormat;
     return `${sampleRateHz} Hz · ${channels} ch`;
   }
   return "";
+}
+
+/** Hint text for the empty transcript area. */
+function emptyHint(stream: RecordingState, t: (key: string) => string): string {
+  if (stream.kind === "recording") return t("live.listening");
+  if (stream.kind === "paused") return t("live.pausedHint");
+  return t("live.pressStart");
 }
 
 export function LivePane({
@@ -24,28 +31,36 @@ export function LivePane({
   listRef,
   canStart,
   canStop,
+  canPause,
+  canResume,
   diarize,
   onToggleDiarize,
   language,
   onChangeLanguage,
   onStart,
   onStop,
+  onPause,
+  onResume,
   onDismissError,
-}: {
+}: Readonly<{
   stream: RecordingState;
   stats: { chunks: number; skipped: number; audioMs: number };
   lines: StreamLine[];
   listRef: RefObject<HTMLDivElement>;
   canStart: boolean;
   canStop: boolean;
+  canPause: boolean;
+  canResume: boolean;
   diarize: boolean;
   onToggleDiarize: (next: boolean) => void;
   language: string;
   onChangeLanguage: (next: string) => void;
   onStart: () => void;
   onStop: () => void;
+  onPause: () => void;
+  onResume: () => void;
   onDismissError: () => void;
-}) {
+}>) {
   // Toggle is locked once a session is in flight: changing the
   // diarize flag (or language hint) mid-recording would mix
   // half-and-half results and is confusing to render.
@@ -53,6 +68,7 @@ export function LivePane({
   const toggleLocked =
     stream.kind === "starting" ||
     stream.kind === "recording" ||
+    stream.kind === "paused" ||
     stream.kind === "stopping";
 
   const virtualizer = useVirtualizer({
@@ -109,7 +125,7 @@ export function LivePane({
             />
             <span className="text-zinc-600 dark:text-zinc-300">{t("live.diarize")}</span>
           </label>
-          {stream.kind === "recording" ? (
+          {stream.kind === "recording" && (
             <span className="flex items-center gap-2 rounded-md bg-rose-600/10 px-3 py-1.5 text-sm font-medium text-rose-600 ring-1 ring-rose-500/30 dark:bg-rose-500/10 dark:text-rose-400 dark:ring-rose-500/20">
               <span className="relative flex h-2 w-2">
                 <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-rose-500 opacity-75" />
@@ -117,7 +133,14 @@ export function LivePane({
               </span>
               {t("live.recording")}
             </span>
-          ) : (
+          )}
+          {stream.kind === "paused" && (
+            <span className="flex items-center gap-2 rounded-md bg-amber-600/10 px-3 py-1.5 text-sm font-medium text-amber-600 ring-1 ring-amber-500/30 dark:bg-amber-500/10 dark:text-amber-400 dark:ring-amber-500/20">
+              <span className="inline-flex h-2 w-2 rounded-full bg-amber-500" />
+              {t("live.paused")}
+            </span>
+          )}
+          {stream.kind !== "recording" && stream.kind !== "paused" && (
             <button
               type="button"
               onClick={onStart}
@@ -129,6 +152,24 @@ export function LivePane({
               }`}
             >
               {stream.kind === "starting" ? t("live.starting") : t("live.start")}
+            </button>
+          )}
+          {canPause && (
+            <button
+              type="button"
+              onClick={onPause}
+              className="rounded-md bg-amber-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-amber-500"
+            >
+              {t("live.pause")}
+            </button>
+          )}
+          {canResume && (
+            <button
+              type="button"
+              onClick={onResume}
+              className="rounded-md bg-emerald-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-emerald-500"
+            >
+              {t("live.resume")}
             </button>
           )}
           <button
@@ -170,9 +211,7 @@ export function LivePane({
           <div className="flex flex-col items-center justify-center gap-3 py-8">
             <LogoAnimated size={48} className="opacity-40" />
             <p className="text-zinc-400">
-              {stream.kind === "recording"
-                ? t("live.listening")
-                : t("live.pressStart")}
+              {emptyHint(stream, t)}
             </p>
           </div>
         ) : (

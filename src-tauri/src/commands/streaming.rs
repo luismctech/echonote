@@ -255,3 +255,66 @@ pub async fn stop_streaming(
     let _ = entry.join.await;
     Ok(true)
 }
+
+/// Pause a running streaming session. Audio capture keeps running but
+/// frames are discarded. Returns `Ok(false)` when the session id is
+/// unknown or was already paused.
+#[tauri::command]
+#[specta::specta]
+pub async fn pause_streaming(
+    state: State<'_, AppState>,
+    session_id: StreamingSessionId,
+) -> Result<bool, IpcError> {
+    let handle_arc = {
+        let entry = state
+            .sessions
+            .lock()
+            .map_err(|e| {
+                IpcError::new(
+                    ErrorCode::SessionConflict,
+                    format!("session map poisoned: {e}"),
+                )
+            })?;
+        let Some(entry) = entry.get(&session_id) else {
+            return Ok(false);
+        };
+        Arc::clone(&entry.handle)
+    };
+    let guard = handle_arc.lock().await;
+    if guard.is_paused() {
+        return Ok(false);
+    }
+    guard.pause();
+    Ok(true)
+}
+
+/// Resume a paused streaming session. Returns `Ok(false)` when the
+/// session id is unknown or was not paused.
+#[tauri::command]
+#[specta::specta]
+pub async fn resume_streaming(
+    state: State<'_, AppState>,
+    session_id: StreamingSessionId,
+) -> Result<bool, IpcError> {
+    let handle_arc = {
+        let entry = state
+            .sessions
+            .lock()
+            .map_err(|e| {
+                IpcError::new(
+                    ErrorCode::SessionConflict,
+                    format!("session map poisoned: {e}"),
+                )
+            })?;
+        let Some(entry) = entry.get(&session_id) else {
+            return Ok(false);
+        };
+        Arc::clone(&entry.handle)
+    };
+    let guard = handle_arc.lock().await;
+    if !guard.is_paused() {
+        return Ok(false);
+    }
+    guard.resume();
+    Ok(true)
+}

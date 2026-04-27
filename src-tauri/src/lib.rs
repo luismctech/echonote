@@ -33,6 +33,8 @@ pub fn run() {
             commands::health_check,
             commands::streaming::start_streaming,
             commands::streaming::stop_streaming,
+            commands::streaming::pause_streaming,
+            commands::streaming::resume_streaming,
             commands::meetings::list_meetings,
             commands::meetings::get_meeting,
             commands::meetings::delete_meeting,

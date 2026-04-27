@@ -44,6 +44,11 @@ export type RecordingState =
       sessionId: StreamingSessionId;
       inputFormat?: AudioFormat;
     }
+  | {
+      kind: "paused";
+      sessionId: StreamingSessionId;
+      inputFormat?: AudioFormat;
+    }
   | { kind: "stopping"; sessionId: StreamingSessionId }
   | {
       kind: "persisted";
@@ -60,6 +65,10 @@ export type RecordingAction =
       inputFormat: AudioFormat;
     }
   | { type: "STOP_REQUESTED" }
+  | { type: "PAUSE_REQUESTED" }
+  | { type: "RESUME_REQUESTED" }
+  | { type: "STREAMING_PAUSED" }
+  | { type: "STREAMING_RESUMED" }
   | {
       type: "STREAMING_STOPPED";
       totalSegments: number;
@@ -104,11 +113,41 @@ export function recordingReducer(
       if (action.type === "STOP_REQUESTED") {
         return { kind: "stopping", sessionId: state.sessionId };
       }
+      if (action.type === "STREAMING_PAUSED") {
+        return {
+          kind: "paused",
+          sessionId: state.sessionId,
+          inputFormat: state.inputFormat,
+        };
+      }
       if (action.type === "STREAMING_FAILED") {
         return { kind: "error", message: action.message, recoverable: true };
       }
       if (action.type === "STREAMING_STOPPED") {
         // Backend self-terminated (e.g. duration cap reached) without a UI stop.
+        return {
+          kind: "persisted",
+          lastTotalSegments: action.totalSegments,
+          lastTotalAudioMs: action.totalAudioMs,
+        };
+      }
+      return state;
+
+    case "paused":
+      if (action.type === "STREAMING_RESUMED") {
+        return {
+          kind: "recording",
+          sessionId: state.sessionId,
+          inputFormat: state.inputFormat,
+        };
+      }
+      if (action.type === "STOP_REQUESTED") {
+        return { kind: "stopping", sessionId: state.sessionId };
+      }
+      if (action.type === "STREAMING_FAILED") {
+        return { kind: "error", message: action.message, recoverable: true };
+      }
+      if (action.type === "STREAMING_STOPPED") {
         return {
           kind: "persisted",
           lastTotalSegments: action.totalSegments,
@@ -161,6 +200,7 @@ export function canStart(state: RecordingState): boolean {
       return state.recoverable;
     case "starting":
     case "recording":
+    case "paused":
     case "stopping":
       return false;
   }
@@ -168,7 +208,17 @@ export function canStart(state: RecordingState): boolean {
 
 /** True when the user is allowed to press Stop right now. */
 export function canStop(state: RecordingState): boolean {
+  return state.kind === "recording" || state.kind === "paused";
+}
+
+/** True when the user is allowed to press Pause right now. */
+export function canPause(state: RecordingState): boolean {
   return state.kind === "recording";
+}
+
+/** True when the user is allowed to press Resume right now. */
+export function canResume(state: RecordingState): boolean {
+  return state.kind === "paused";
 }
 
 /** Short label for the status pill ("● recording", "○ idle", …). */
@@ -180,6 +230,8 @@ export function statusLabel(state: RecordingState): string {
       return "○ starting";
     case "recording":
       return "● recording";
+    case "paused":
+      return "‖ paused";
     case "stopping":
       return "○ stopping";
     case "persisted":

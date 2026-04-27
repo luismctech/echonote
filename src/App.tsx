@@ -157,6 +157,7 @@ export function App() {
           isRecording={
             recording.stream.kind === "starting" ||
             recording.stream.kind === "recording" ||
+            recording.stream.kind === "paused" ||
             recording.stream.kind === "stopping"
           }
         />
@@ -170,12 +171,16 @@ export function App() {
               listRef={recording.listRef}
               canStart={recording.canStart}
               canStop={recording.canStop}
+              canPause={recording.canPause}
+              canResume={recording.canResume}
               diarize={diarize}
               onToggleDiarize={setDiarize}
               language={language}
               onChangeLanguage={setLanguage}
               onStart={handleStart}
               onStop={stopRecording}
+              onPause={recording.pause}
+              onResume={recording.resume}
               onDismissError={dismissError}
             />
           ) : (

@@ -25,11 +25,13 @@
 import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 
 import { useToast } from "../components/Toaster";
-import { startStreaming, stopStreaming } from "../ipc/client";
+import { startStreaming, stopStreaming, pauseStreaming, resumeStreaming } from "../ipc/client";
 import { isIpcError } from "../types/ipc-error";
 import {
   canStart as selectCanStart,
   canStop as selectCanStop,
+  canPause as selectCanPause,
+  canResume as selectCanResume,
   initialRecordingState,
   recordingReducer,
 } from "../state/recording";
@@ -200,6 +202,12 @@ export function useRecordingSession({
         dispatch({ type: "STREAMING_FAILED", message: evt.message });
         onSessionFinishedRef.current();
         break;
+      case "paused":
+        dispatch({ type: "STREAMING_PAUSED" });
+        break;
+      case "resumed":
+        dispatch({ type: "STREAMING_RESUMED" });
+        break;
     }
   }, []);
 
@@ -231,11 +239,41 @@ export function useRecordingSession({
   );
 
   const stop = useCallback(async () => {
-    if (stream.kind !== "recording") return;
+    if (stream.kind !== "recording" && stream.kind !== "paused") return;
     const id = stream.sessionId;
     dispatch({ type: "STOP_REQUESTED" });
     try {
       await stopStreaming(id);
+    } catch (err) {
+      let msg: string;
+      if (isIpcError(err)) msg = err.message;
+      else if (err instanceof Error) msg = err.message;
+      else msg = String(err);
+      dispatch({ type: "BACKEND_ERROR", message: msg });
+    }
+  }, [stream]);
+
+  const pause = useCallback(async () => {
+    if (stream.kind !== "recording") return;
+    const id = stream.sessionId;
+    dispatch({ type: "PAUSE_REQUESTED" });
+    try {
+      await pauseStreaming(id);
+    } catch (err) {
+      let msg: string;
+      if (isIpcError(err)) msg = err.message;
+      else if (err instanceof Error) msg = err.message;
+      else msg = String(err);
+      dispatch({ type: "BACKEND_ERROR", message: msg });
+    }
+  }, [stream]);
+
+  const resume = useCallback(async () => {
+    if (stream.kind !== "paused") return;
+    const id = stream.sessionId;
+    dispatch({ type: "RESUME_REQUESTED" });
+    try {
+      await resumeStreaming(id);
     } catch (err) {
       let msg: string;
       if (isIpcError(err)) msg = err.message;
@@ -267,6 +305,8 @@ export function useRecordingSession({
 
   const canStart = backendReady && selectCanStart(stream);
   const canStop = selectCanStop(stream);
+  const canPause = selectCanPause(stream);
+  const canResume = selectCanResume(stream);
 
   return {
     stream,
@@ -275,8 +315,12 @@ export function useRecordingSession({
     listRef,
     canStart,
     canStop,
+    canPause,
+    canResume,
     start,
     stop,
+    pause,
+    resume,
     dismissError,
     reset,
   };

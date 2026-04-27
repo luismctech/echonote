@@ -229,6 +229,9 @@ impl MeetingRecorder {
                     Ok(None)
                 }
             }
+            // Paused / Resumed are informational UI events — the
+            // recorder doesn't persist anything for them.
+            TranscriptEvent::Paused { .. } | TranscriptEvent::Resumed { .. } => Ok(None),
         }
     }
 
