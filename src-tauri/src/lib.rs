@@ -47,6 +47,15 @@ pub fn run() {
             commands::models::unload_model,
             commands::models::cancel_download,
             commands::models::delete_model,
+            commands::models::set_active_llm,
+            commands::models::get_active_llm,
+            commands::models::set_active_asr,
+            commands::models::get_active_asr,
+            commands::templates::list_custom_templates,
+            commands::templates::create_custom_template,
+            commands::templates::update_custom_template,
+            commands::templates::delete_custom_template,
+            commands::llm::summarize_with_custom_template,
         ]);
 
     // In dev builds, export TypeScript bindings so the frontend can

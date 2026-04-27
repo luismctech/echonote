@@ -32,6 +32,7 @@ pub use ports::resampler::Resampler;
 pub use ports::transcriber::{TranscribeOptions, Transcriber, Transcript};
 pub use ports::vad::{Vad, VoiceState};
 
+pub use entities::custom_template::{CustomTemplate, CustomTemplateId};
 pub use entities::meeting::{Meeting, MeetingId, MeetingSearchHit, MeetingSummary};
 pub use entities::segment::{Segment, SegmentId};
 pub use entities::speaker::{Speaker, SpeakerId};

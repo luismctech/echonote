@@ -109,6 +109,13 @@ export type FreeTextSummary = {
   text: string;
 };
 
+/** User-defined custom template output. */
+export type CustomSummary = {
+  template: "custom";
+  templateName: string;
+  text: string;
+};
+
 /** Discriminated union of every supported summary template. */
 export type SummaryContent =
   | GeneralSummary
@@ -117,7 +124,8 @@ export type SummaryContent =
   | InterviewSummary
   | SalesCallSummary
   | LectureSummary
-  | FreeTextSummary;
+  | FreeTextSummary
+  | CustomSummary;
 
 /** User-facing template identifiers (excludes freeText). */
 export const TEMPLATE_IDS = [

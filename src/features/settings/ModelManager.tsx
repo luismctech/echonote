@@ -24,10 +24,19 @@ export function ModelManager({
   state: UseModelManager;
   onClose: () => void;
 }>) {
-  const { models, loading, downloading, error } = state;
+  const { models, loading, downloading, error, activeLlm, activeAsr } = state;
   const { t } = useTranslation();
 
   const grouped = groupByKind(models);
+
+  const activeIds: Record<string, string | null> = {
+    llm: activeLlm,
+    asr: activeAsr,
+  };
+  const selectHandlers: Record<string, (id: string) => void> = {
+    llm: state.selectLlm,
+    asr: state.selectAsr,
+  };
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
@@ -59,9 +68,11 @@ export function ModelManager({
                 kind={kind}
                 models={items}
                 downloading={downloading}
+                activeId={activeIds[kind] ?? null}
                 onDownload={state.download}
                 onCancel={state.cancelDl}
                 onDelete={state.remove}
+                {...(selectHandlers[kind] ? { onSelect: selectHandlers[kind] } : {})}
               />
             ))}
           </div>
@@ -99,18 +110,23 @@ function ModelGroup({
   kind,
   models,
   downloading,
+  activeId,
   onDownload,
   onCancel,
   onDelete,
+  onSelect,
 }: Readonly<{
   kind: string;
   models: ModelInfo[];
   downloading: DownloadProgress | null;
+  activeId: string | null;
   onDownload: (id: string) => void;
   onCancel: (id: string) => void;
   onDelete: (id: string) => void;
+  onSelect?: (id: string) => void;
 }>) {
   const { t } = useTranslation();
+  const selectable = kind === "llm" || kind === "asr";
   return (
     <div className="flex flex-col gap-2">
       <h3 className="text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
@@ -121,9 +137,12 @@ function ModelGroup({
           key={m.id}
           model={m}
           downloading={downloading}
+          isActive={selectable && m.id === activeId}
+          showUse={selectable}
           onDownload={onDownload}
           onCancel={onCancel}
           onDelete={onDelete}
+          {...(onSelect ? { onSelect } : {})}
         />
       ))}
     </div>
@@ -133,15 +152,21 @@ function ModelGroup({
 function ModelRow({
   model,
   downloading,
+  isActive,
+  showUse,
   onDownload,
   onCancel,
   onDelete,
+  onSelect,
 }: Readonly<{
   model: ModelInfo;
   downloading: DownloadProgress | null;
+  isActive: boolean;
+  showUse: boolean;
   onDownload: (id: string) => void;
   onCancel: (id: string) => void;
   onDelete: (id: string) => void;
+  onSelect?: (id: string) => void;
 }>) {
   const { t } = useTranslation();
   const isDownloading = downloading?.modelId === model.id;
@@ -152,8 +177,12 @@ function ModelRow({
       : 0;
 
   return (
-    <div className="flex items-center gap-3 rounded-lg border border-zinc-100 bg-zinc-50/50 px-3 py-2.5 dark:border-zinc-800/60 dark:bg-zinc-900/30">
-      <StatusDot present={model.present} />
+    <div className={`flex items-center gap-3 rounded-lg border px-3 py-2.5 ${
+      isActive
+        ? "border-blue-200 bg-blue-50/50 dark:border-blue-800/60 dark:bg-blue-950/20"
+        : "border-zinc-100 bg-zinc-50/50 dark:border-zinc-800/60 dark:bg-zinc-900/30"
+    }`}>
+      <StatusDot present={model.present} active={isActive} />
 
       <div className="flex min-w-0 flex-1 flex-col gap-0.5">
         <span className="truncate text-sm font-medium text-zinc-800 dark:text-zinc-200">
@@ -188,6 +217,20 @@ function ModelRow({
       )}
       {!isDownloading && model.present && (
         <div className="flex shrink-0 items-center gap-1.5">
+          {showUse && !isActive && onSelect && (
+            <button
+              type="button"
+              onClick={() => onSelect(model.id)}
+              className="rounded-md border border-blue-200 bg-blue-50 px-2.5 py-1 text-[10px] font-medium text-blue-700 hover:bg-blue-100 dark:border-blue-800 dark:bg-blue-950/40 dark:text-blue-300 dark:hover:bg-blue-900/60"
+            >
+              {t("models.use")}
+            </button>
+          )}
+          {isActive && (
+            <span className="rounded-md bg-blue-100 px-2 py-1 text-[10px] font-medium text-blue-700 dark:bg-blue-950/40 dark:text-blue-300">
+              {t("models.active")}
+            </span>
+          )}
           <span className="rounded-md bg-emerald-50 px-2 py-1 text-[10px] font-medium text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300">
             {t("models.installed")}
           </span>
@@ -217,14 +260,9 @@ function ModelRow({
   );
 }
 
-function StatusDot({ present }: Readonly<{ present: boolean }>) {
-  return (
-    <span
-      className={`h-2 w-2 shrink-0 rounded-full ${
-        present
-          ? "bg-emerald-500"
-          : "bg-zinc-300 dark:bg-zinc-600"
-      }`}
-    />
-  );
+function StatusDot({ present, active }: Readonly<{ present: boolean; active: boolean }>) {
+  let color = "bg-zinc-300 dark:bg-zinc-600";
+  if (active) color = "bg-blue-500";
+  else if (present) color = "bg-emerald-500";
+  return <span className={`h-2 w-2 shrink-0 rounded-full ${color}`} />;
 }

@@ -9,16 +9,22 @@
  *   3. **Loaded**    a `Summary` exists; render the structured
  *                    sections, plus a "Regenerate" affordance.
  *
- * A template selector lets the user pick any of the six templates
- * before generating. The selector syncs with the loaded summary's
- * template on mount so "Regenerate" targets the right one.
+ * A template selector lets the user pick any of the six built-in
+ * templates or a user-defined custom template before generating. The
+ * selector syncs with the loaded summary's template on mount so
+ * "Regenerate" targets the right one.
  */
 
+import { useEffect, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { LogoAnimated } from "../../components/Logo";
 import { formatDate } from "../../lib/format";
 import type { Summary, TemplateId } from "../../types/summary";
 import { TEMPLATE_IDS, TEMPLATE_LABELS } from "../../types/summary";
-import type { UseMeetingSummary } from "../../hooks/useMeetingSummary";
+import type { UseMeetingSummary, SelectedTemplate } from "../../hooks/useMeetingSummary";
+import type { CustomTemplate } from "../../types/custom-template";
+import { listCustomTemplates } from "../../ipc/client";
+import { TemplateManager } from "../settings/TemplateManager";
 
 export function SummaryPanel({
   state,
@@ -26,6 +32,18 @@ export function SummaryPanel({
   state: UseMeetingSummary;
 }>) {
   const { summary, loading, generating, error, selectedTemplate, setSelectedTemplate } = state;
+  const { t } = useTranslation();
+  const [customTemplates, setCustomTemplates] = useState<CustomTemplate[]>([]);
+  const [showTemplateManager, setShowTemplateManager] = useState(false);
+
+  const refreshCustomTemplates = () => {
+    listCustomTemplates().then(setCustomTemplates).catch(() => {});
+  };
+
+  useEffect(() => {
+    refreshCustomTemplates();
+  }, []);
+
   return (
     <section
       aria-label="Summary"
@@ -38,7 +56,18 @@ export function SummaryPanel({
             value={selectedTemplate}
             onChange={setSelectedTemplate}
             disabled={loading || generating}
+            customTemplates={customTemplates}
           />
+          <button
+            type="button"
+            onClick={() => setShowTemplateManager(true)}
+            className="rounded-md p-1 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-700 dark:hover:bg-zinc-800 dark:hover:text-zinc-200"
+            title={t("templates.manage")}
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" className="h-3.5 w-3.5">
+              <path fillRule="evenodd" d="M6.455 1.45A.5.5 0 0 1 6.952 1h2.096a.5.5 0 0 1 .497.45l.186 1.858a4.996 4.996 0 0 1 1.466.848l1.703-.769a.5.5 0 0 1 .63.207l1.048 1.814a.5.5 0 0 1-.133.656l-1.517 1.09a5.026 5.026 0 0 1 0 1.694l1.517 1.09a.5.5 0 0 1 .133.656l-1.048 1.814a.5.5 0 0 1-.63.207l-1.703-.769a4.996 4.996 0 0 1-1.466.848l-.186 1.858a.5.5 0 0 1-.497.45H6.952a.5.5 0 0 1-.497-.45l-.186-1.858a4.993 4.993 0 0 1-1.466-.848l-1.703.769a.5.5 0 0 1-.63-.207L1.422 12.4a.5.5 0 0 1 .133-.656l1.517-1.09a5.026 5.026 0 0 1 0-1.694l-1.517-1.09a.5.5 0 0 1-.133-.656l1.048-1.814a.5.5 0 0 1 .63-.207l1.703.769a4.993 4.993 0 0 1 1.466-.848l.186-1.858ZM8 10.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5Z" clipRule="evenodd" />
+            </svg>
+          </button>
           <SummaryActions
             summary={summary}
             generating={generating}
@@ -49,6 +78,13 @@ export function SummaryPanel({
           />
         </div>
       </header>
+
+      {showTemplateManager && (
+        <TemplateManager
+          onClose={() => setShowTemplateManager(false)}
+          onChanged={refreshCustomTemplates}
+        />
+      )}
 
       {error && (
         <p className="text-xs text-amber-700 dark:text-amber-400">{error}</p>
@@ -78,15 +114,32 @@ function TemplateSelector({
   value,
   onChange,
   disabled,
+  customTemplates,
 }: Readonly<{
-  value: TemplateId;
-  onChange: (t: TemplateId) => void;
+  value: SelectedTemplate;
+  onChange: (t: SelectedTemplate) => void;
   disabled: boolean;
+  customTemplates: CustomTemplate[];
 }>) {
+  const selectValue =
+    value.kind === "builtin" ? value.id : `custom:${value.id}`;
+
+  const handleChange = (raw: string) => {
+    if (raw.startsWith("custom:")) {
+      const cid = raw.slice("custom:".length);
+      const ct = customTemplates.find((t) => t.id === cid);
+      if (ct) {
+        onChange({ kind: "custom", id: ct.id, name: ct.name });
+      }
+    } else {
+      onChange({ kind: "builtin", id: raw as TemplateId });
+    }
+  };
+
   return (
     <select
-      value={value}
-      onChange={(e) => onChange(e.target.value as TemplateId)}
+      value={selectValue}
+      onChange={(e) => handleChange(e.target.value)}
       disabled={disabled}
       className="rounded-md border border-zinc-200 bg-white px-1.5 py-1 text-xs disabled:opacity-60 dark:border-zinc-800 dark:bg-zinc-900"
     >
@@ -95,6 +148,15 @@ function TemplateSelector({
           {TEMPLATE_LABELS[id]}
         </option>
       ))}
+      {customTemplates.length > 0 && (
+        <optgroup label="Custom">
+          {customTemplates.map((ct) => (
+            <option key={ct.id} value={`custom:${ct.id}`}>
+              {ct.name}
+            </option>
+          ))}
+        </optgroup>
+      )}
     </select>
   );
 }
@@ -229,6 +291,18 @@ function renderTemplateBody(summary: Summary) {
       return (
         <div className="whitespace-pre-wrap text-zinc-800 dark:text-zinc-200">
           {summary.text || "[empty summary]"}
+        </div>
+      );
+
+    case "custom":
+      return (
+        <div className="flex flex-col gap-2">
+          <p className="text-xs font-medium text-zinc-500 dark:text-zinc-400">
+            {summary.templateName}
+          </p>
+          <div className="whitespace-pre-wrap text-zinc-800 dark:text-zinc-200">
+            {summary.text || "[empty summary]"}
+          </div>
         </div>
       );
 

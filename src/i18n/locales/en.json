@@ -124,7 +124,25 @@
     "downloading": "Downloading…",
     "download": "Download ({{size}})",
     "cancel": "Cancel",
-    "delete": "Delete model"
+    "delete": "Delete model",
+    "use": "Use",
+    "active": "Active"
+  },
+  "templates": {
+    "title": "Custom Templates",
+    "close": "Close",
+    "loading": "Loading templates…",
+    "empty": "No custom templates yet. Create one to use your own prompts.",
+    "new": "+ New template",
+    "edit": "Edit template",
+    "delete": "Delete template",
+    "cancel": "Cancel",
+    "save": "Save",
+    "create": "Create",
+    "saving": "Saving…",
+    "namePlaceholder": "Template name…",
+    "promptPlaceholder": "Write your summary prompt here… The meeting transcript will be appended automatically.",
+    "manage": "Manage templates"
   },
   "errors": {
     "renderCrash": "fatal — render error",

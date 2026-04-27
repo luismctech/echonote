@@ -30,6 +30,7 @@ import type {
   TranscriptEvent,
 } from "../types/streaming";
 import type { Summary } from "../types/summary";
+import type { CustomTemplate, CustomTemplateId } from "../types/custom-template";
 
 // ---------------------------------------------------------------------------
 // Health
@@ -222,6 +223,70 @@ export async function cancelDownload(modelId: string): Promise<boolean> {
 /** Delete a downloaded model from disk. */
 export async function deleteModel(modelId: string): Promise<void> {
   return invoke<void>("delete_model", { modelId });
+}
+
+/** Set the active LLM model. Unloads the current model first. */
+export async function setActiveLlm(modelId: string): Promise<void> {
+  return invoke<void>("set_active_llm", { modelId });
+}
+
+/** Get the currently active LLM model id, or null. */
+export async function getActiveLlm(): Promise<string | null> {
+  return invoke<string | null>("get_active_llm");
+}
+
+/** Set the active ASR (speech recognition) model. Unloads the current transcriber first. */
+export async function setActiveAsr(modelId: string): Promise<void> {
+  return invoke<void>("set_active_asr", { modelId });
+}
+
+/** Get the currently active ASR model id, or null. */
+export async function getActiveAsr(): Promise<string | null> {
+  return invoke<string | null>("get_active_asr");
+}
+
+// ---------------------------------------------------------------------------
+// Custom templates (user-defined summary prompts)
+// ---------------------------------------------------------------------------
+
+/** List all user-defined custom templates. */
+export async function listCustomTemplates(): Promise<CustomTemplate[]> {
+  return invoke<CustomTemplate[]>("list_custom_templates");
+}
+
+/** Create a new custom template. */
+export async function createCustomTemplate(
+  name: string,
+  prompt: string,
+): Promise<CustomTemplate> {
+  return invoke<CustomTemplate>("create_custom_template", { name, prompt });
+}
+
+/** Update an existing custom template. */
+export async function updateCustomTemplate(
+  id: CustomTemplateId,
+  name: string,
+  prompt: string,
+): Promise<CustomTemplate> {
+  return invoke<CustomTemplate>("update_custom_template", { id, name, prompt });
+}
+
+/** Delete a custom template by id. */
+export async function deleteCustomTemplate(
+  id: CustomTemplateId,
+): Promise<void> {
+  return invoke<void>("delete_custom_template", { id });
+}
+
+/** Generate a summary using a custom template. */
+export async function summarizeWithCustomTemplate(
+  meetingId: MeetingId,
+  templateId: CustomTemplateId,
+): Promise<Summary> {
+  return invoke<Summary>("summarize_with_custom_template", {
+    meetingId,
+    templateId,
+  });
 }
 
 // ---------------------------------------------------------------------------
