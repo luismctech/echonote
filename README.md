@@ -1,8 +1,13 @@
-# EchoNote
+<p align="center">
+  <img src="src-tauri/icons/128x128.png" width="80" alt="EchoNote logo" />
+</p>
+<h1 align="center">EchoNote</h1>
 
-[![CI](https://github.com/luismctech/echonote/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/luismctech/echonote/actions/workflows/ci.yml)
-[![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](./LICENSE)
-[![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey)]()
+<p align="center">
+  <a href="https://github.com/luismctech/echonote/actions/workflows/ci.yml"><img src="https://github.com/luismctech/echonote/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI" /></a>
+  <a href="./LICENSE"><img src="https://img.shields.io/badge/License-AGPL--3.0-blue.svg" alt="License: AGPL-3.0" /></a>
+  <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey" alt="Platform" />
+</p>
 
 **EchoNote** is a free, open-source desktop app that transcribes and summarizes your meetings using AI — entirely on your device. No cloud services, no bots joining your calls, no subscriptions.
 
@@ -51,8 +56,7 @@ Get the latest release for your platform from [**GitHub Releases**](https://gith
 
 ### First launch notes
 
-<details>
-<summary><strong>macOS — "app is damaged" warning</strong></summary>
+#### macOS — "app is damaged" warning
 
 The app is not yet code-signed with Apple. Run this once in Terminal:
 
@@ -61,22 +65,17 @@ xattr -cr /Applications/EchoNote.app
 ```
 
 Then open the app normally. This is safe — the full source code is available in this repository.
-</details>
 
-<details>
-<summary><strong>Windows — SmartScreen warning</strong></summary>
+#### Windows — SmartScreen warning
 
 Windows SmartScreen may warn about an unrecognized app. Click **"More info"** → **"Run anyway"**. This is normal for new open-source apps without a code signing certificate.
-</details>
 
-<details>
-<summary><strong>Linux — AppImage permissions</strong></summary>
+#### Linux — AppImage permissions
 
 ```sh
 chmod +x EchoNote_*.AppImage
 ./EchoNote_*.AppImage
 ```
-</details>
 
 ---
 
@@ -96,7 +95,7 @@ All processing happens locally using these open-source AI models:
 | [Silero VAD](https://github.com/snakers4/silero-vad) | Detects when someone is speaking | ~1.2 MB |
 | [ERes2Net](https://github.com/modelscope/3D-Speaker) | Identifies different speakers | ~15 MB |
 
-Models are downloaded automatically on first use.
+Models are **not** downloaded automatically — you choose which ones to install from the built-in model manager in **Settings → Models**.
 
 ---
 
