@@ -1,6 +1,7 @@
 //! Streaming transcription commands (`start_streaming`, `stop_streaming`).
 
 use std::path::PathBuf;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use serde::Deserialize;
@@ -143,6 +144,7 @@ pub async fn start_streaming(
         .await
         .map_err(|e| IpcError::new(ErrorCode::Audio, format!("failed to start streaming: {e}")))?;
     let session_id = handle.session_id();
+    let paused_flag = handle.paused_flag();
 
     let handle_arc = Arc::new(AsyncMutex::new(handle));
     let drain_handle = handle_arc.clone();
@@ -210,6 +212,7 @@ pub async fn start_streaming(
         SessionEntry {
             join,
             handle: handle_arc,
+            paused: paused_flag,
             _keep_awake: keepawake::Builder::default()
                 .idle(true)
                 .reason("Recording audio session")
@@ -246,6 +249,10 @@ pub async fn stop_streaming(
     let Some(entry) = entry else {
         return Ok(false);
     };
+    // If paused the drain loop is blocked on `next_event` while
+    // holding the handle lock — unpause first so the loop spins,
+    // releases the lock, and sees the stop signal.
+    entry.paused.store(false, Ordering::Release);
     {
         let mut guard = entry.handle.lock().await;
         guard.stop().await.map_err(|e| {
@@ -265,27 +272,24 @@ pub async fn pause_streaming(
     state: State<'_, AppState>,
     session_id: StreamingSessionId,
 ) -> Result<bool, IpcError> {
-    let handle_arc = {
-        let entry = state
-            .sessions
-            .lock()
-            .map_err(|e| {
-                IpcError::new(
-                    ErrorCode::SessionConflict,
-                    format!("session map poisoned: {e}"),
-                )
-            })?;
-        let Some(entry) = entry.get(&session_id) else {
+    let flag = {
+        let map = state.sessions.lock().map_err(|e| {
+            IpcError::new(
+                ErrorCode::SessionConflict,
+                format!("session map poisoned: {e}"),
+            )
+        })?;
+        let Some(entry) = map.get(&session_id) else {
             return Ok(false);
         };
-        Arc::clone(&entry.handle)
+        Arc::clone(&entry.paused)
     };
-    let guard = handle_arc.lock().await;
-    if guard.is_paused() {
-        return Ok(false);
-    }
-    guard.pause();
-    Ok(true)
+    // compare_exchange avoids a redundant Paused event when the
+    // pipeline was already paused.
+    let swapped = flag
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok();
+    Ok(swapped)
 }
 
 /// Resume a paused streaming session. Returns `Ok(false)` when the
@@ -296,25 +300,20 @@ pub async fn resume_streaming(
     state: State<'_, AppState>,
     session_id: StreamingSessionId,
 ) -> Result<bool, IpcError> {
-    let handle_arc = {
-        let entry = state
-            .sessions
-            .lock()
-            .map_err(|e| {
-                IpcError::new(
-                    ErrorCode::SessionConflict,
-                    format!("session map poisoned: {e}"),
-                )
-            })?;
-        let Some(entry) = entry.get(&session_id) else {
+    let flag = {
+        let map = state.sessions.lock().map_err(|e| {
+            IpcError::new(
+                ErrorCode::SessionConflict,
+                format!("session map poisoned: {e}"),
+            )
+        })?;
+        let Some(entry) = map.get(&session_id) else {
             return Ok(false);
         };
-        Arc::clone(&entry.handle)
+        Arc::clone(&entry.paused)
     };
-    let guard = handle_arc.lock().await;
-    if !guard.is_paused() {
-        return Ok(false);
-    }
-    guard.resume();
-    Ok(true)
+    let swapped = flag
+        .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok();
+    Ok(swapped)
 }

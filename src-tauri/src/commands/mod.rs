@@ -172,6 +172,10 @@ use echo_domain::StreamingSessionId;
 pub(crate) struct SessionEntry {
     pub join: JoinHandle<()>,
     pub handle: Arc<AsyncMutex<StreamingHandle>>,
+    /// Shared pause flag extracted before wrapping the handle in a
+    /// mutex.  `pause_streaming` / `resume_streaming` use this
+    /// directly so they never contend with the drain loop's lock.
+    pub paused: Arc<std::sync::atomic::AtomicBool>,
     /// RAII guard — prevents the OS from sleeping while recording.
     /// Dropped automatically when the session entry is removed.
     pub _keep_awake: Option<keepawake::KeepAwake>,

@@ -23,8 +23,8 @@
 
 mod sample_pool;
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tokio::sync::{mpsc, oneshot};
@@ -229,6 +229,16 @@ impl StreamingHandle {
     #[must_use]
     pub fn is_paused(&self) -> bool {
         self.paused.load(Ordering::Acquire)
+    }
+
+    /// Shared reference to the pause flag.
+    ///
+    /// Callers that only need to flip or check the flag can clone this
+    /// `Arc` and avoid locking the full handle — which matters when
+    /// the drain loop holds the lock waiting for the next event.
+    #[must_use]
+    pub fn paused_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.paused)
     }
 
     /// Signal the background task to stop and wait for it to drain.
