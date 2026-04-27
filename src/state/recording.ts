@@ -117,7 +117,7 @@ export function recordingReducer(
         return {
           kind: "paused",
           sessionId: state.sessionId,
-          inputFormat: state.inputFormat,
+          ...(state.inputFormat != null ? { inputFormat: state.inputFormat } : {}),
         };
       }
       if (action.type === "STREAMING_FAILED") {
@@ -138,7 +138,7 @@ export function recordingReducer(
         return {
           kind: "recording",
           sessionId: state.sessionId,
-          inputFormat: state.inputFormat,
+          ...(state.inputFormat != null ? { inputFormat: state.inputFormat } : {}),
         };
       }
       if (action.type === "STOP_REQUESTED") {

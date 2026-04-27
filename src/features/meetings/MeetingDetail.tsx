@@ -1,6 +1,7 @@
-import { useMemo, useRef } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useVirtualizer } from "@tanstack/react-virtual";
+import { ResizableHandle } from "../../components/ResizableHandle";
 
 import { useMeetingSummary } from "../../hooks/useMeetingSummary";
 import { LogoAnimated } from "../../components/Logo";
@@ -28,6 +29,17 @@ export function MeetingDetail({
   const summaryState = useMeetingSummary(meetingId);
   const { t } = useTranslation();
   const scrollRef = useRef<HTMLDivElement>(null);
+  const splitRef = useRef<HTMLDivElement>(null);
+
+  /** Fraction of the split container given to the summary (top panel). */
+  const MIN_RATIO = 1 / 3;
+  const MAX_RATIO = 2 / 3;
+  const [summaryRatio, setSummaryRatio] = useState(0.5);
+  const clampedRatio = Math.min(MAX_RATIO, Math.max(MIN_RATIO, summaryRatio));
+  const handleRatioChange = useCallback(
+    (r: number) => setSummaryRatio(Math.min(MAX_RATIO, Math.max(MIN_RATIO, r))),
+    [],
+  );
 
   const m = view.meeting;
   const speakerIndex = useMemo(
@@ -76,12 +88,29 @@ export function MeetingDetail({
           <SpeakersPanel speakers={m.speakers} onRename={onRenameSpeaker} />
         )}
 
-        <SummaryPanel state={summaryState} />
+        {/* Resizable split: Summary (top) + Transcript (bottom) */}
+        <div ref={splitRef} className="flex min-h-0 flex-1 flex-col">
+          {/* ── Summary (fixed ratio only when content exists) ── */}
+          <div
+            className="overflow-y-auto"
+            style={summaryState.summary ? { flex: `0 0 ${(clampedRatio * 100).toFixed(1)}%` } : undefined}
+          >
+            <SummaryPanel state={summaryState} />
+          </div>
 
-        <div
-          ref={scrollRef}
-          className="min-h-0 flex-1 overflow-y-auto rounded-md border border-zinc-100 bg-zinc-50 p-3 text-sm leading-relaxed dark:border-zinc-900 dark:bg-zinc-900"
-        >
+          {summaryState.summary && (
+            <ResizableHandle
+              containerRef={splitRef}
+              ratio={clampedRatio}
+              onRatioChange={handleRatioChange}
+            />
+          )}
+
+          {/* ── Transcript (fills remaining space) ── */}
+          <div
+            ref={scrollRef}
+            className="min-h-0 flex-1 overflow-y-auto rounded-md border border-zinc-100 bg-zinc-50 p-3 text-sm leading-relaxed dark:border-zinc-900 dark:bg-zinc-900"
+          >
           {m.segments.length === 0 ? (
             <p className="text-zinc-400">{t("meeting.noSegments")}</p>
           ) : (
@@ -114,6 +143,8 @@ export function MeetingDetail({
               })}
             </ol>
           )}
+        </div>
+        {/* ── end split ── */}
         </div>
       </div>
     </>
