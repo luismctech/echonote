@@ -1,4 +1,5 @@
 import type { Config } from "tailwindcss";
+import typography from "@tailwindcss/typography";
 
 // Minimal Tailwind config for Sprint 0. The full design system (tokens,
 // typography scale, color palette) lands in Sprint 1 alongside the
@@ -8,5 +9,5 @@ export default {
   theme: {
     extend: {},
   },
-  plugins: [],
+  plugins: [typography],
 } satisfies Config;

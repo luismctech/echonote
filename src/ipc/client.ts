@@ -75,6 +75,27 @@ export async function stopStreaming(
   return invoke<boolean>("stop_streaming", { sessionId });
 }
 
+/**
+ * Pause a running streaming session. Audio capture keeps running but
+ * frames are discarded. Returns `true` when actually paused, `false`
+ * when unknown or already paused.
+ */
+export async function pauseStreaming(
+  sessionId: StreamingSessionId,
+): Promise<boolean> {
+  return invoke<boolean>("pause_streaming", { sessionId });
+}
+
+/**
+ * Resume a paused streaming session. Returns `true` when actually
+ * resumed, `false` when unknown or not paused.
+ */
+export async function resumeStreaming(
+  sessionId: StreamingSessionId,
+): Promise<boolean> {
+  return invoke<boolean>("resume_streaming", { sessionId });
+}
+
 // ---------------------------------------------------------------------------
 // Meetings
 // ---------------------------------------------------------------------------
@@ -96,6 +117,17 @@ export async function getMeeting(id: MeetingId): Promise<Meeting | null> {
 /** Delete a meeting and its segments. Resolves to `true` when deleted. */
 export async function deleteMeeting(id: MeetingId): Promise<boolean> {
   return invoke<boolean>("delete_meeting", { id });
+}
+
+/**
+ * Rename a meeting's title. Returns the updated summary so the
+ * sidebar stays in sync without an extra list round-trip.
+ */
+export async function renameMeeting(
+  id: MeetingId,
+  title: string,
+): Promise<MeetingSummary> {
+  return invoke<MeetingSummary>("rename_meeting", { id, title });
 }
 
 /**

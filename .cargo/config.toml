@@ -25,3 +25,16 @@ rustflags = [
 rustflags = [
     "-C", "link-arg=-Wl,-rpath,/usr/lib/swift",
 ]
+
+# ── Build performance ──────────────────────────────────────────────
+# sccache caches both Rust and C/C++ compilation. After `cargo clean`,
+# unchanged crates rebuild from cache in seconds, not minutes.
+# Install: `brew install sccache`
+[build]
+rustc-wrapper = "sccache"
+
+[env]
+# Tell the `cc` crate (used by whisper-rs-sys, llama-cpp-sys,
+# screencapturekit, coreaudio-sys) to compile C/C++ through sccache.
+CC_WRAPPER = "sccache"
+CXX_WRAPPER = "sccache"

@@ -17,7 +17,13 @@ import { MeetingsList } from "./MeetingsList";
 import { MeetingsSearchBox } from "./MeetingsSearchBox";
 import { SearchResults } from "./SearchResults";
 
-export function Sidebar({ onGoLive }: { onGoLive: () => void }) {
+export function Sidebar({
+  onGoLive,
+  isRecording = false,
+}: Readonly<{
+  onGoLive: () => void;
+  isRecording?: boolean;
+}>) {
   const { t } = useTranslation();
   const {
     meetings,
@@ -43,9 +49,19 @@ export function Sidebar({ onGoLive }: { onGoLive: () => void }) {
         <button
           type="button"
           onClick={onGoLive}
-          className="rounded-md border border-zinc-200 px-2 py-0.5 text-xs text-zinc-600 hover:bg-zinc-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+          className={`flex items-center gap-1.5 rounded-md border px-2 py-0.5 text-xs ${
+            isRecording
+              ? "border-rose-300 bg-rose-50 text-rose-700 dark:border-rose-800 dark:bg-rose-950/40 dark:text-rose-300"
+              : "border-zinc-200 text-zinc-600 hover:bg-zinc-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+          }`}
         >
-          {t("sidebar.live")}
+          {isRecording && (
+            <span className="relative flex h-2 w-2">
+              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-rose-400 opacity-75" />
+              <span className="relative inline-flex h-2 w-2 rounded-full bg-rose-500" />
+            </span>
+          )}
+          {isRecording ? t("sidebar.recording") : t("sidebar.live")}
         </button>
       </header>
 

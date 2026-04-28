@@ -1,7 +1,7 @@
 {
   "name": "echonote",
   "private": true,
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Private, local-first meeting transcription and AI summaries.",
   "type": "module",
   "packageManager": "pnpm@10.13.1",
@@ -26,9 +26,11 @@
     "i18next": "^26.0.7",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "react-i18next": "^17.0.4"
+    "react-i18next": "^17.0.4",
+    "react-markdown": "^10.1.0"
   },
   "devDependencies": {
+    "@tailwindcss/typography": "^0.5.19",
     "@tauri-apps/cli": "^2.1.0",
     "@types/node": "^25.6.0",
     "@types/react": "^18.3.12",

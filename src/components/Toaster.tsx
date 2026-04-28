@@ -22,6 +22,7 @@ import {
   useRef,
   type ReactNode,
 } from "react";
+import { useTranslation } from "react-i18next";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -35,6 +36,8 @@ export type Toast = {
   message: string;
   /** Optional secondary line — usually a stack/error detail. */
   detail?: string | undefined;
+  /** Optional action button rendered inline. */
+  action?: { label: string; onClick: () => void } | undefined;
   /** Auto-dismiss after this many ms. `0` keeps it sticky. Defaults: error=0, others=4000. */
   durationMs: number;
   createdAt: number;
@@ -132,6 +135,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
       kind: input.kind,
       message: input.message,
       detail: input.detail,
+      action: input.action,
       durationMs:
         input.durationMs ?? (input.kind === "error" ? 0 : 4_000),
       createdAt: Date.now(),
@@ -181,6 +185,7 @@ function Toaster() {
 }
 
 function ToastCard({ toast }: { toast: Toast }) {
+  const { t } = useTranslation();
   // Pull `dismiss` from context instead of receiving it as a prop. That way
   // the auto-dismiss `useEffect` below depends only on values that are
   // intrinsic to this toast (id, durationMs) plus the stable `dismiss`
@@ -202,9 +207,9 @@ function ToastCard({ toast }: { toast: Toast }) {
     try {
       await navigator.clipboard.writeText(payload);
       if (copyRef.current) {
-        copyRef.current.textContent = "copied";
+        copyRef.current.textContent = t("toast.copied");
         setTimeout(() => {
-          if (copyRef.current) copyRef.current.textContent = "copy";
+          if (copyRef.current) copyRef.current.textContent = t("toast.copy");
         }, 1_500);
       }
     } catch {
@@ -236,7 +241,21 @@ function ToastCard({ toast }: { toast: Toast }) {
                 onClick={onCopy}
                 className="rounded border border-current/30 px-1.5 py-0.5 text-[10px] uppercase tracking-wide opacity-80 hover:opacity-100"
               >
-                copy
+                {t("toast.copy")}
+              </button>
+            </div>
+          )}
+          {toast.action && (
+            <div className="flex gap-2 pt-0.5">
+              <button
+                type="button"
+                onClick={() => {
+                  toast.action!.onClick();
+                  dismiss(toast.id);
+                }}
+                className="rounded border border-current/30 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide opacity-80 hover:opacity-100"
+              >
+                {toast.action.label}
               </button>
             </div>
           )}
@@ -244,7 +263,7 @@ function ToastCard({ toast }: { toast: Toast }) {
         <button
           type="button"
           onClick={() => dismiss(toast.id)}
-          aria-label="Dismiss notification"
+          aria-label={t("toast.dismiss")}
           className="-m-1 rounded p-1 opacity-60 hover:opacity-100"
         >
           ×

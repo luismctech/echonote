@@ -1,6 +1,7 @@
 //! Streaming transcription commands (`start_streaming`, `stop_streaming`).
 
 use std::path::PathBuf;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use serde::Deserialize;
@@ -143,6 +144,7 @@ pub async fn start_streaming(
         .await
         .map_err(|e| IpcError::new(ErrorCode::Audio, format!("failed to start streaming: {e}")))?;
     let session_id = handle.session_id();
+    let paused_flag = handle.paused_flag();
 
     let handle_arc = Arc::new(AsyncMutex::new(handle));
     let drain_handle = handle_arc.clone();
@@ -210,6 +212,15 @@ pub async fn start_streaming(
         SessionEntry {
             join,
             handle: handle_arc,
+            paused: paused_flag,
+            _keep_awake: keepawake::Builder::default()
+                .idle(true)
+                .reason("Recording audio session")
+                .app_name("EchoNote")
+                .app_reverse_domain("com.echonote.app")
+                .create()
+                .map_err(|e| tracing::warn!("keep-awake unavailable: {e}"))
+                .ok(),
         },
     );
 
@@ -238,6 +249,10 @@ pub async fn stop_streaming(
     let Some(entry) = entry else {
         return Ok(false);
     };
+    // If paused the drain loop is blocked on `next_event` while
+    // holding the handle lock — unpause first so the loop spins,
+    // releases the lock, and sees the stop signal.
+    entry.paused.store(false, Ordering::Release);
     {
         let mut guard = entry.handle.lock().await;
         guard.stop().await.map_err(|e| {
@@ -246,4 +261,59 @@ pub async fn stop_streaming(
     }
     let _ = entry.join.await;
     Ok(true)
+}
+
+/// Pause a running streaming session. Audio capture keeps running but
+/// frames are discarded. Returns `Ok(false)` when the session id is
+/// unknown or was already paused.
+#[tauri::command]
+#[specta::specta]
+pub async fn pause_streaming(
+    state: State<'_, AppState>,
+    session_id: StreamingSessionId,
+) -> Result<bool, IpcError> {
+    let flag = {
+        let map = state.sessions.lock().map_err(|e| {
+            IpcError::new(
+                ErrorCode::SessionConflict,
+                format!("session map poisoned: {e}"),
+            )
+        })?;
+        let Some(entry) = map.get(&session_id) else {
+            return Ok(false);
+        };
+        Arc::clone(&entry.paused)
+    };
+    // compare_exchange avoids a redundant Paused event when the
+    // pipeline was already paused.
+    let swapped = flag
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok();
+    Ok(swapped)
+}
+
+/// Resume a paused streaming session. Returns `Ok(false)` when the
+/// session id is unknown or was not paused.
+#[tauri::command]
+#[specta::specta]
+pub async fn resume_streaming(
+    state: State<'_, AppState>,
+    session_id: StreamingSessionId,
+) -> Result<bool, IpcError> {
+    let flag = {
+        let map = state.sessions.lock().map_err(|e| {
+            IpcError::new(
+                ErrorCode::SessionConflict,
+                format!("session map poisoned: {e}"),
+            )
+        })?;
+        let Some(entry) = map.get(&session_id) else {
+            return Ok(false);
+        };
+        Arc::clone(&entry.paused)
+    };
+    let swapped = flag
+        .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok();
+    Ok(swapped)
 }

@@ -12,6 +12,7 @@
  */
 
 import { Component, type ErrorInfo, type ReactNode } from "react";
+import i18next from "i18next";
 import { LogoGlow } from "./Logo";
 
 type Props = {
@@ -107,14 +108,13 @@ function DefaultFallback({
       <header className="flex flex-col gap-3">
         <LogoGlow size={48} />
         <p className="font-mono text-xs uppercase tracking-wider text-rose-600 dark:text-rose-400">
-          fatal — render error
+          {i18next.t("errors.renderCrash")}
         </p>
         <h1 className="text-2xl font-semibold tracking-tight">
-          Something broke in the EchoNote UI.
+          {i18next.t("errors.crashMessage")}
         </h1>
         <p className="text-sm text-zinc-600 dark:text-zinc-400">
-          The current session is safe — your meetings on disk are untouched.
-          You can copy the error and try again, or open a bug report.
+          {i18next.t("errors.crashDetail")}
         </p>
       </header>
 
@@ -126,7 +126,7 @@ function DefaultFallback({
 
       <details className="w-full rounded-md border border-zinc-200 bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-900">
         <summary className="cursor-pointer select-none px-3 py-2 text-xs font-medium text-zinc-700 dark:text-zinc-300">
-          Stack trace + component tree
+          {i18next.t("errors.stackTrace")}
         </summary>
         <pre className="max-h-72 overflow-auto whitespace-pre-wrap break-all border-t border-zinc-200 p-3 font-mono text-[10px] leading-tight text-zinc-700 dark:border-zinc-800 dark:text-zinc-300">
           {fullDetail}
@@ -139,28 +139,28 @@ function DefaultFallback({
           onClick={onReset}
           className="rounded-md bg-emerald-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-emerald-500"
         >
-          Try again
+          {i18next.t("errors.tryAgain")}
         </button>
         <button
           type="button"
           onClick={onReload}
           className="rounded-md border border-zinc-300 px-3 py-1.5 text-sm font-medium text-zinc-700 hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-800"
         >
-          Reload window
+          {i18next.t("errors.reloadWindow")}
         </button>
         <button
           type="button"
           onClick={onCopy}
           className="rounded-md border border-zinc-300 px-3 py-1.5 text-sm font-medium text-zinc-700 hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-800"
         >
-          Copy error
+          {i18next.t("errors.copyError")}
         </button>
         <button
           type="button"
           onClick={onReport}
           className="rounded-md border border-zinc-300 px-3 py-1.5 text-sm font-medium text-zinc-700 hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-800"
         >
-          Report bug
+          {i18next.t("errors.reportBug")}
         </button>
       </div>
     </main>

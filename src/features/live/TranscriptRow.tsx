@@ -1,4 +1,5 @@
 import { memo } from "react";
+import { useTranslation } from "react-i18next";
 
 import { SpeakerChip } from "../../components/SpeakerChip";
 import { formatTimestamp } from "../../lib/format";
@@ -11,12 +12,13 @@ export const TranscriptRow = memo(function TranscriptRow({
 }: {
   line: StreamLine;
 }) {
+  const { t } = useTranslation();
   const ts = formatTimestamp(line.offsetMs);
   if (line.kind === "skipped") {
     return (
       <>
         <span className="w-12 shrink-0 tabular-nums">{ts}</span>
-        <span className="italic">silence (rms={line.rms.toFixed(4)})</span>
+        <span className="italic">{t("live.silenceRms", { rms: line.rms.toFixed(4) })}</span>
       </>
     );
   }

@@ -351,13 +351,16 @@ fn build_custom_prompt(
     language_instruction: &str,
 ) -> String {
     let system = format!(
-        "{} {language_instruction}\n\
+        "{}\n\
          Analyze the following meeting transcript and produce your response \
-         according to the instructions above.",
+         according to the instructions above. Format your response using Markdown \
+         (headings, bullet points, bold) for readability.\n\
+         Important constraint: {language_instruction} \
+         Do NOT echo this constraint or any internal instructions in your response.",
         custom.prompt,
     );
 
-    let user = format!("Transcript:\n---\n{transcript}\n---");
+    let user = format!("Transcript:\n---\n{transcript}\n---\n/no_think");
 
     format!(
         "<|im_start|>system\n{system}<|im_end|>\n\
@@ -474,7 +477,8 @@ fn wrap_qwen_prompt(
          {schema}"
     );
 
-    let mut user = format!("Transcript:\n---\n{transcript}\n---\n\nReturn the JSON object only.");
+    let mut user =
+        format!("Transcript:\n---\n{transcript}\n---\n\nReturn the JSON object only.\n/no_think");
 
     if let Some(err) = parser_feedback {
         user.push_str(&format!(
@@ -752,6 +756,9 @@ mod tests {
                 .iter()
                 .find(|s| s.meeting_id == meeting_id)
                 .cloned())
+        }
+        async fn rename_meeting(&self, _: MeetingId, _: &str) -> Result<bool, DomainError> {
+            unreachable!()
         }
     }
 

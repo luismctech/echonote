@@ -102,6 +102,11 @@ pub trait MeetingStore: Send + Sync {
         label: Option<&str>,
     ) -> Result<bool, DomainError>;
 
+    /// Update the display title of a meeting. Returns `false` when
+    /// the meeting id was not found.
+    async fn rename_meeting(&self, meeting_id: MeetingId, title: &str)
+        -> Result<bool, DomainError>;
+
     /// Update the meeting header. Used by `stop_recording` to mark a
     /// session as ended.
     async fn finalize(

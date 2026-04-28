@@ -12,9 +12,17 @@ readme = "../README.md"
 # Two outputs:
 #  - `echo-shell` binary launched by `cargo run` and the Tauri bundler.
 #  - `echo_shell_lib` staticlib/cdylib consumed by mobile targets later.
+#
+# Desktop builds only need `rlib`. The `staticlib` + `cdylib` targets add
+# ~900 MB to the debug build. Enable them when building for mobile:
+#   cargo build --features mobile-lib
 [lib]
 name = "echo_shell_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
+crate-type = ["rlib"]
+
+# Uncomment (or use `--features mobile-lib`) when targeting iOS/Android:
+# [features]
+# mobile-lib = []  # then set crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -48,6 +56,7 @@ thiserror = { workspace = true }
 futures = { workspace = true }
 reqwest = { workspace = true }
 dirs = "6"
+keepawake = "0.6"
 sha2 = "0.10"
 scopeguard = "1"
 tauri-plugin-dialog = "2.7.0"

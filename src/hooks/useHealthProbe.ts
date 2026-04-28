@@ -18,6 +18,7 @@
  */
 
 import { useEffect, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import { useToast } from "../components/Toaster";
 import { healthCheck } from "../ipc/client";
@@ -25,6 +26,7 @@ import { isTauri } from "../ipc/isTauri";
 import type { Probe } from "../types/view";
 
 export function useHealthProbe(): Probe {
+  const { t } = useTranslation();
   const toast = useToast();
   const [probe, setProbe] = useState<Probe>({ kind: "idle" });
 
@@ -32,8 +34,7 @@ export function useHealthProbe(): Probe {
     if (!isTauri()) {
       setProbe({
         kind: "error",
-        message:
-          "Running outside Tauri — IPC is unavailable in `pnpm dev`. Use `pnpm tauri:dev`.",
+        message: t("errors.outsideTauri"),
       });
       return;
     }
@@ -45,11 +46,11 @@ export function useHealthProbe(): Probe {
         setProbe({ kind: "error", message });
         toast.push({
           kind: "error",
-          message: "Backend health check failed.",
+          message: t("errors.healthFailed"),
           detail: message,
         });
       });
-  }, [toast]);
+  }, [toast, t]);
 
   return probe;
 }

@@ -383,6 +383,10 @@ fn generate_blocking(
         warn!(max_new, "hit max_tokens without an EOG/stop token");
     }
 
+    // Strip Qwen 3 <think>…</think> reasoning blocks — they are
+    // never useful to callers (summaries, chat one-shots, etc.).
+    let output = crate::shared::strip_think_blocks(&output);
+
     Ok(output)
 }
 

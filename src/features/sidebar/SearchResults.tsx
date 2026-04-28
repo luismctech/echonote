@@ -1,4 +1,5 @@
 import { memo } from "react";
+import { useTranslation } from "react-i18next";
 
 import { formatDate } from "../../lib/format";
 import type {
@@ -23,20 +24,21 @@ export const SearchResults = memo(function SearchResults({
   activeId: MeetingId | null;
   onSelect: (m: MeetingSummary) => void;
 }) {
+  const { t } = useTranslation();
   if (error) {
     return (
       <p className="rounded bg-rose-50 px-2 py-1 text-xs text-rose-700 dark:bg-rose-950/40 dark:text-rose-300">
-        Search failed: {error}
+        {t("search.failed")} {error}
       </p>
     );
   }
   if (loading && hits.length === 0) {
-    return <p className="text-xs text-zinc-400">Searching…</p>;
+    return <p className="text-xs text-zinc-400">{t("search.searching")}</p>;
   }
   if (hits.length === 0) {
     return (
       <p className="text-xs text-zinc-400">
-        No matches for <span className="font-medium">{query}</span>.
+        {t("search.noMatches", { query })}
       </p>
     );
   }
@@ -75,7 +77,7 @@ export const SearchResults = memo(function SearchResults({
                 dangerouslySetInnerHTML={{ __html: hit.snippet }}
               />
               <span className="text-[10px] tabular-nums text-zinc-400">
-                {formatDate(m.startedAt)} · rank {hit.rank.toFixed(2)}
+                {formatDate(m.startedAt)} · {t("search.rank")} {hit.rank.toFixed(2)}
               </span>
             </button>
           </li>

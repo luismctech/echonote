@@ -24,6 +24,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import { getSummary, summarizeMeeting, summarizeWithCustomTemplate } from "../ipc/client";
 import { useIpcAction } from "../ipc/useIpcAction";
@@ -79,11 +80,10 @@ export function useMeetingSummary(meetingId: MeetingId | null): UseMeetingSummar
         // targets the right one.
         if (fetched) {
           if (fetched.template === "custom") {
-            setSelectedTemplate({
-              kind: "custom",
-              id: "", // id unknown from stored summary
-              name: (fetched as { templateName?: string }).templateName ?? "Custom",
-            });
+            // The stored summary doesn't carry the custom template ID,
+            // so fall back to the default builtin selector. The user
+            // can pick the correct custom template before regenerating.
+            setSelectedTemplate({ kind: "builtin", id: "general" });
           } else {
             setSelectedTemplate({ kind: "builtin", id: fetched.template as TemplateId });
           }
@@ -103,13 +103,15 @@ export function useMeetingSummary(meetingId: MeetingId | null): UseMeetingSummar
     };
   }, [meetingId]);
 
+  const { t } = useTranslation();
+
   const generateBuiltinCall = useIpcAction(
-    "Couldn't generate summary.",
+    t("errors.summaryFailed"),
     summarizeMeeting,
   );
 
   const generateCustomCall = useIpcAction(
-    "Couldn't generate summary.",
+    t("errors.summaryFailed"),
     summarizeWithCustomTemplate,
   );
 

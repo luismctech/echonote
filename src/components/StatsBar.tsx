@@ -1,3 +1,5 @@
+import { useTranslation } from "react-i18next";
+
 import { Stat } from "./Stat";
 
 /**
@@ -14,12 +16,13 @@ export function StatsBar({
   status: string;
   stats: { chunks: number; skipped: number; audioMs: number };
 }) {
+  const { t } = useTranslation();
   return (
     <dl className="grid grid-cols-4 gap-x-4 text-xs">
-      <Stat label="status" value={status} />
-      <Stat label="chunks" value={String(stats.chunks)} />
-      <Stat label="skipped" value={String(stats.skipped)} />
-      <Stat label="audio" value={`${(stats.audioMs / 1000).toFixed(1)} s`} />
+      <Stat label={t("stats.status")} value={status} />
+      <Stat label={t("stats.chunks")} value={String(stats.chunks)} />
+      <Stat label={t("stats.skipped")} value={String(stats.skipped)} />
+      <Stat label={t("stats.audio")} value={`${(stats.audioMs / 1000).toFixed(1)} s`} />
     </dl>
   );
 }

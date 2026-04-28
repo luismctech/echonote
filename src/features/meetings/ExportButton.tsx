@@ -1,19 +1,21 @@
 import { useCallback, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { save } from "@tauri-apps/plugin-dialog";
 
 import { exportMeeting, type ExportFormat } from "../../ipc/client";
 import type { MeetingId } from "../../types/meeting";
 
-const FORMATS: ReadonlyArray<{ id: ExportFormat; label: string; ext: string }> =
+const FORMATS: ReadonlyArray<{ id: ExportFormat; labelKey: string; ext: string }> =
   [
-    { id: "markdown", label: "Markdown (.md)", ext: "md" },
-    { id: "txt", label: "Text (.txt)", ext: "txt" },
+    { id: "markdown", labelKey: "export.markdown", ext: "md" },
+    { id: "txt", labelKey: "export.text", ext: "txt" },
   ];
 
 export function ExportButton({
   meetingId,
   title,
 }: Readonly<{ meetingId: MeetingId; title: string }>) {
+  const { t } = useTranslation();
   const [exporting, setExporting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -22,7 +24,7 @@ export function ExportButton({
       setError(null);
       const safeName = title.replaceAll(/[^a-zA-Z0-9_-]/g, "_");
       const path = await save({
-        title: "Export meeting",
+        title: t("export.title"),
         defaultPath: `${safeName}.${ext}`,
         filters: [{ name: ext.toUpperCase(), extensions: [ext] }],
       });
@@ -47,7 +49,7 @@ export function ExportButton({
             exporting ? "pointer-events-none opacity-60" : ""
           }`}
         >
-          {exporting ? "Exporting…" : "Export ▾"}
+          {exporting ? t("export.exporting") : t("export.button")}
         </summary>
         <div className="absolute right-0 z-10 mt-1 w-44 rounded-md border border-zinc-200 bg-white py-1 shadow-lg dark:border-zinc-700 dark:bg-zinc-900">
           {FORMATS.map((f) => (
@@ -57,7 +59,7 @@ export function ExportButton({
               onClick={() => handleExport(f.id, f.ext)}
               className="block w-full px-3 py-1.5 text-left text-xs hover:bg-zinc-100 dark:hover:bg-zinc-800"
             >
-              {f.label}
+              {t(f.labelKey)}
             </button>
           ))}
         </div>

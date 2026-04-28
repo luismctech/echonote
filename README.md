@@ -1,4 +1,7 @@
-# EchoNote
+<p align="center">
+  <img src="src-tauri/icons/128x128.png" width="80" alt="EchoNote logo" />
+</p>
+<h1 align="center">EchoNote</h1>
 
 [![CI](https://github.com/luismctech/echonote/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/luismctech/echonote/actions/workflows/ci.yml)
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](./LICENSE)
@@ -26,9 +29,13 @@ Most meeting transcription tools send your audio to the cloud. EchoNote doesn't.
 | **Live transcription** | Real-time speech-to-text as you speak, powered by [Whisper](https://github.com/ggerganov/whisper.cpp) |
 | **Speaker identification** | Automatically detects and labels different speakers in the conversation |
 | **AI summaries** | Generate meeting summaries with one click using a local LLM (no cloud API) |
+| **Custom summary templates** | Create your own prompt templates for tailored summaries (1:1, sprint review, sales call, or anything you need) |
+| **Model selection** | Download multiple ASR or LLM models and switch between them at runtime — no restart required |
 | **Meeting search** | Full-text search across all your past meetings |
+| **Conversational chat** | Ask follow-up questions about any meeting using the local LLM |
 | **Multiple languages** | Supports 90+ languages via Whisper; optimized for English and Spanish |
 | **Cross-platform** | Available for macOS (Apple Silicon & Intel), Windows, and Linux |
+| **Sleep prevention** | Automatically prevents OS sleep while recording so you never lose a session |
 | **Auto-updates** | The app checks for new versions on launch |
 
 ---
@@ -47,8 +54,7 @@ Get the latest release for your platform from [**GitHub Releases**](https://gith
 
 ### First launch notes
 
-<details>
-<summary><strong>macOS — "app is damaged" warning</strong></summary>
+#### macOS — "app is damaged" warning
 
 The app is not yet code-signed with Apple. Run this once in Terminal:
 
@@ -57,22 +63,17 @@ xattr -cr /Applications/EchoNote.app
 ```
 
 Then open the app normally. This is safe — the full source code is available in this repository.
-</details>
 
-<details>
-<summary><strong>Windows — SmartScreen warning</strong></summary>
+#### Windows — SmartScreen warning
 
 Windows SmartScreen may warn about an unrecognized app. Click **"More info"** → **"Run anyway"**. This is normal for new open-source apps without a code signing certificate.
-</details>
 
-<details>
-<summary><strong>Linux — AppImage permissions</strong></summary>
+#### Linux — AppImage permissions
 
 ```sh
 chmod +x EchoNote_*.AppImage
 ./EchoNote_*.AppImage
 ```
-</details>
 
 ---
 
@@ -92,7 +93,7 @@ All processing happens locally using these open-source AI models:
 | [Silero VAD](https://github.com/snakers4/silero-vad) | Detects when someone is speaking | ~1.2 MB |
 | [ERes2Net](https://github.com/modelscope/3D-Speaker) | Identifies different speakers | ~15 MB |
 
-Models are downloaded automatically on first use.
+Models are **not** downloaded automatically — you choose which ones to install from the built-in model manager in **Settings → Models**.
 
 ---
 
@@ -121,8 +122,10 @@ Models are downloaded automatically on first use.
 - [x] Speaker identification (diarization)
 - [x] Meeting persistence and search
 - [x] Local LLM summaries
+- [x] Conversational chat ("What did Maria say about the deadline?")
+- [x] Custom summary templates (create your own prompts)
+- [x] Runtime model selection (switch ASR/LLM models without restarting)
 - [ ] System audio capture (transcribe the other side of the call)
-- [ ] Conversational chat ("What did Maria say about the deadline?")
 - [ ] Encrypted local storage
 - [ ] Setup wizard with hardware profile detection
 - [ ] More summary templates (1:1, sprint review, interview, sales call)
