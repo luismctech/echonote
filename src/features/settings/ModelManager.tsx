@@ -24,10 +24,19 @@ export function ModelManager({
   state: UseModelManager;
   onClose: () => void;
 }>) {
-  const { models, loading, downloading, error } = state;
+  const { models, loading, downloading, error, activeLlm, activeAsr } = state;
   const { t } = useTranslation();
 
   const grouped = groupByKind(models);
+
+  const activeIds: Record<string, string | null> = {
+    llm: activeLlm,
+    asr: activeAsr,
+  };
+  const selectHandlers: Record<string, (id: string) => void> = {
+    llm: state.selectLlm,
+    asr: state.selectAsr,
+  };
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
@@ -59,7 +68,11 @@ export function ModelManager({
                 kind={kind}
                 models={items}
                 downloading={downloading}
+                activeId={activeIds[kind] ?? null}
                 onDownload={state.download}
+                onCancel={state.cancelDl}
+                onDelete={state.remove}
+                {...(selectHandlers[kind] ? { onSelect: selectHandlers[kind] } : {})}
               />
             ))}
           </div>
@@ -97,14 +110,23 @@ function ModelGroup({
   kind,
   models,
   downloading,
+  activeId,
   onDownload,
+  onCancel,
+  onDelete,
+  onSelect,
 }: Readonly<{
   kind: string;
   models: ModelInfo[];
   downloading: DownloadProgress | null;
+  activeId: string | null;
   onDownload: (id: string) => void;
+  onCancel: (id: string) => void;
+  onDelete: (id: string) => void;
+  onSelect?: (id: string) => void;
 }>) {
   const { t } = useTranslation();
+  const selectable = kind === "llm" || kind === "asr";
   return (
     <div className="flex flex-col gap-2">
       <h3 className="text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
@@ -115,7 +137,12 @@ function ModelGroup({
           key={m.id}
           model={m}
           downloading={downloading}
+          isActive={selectable && m.id === activeId}
+          showUse={selectable}
           onDownload={onDownload}
+          onCancel={onCancel}
+          onDelete={onDelete}
+          {...(onSelect ? { onSelect } : {})}
         />
       ))}
     </div>
@@ -125,11 +152,21 @@ function ModelGroup({
 function ModelRow({
   model,
   downloading,
+  isActive,
+  showUse,
   onDownload,
+  onCancel,
+  onDelete,
+  onSelect,
 }: Readonly<{
   model: ModelInfo;
   downloading: DownloadProgress | null;
+  isActive: boolean;
+  showUse: boolean;
   onDownload: (id: string) => void;
+  onCancel: (id: string) => void;
+  onDelete: (id: string) => void;
+  onSelect?: (id: string) => void;
 }>) {
   const { t } = useTranslation();
   const isDownloading = downloading?.modelId === model.id;
@@ -140,8 +177,12 @@ function ModelRow({
       : 0;
 
   return (
-    <div className="flex items-center gap-3 rounded-lg border border-zinc-100 bg-zinc-50/50 px-3 py-2.5 dark:border-zinc-800/60 dark:bg-zinc-900/30">
-      <StatusDot present={model.present} />
+    <div className={`flex items-center gap-3 rounded-lg border px-3 py-2.5 ${
+      isActive
+        ? "border-blue-200 bg-blue-50/50 dark:border-blue-800/60 dark:bg-blue-950/20"
+        : "border-zinc-100 bg-zinc-50/50 dark:border-zinc-800/60 dark:bg-zinc-900/30"
+    }`}>
+      <StatusDot present={model.present} active={isActive} />
 
       <div className="flex min-w-0 flex-1 flex-col gap-0.5">
         <span className="truncate text-sm font-medium text-zinc-800 dark:text-zinc-200">
@@ -165,32 +206,63 @@ function ModelRow({
         )}
       </div>
 
-      {model.present ? (
-        <span className="shrink-0 rounded-md bg-emerald-50 px-2 py-1 text-[10px] font-medium text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300">
-          {t("models.installed")}
-        </span>
-      ) : (
+      {isDownloading && (
+        <button
+          type="button"
+          onClick={() => onCancel(model.id)}
+          className="shrink-0 rounded-md border border-red-200 bg-red-50 px-2.5 py-1 text-xs font-medium text-red-700 hover:bg-red-100 dark:border-red-800 dark:bg-red-950/40 dark:text-red-300 dark:hover:bg-red-900/60"
+        >
+          {t("models.cancel")}
+        </button>
+      )}
+      {!isDownloading && model.present && (
+        <div className="flex shrink-0 items-center gap-1.5">
+          {showUse && !isActive && onSelect && (
+            <button
+              type="button"
+              onClick={() => onSelect(model.id)}
+              className="rounded-md border border-blue-200 bg-blue-50 px-2.5 py-1 text-[10px] font-medium text-blue-700 hover:bg-blue-100 dark:border-blue-800 dark:bg-blue-950/40 dark:text-blue-300 dark:hover:bg-blue-900/60"
+            >
+              {t("models.use")}
+            </button>
+          )}
+          {isActive && (
+            <span className="rounded-md bg-blue-100 px-2 py-1 text-[10px] font-medium text-blue-700 dark:bg-blue-950/40 dark:text-blue-300">
+              {t("models.active")}
+            </span>
+          )}
+          <span className="rounded-md bg-emerald-50 px-2 py-1 text-[10px] font-medium text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300">
+            {t("models.installed")}
+          </span>
+          <button
+            type="button"
+            onClick={() => onDelete(model.id)}
+            className="rounded-md p-1 text-zinc-400 hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-950/40 dark:hover:text-red-400"
+            title={t("models.delete")}
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" className="h-3.5 w-3.5">
+              <path fillRule="evenodd" d="M5 3.25V4H2.75a.75.75 0 0 0 0 1.5h.3l.815 8.15A1.5 1.5 0 0 0 5.357 15h5.285a1.5 1.5 0 0 0 1.493-1.35l.815-8.15h.3a.75.75 0 0 0 0-1.5H11v-.75A2.25 2.25 0 0 0 8.75 1h-1.5A2.25 2.25 0 0 0 5 3.25Zm2.25-.75a.75.75 0 0 0-.75.75V4h3v-.75a.75.75 0 0 0-.75-.75h-1.5ZM6.05 6a.75.75 0 0 1 .787.713l.275 5.5a.75.75 0 0 1-1.498.075l-.275-5.5A.75.75 0 0 1 6.05 6Zm3.9 0a.75.75 0 0 1 .712.787l-.275 5.5a.75.75 0 0 1-1.498-.075l.275-5.5A.75.75 0 0 1 9.95 6Z" clipRule="evenodd" />
+            </svg>
+          </button>
+        </div>
+      )}
+      {!isDownloading && !model.present && (
         <button
           type="button"
           disabled={anyDownloading}
           onClick={() => onDownload(model.id)}
           className="shrink-0 rounded-md border border-blue-200 bg-blue-50 px-2.5 py-1 text-xs font-medium text-blue-700 hover:bg-blue-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-blue-800 dark:bg-blue-950/40 dark:text-blue-300 dark:hover:bg-blue-900/60"
         >
-          {isDownloading ? t("models.downloading") : t("models.download", { size: formatBytes(model.sizeBytes) })}
+          {t("models.download", { size: formatBytes(model.sizeBytes) })}
         </button>
       )}
     </div>
   );
 }
 
-function StatusDot({ present }: Readonly<{ present: boolean }>) {
-  return (
-    <span
-      className={`h-2 w-2 shrink-0 rounded-full ${
-        present
-          ? "bg-emerald-500"
-          : "bg-zinc-300 dark:bg-zinc-600"
-      }`}
-    />
-  );
+function StatusDot({ present, active }: Readonly<{ present: boolean; active: boolean }>) {
+  let color = "bg-zinc-300 dark:bg-zinc-600";
+  if (active) color = "bg-blue-500";
+  else if (present) color = "bg-emerald-500";
+  return <span className={`h-2 w-2 shrink-0 rounded-full ${color}`} />;
 }

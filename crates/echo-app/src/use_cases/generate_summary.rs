@@ -25,8 +25,8 @@ use time::OffsetDateTime;
 use tracing::{info, instrument, warn};
 
 use echo_domain::{
-    Definition, DomainError, GenerateOptions, InterviewQuote, LlmModel, Meeting, MeetingId,
-    MeetingStore, Speaker, Summary, SummaryContent, SummaryId, TEMPLATE_IDS,
+    CustomTemplate, Definition, DomainError, GenerateOptions, InterviewQuote, LlmModel, Meeting,
+    MeetingId, MeetingStore, Speaker, Summary, SummaryContent, SummaryId, TEMPLATE_IDS,
 };
 
 /// Maximum characters of transcript text fed to the model. Qwen 3
@@ -179,6 +179,65 @@ impl SummarizeMeeting {
         );
         Ok(summary)
     }
+
+    /// Generate (and persist) a summary using a user-defined
+    /// [`CustomTemplate`]. The LLM output is stored verbatim as
+    /// [`SummaryContent::Custom`] since the output shape is not
+    /// known at compile time.
+    #[instrument(skip(self, custom), fields(meeting_id = %meeting_id, template_name = %custom.name))]
+    pub async fn execute_custom(
+        &self,
+        meeting_id: MeetingId,
+        custom: &CustomTemplate,
+    ) -> Result<Summary, SummarizeMeetingError> {
+        let meeting = self
+            .store
+            .get(meeting_id)
+            .await
+            .map_err(SummarizeMeetingError::Storage)?
+            .ok_or(SummarizeMeetingError::NotFound(meeting_id))?;
+
+        let transcript = render_transcript(&meeting);
+        if transcript.trim().is_empty() {
+            return Err(SummarizeMeetingError::EmptyTranscript(meeting_id));
+        }
+
+        let language = meeting.summary.language.clone();
+        let language_instruction = language_instruction(language.as_deref());
+
+        let prompt = build_custom_prompt(custom, &transcript, &language_instruction);
+        let response = self
+            .llm
+            .generate(&prompt, &generate_opts())
+            .await
+            .map_err(SummarizeMeetingError::Llm)?;
+
+        let content = SummaryContent::Custom {
+            template_name: custom.name.clone(),
+            text: response.trim().to_string(),
+        };
+
+        let summary = Summary {
+            id: SummaryId::new(),
+            meeting_id,
+            model: self.llm.model_id().to_string(),
+            language,
+            created_at: OffsetDateTime::now_utc(),
+            content,
+        };
+
+        self.store
+            .upsert_summary(&summary)
+            .await
+            .map_err(SummarizeMeetingError::Storage)?;
+
+        info!(
+            template_name = %custom.name,
+            model = %summary.model,
+            "custom summary persisted"
+        );
+        Ok(summary)
+    }
 }
 
 /// Default generation knobs for summaries. Low temperature + nucleus
@@ -280,6 +339,33 @@ fn build_prompt(
         schema,
         transcript,
         parser_feedback,
+    )
+}
+
+/// Build a prompt from a user-defined [`CustomTemplate`]. The
+/// user's prompt is used verbatim as the system role (+ language
+/// instruction). The output is free-form text.
+fn build_custom_prompt(
+    custom: &CustomTemplate,
+    transcript: &str,
+    language_instruction: &str,
+) -> String {
+    let system = format!(
+        "{}\n\
+         Analyze the following meeting transcript and produce your response \
+         according to the instructions above. Format your response using Markdown \
+         (headings, bullet points, bold) for readability.\n\
+         Important constraint: {language_instruction} \
+         Do NOT echo this constraint or any internal instructions in your response.",
+        custom.prompt,
+    );
+
+    let user = format!("Transcript:\n---\n{transcript}\n---\n/no_think");
+
+    format!(
+        "<|im_start|>system\n{system}<|im_end|>\n\
+         <|im_start|>user\n{user}<|im_end|>\n\
+         <|im_start|>assistant\n"
     )
 }
 
@@ -391,7 +477,8 @@ fn wrap_qwen_prompt(
          {schema}"
     );
 
-    let mut user = format!("Transcript:\n---\n{transcript}\n---\n\nReturn the JSON object only.");
+    let mut user =
+        format!("Transcript:\n---\n{transcript}\n---\n\nReturn the JSON object only.\n/no_think");
 
     if let Some(err) = parser_feedback {
         user.push_str(&format!(
@@ -669,6 +756,9 @@ mod tests {
                 .iter()
                 .find(|s| s.meeting_id == meeting_id)
                 .cloned())
+        }
+        async fn rename_meeting(&self, _: MeetingId, _: &str) -> Result<bool, DomainError> {
+            unreachable!()
         }
     }
 

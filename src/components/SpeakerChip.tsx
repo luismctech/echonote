@@ -1,3 +1,5 @@
+import { useTranslation } from "react-i18next";
+
 import { paletteFor } from "../lib/speakers";
 
 /**
@@ -17,12 +19,13 @@ export function SpeakerChip({
   label: string;
   compact?: boolean;
 }) {
+  const { t } = useTranslation();
   const palette = paletteFor(slot);
   const sizing = compact ? "px-1.5 py-0 text-[10px]" : "px-2 py-0.5 text-xs";
   return (
     <span
       className={`inline-flex shrink-0 items-center rounded-full font-medium tabular-nums ring-1 ring-inset ${palette.bg} ${palette.text} ${palette.ring} ${sizing}`}
-      title={`Speaker slot ${slot + 1}`}
+      title={t("speakers.slot", { n: slot + 1 })}
     >
       {label}
     </span>

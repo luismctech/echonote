@@ -36,17 +36,20 @@ export function useAutoUpdate(onUpdateFound?: OnUpdateFound) {
   const onUpdateFoundRef = useRef(onUpdateFound);
   onUpdateFoundRef.current = onUpdateFound;
 
-  const checkForUpdate = useCallback(async () => {
-    if (!isTauri()) return;
+  const checkForUpdate = useCallback(async (): Promise<boolean> => {
+    if (!isTauri()) return false;
 
     try {
       const { check } = await import("@tauri-apps/plugin-updater");
       const update = await check();
       if (update) {
         onUpdateFoundRef.current?.(update.version, update.body ?? undefined);
+        return true;
       }
+      return false;
     } catch {
       // Silently ignore — updater may not be configured yet (no pubkey).
+      return false;
     }
   }, []);
 

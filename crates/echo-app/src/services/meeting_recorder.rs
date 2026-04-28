@@ -229,6 +229,9 @@ impl MeetingRecorder {
                     Ok(None)
                 }
             }
+            // Paused / Resumed are informational UI events — the
+            // recorder doesn't persist anything for them.
+            TranscriptEvent::Paused { .. } | TranscriptEvent::Resumed { .. } => Ok(None),
         }
     }
 
@@ -441,6 +444,9 @@ mod tests {
             &self,
             _meeting_id: MeetingId,
         ) -> Result<Option<echo_domain::Summary>, DomainError> {
+            unreachable!()
+        }
+        async fn rename_meeting(&self, _: MeetingId, _: &str) -> Result<bool, DomainError> {
             unreachable!()
         }
     }

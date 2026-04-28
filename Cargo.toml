@@ -24,7 +24,7 @@ members = [
 # Shared package metadata inherited by member crates via `package.xxx.workspace = true`
 # -----------------------------------------------------------------------------
 [workspace.package]
-version = "0.1.0"
+version = "0.3.1"
 edition = "2021"
 rust-version = "1.88"
 authors = ["Luis MC <luismctechdev@gmail.com>"]
@@ -131,13 +131,17 @@ echo-telemetry = { path = "crates/echo-telemetry" }
 # -----------------------------------------------------------------------------
 [profile.dev]
 opt-level = 0
-debug = true
+# "line-tables-only" gives useful backtraces at ~1/5 the disk cost of
+# full DWARF. Switch to `true` only when you need to inspect locals in
+# a debugger.
+debug = "line-tables-only"
 split-debuginfo = "unpacked"
 
-# Heavy crates (whisper-cpp, llama-cpp, ort) stay optimized even in dev to
-# keep the CLI prototype usable during development.
+# Third-party crates: strip debug info entirely — you never step into
+# tract-onnx, objc2, tauri internals, etc. This alone saves ~2 GB.
 [profile.dev.package."*"]
 opt-level = 0
+debug = false
 
 [profile.release]
 opt-level = 3

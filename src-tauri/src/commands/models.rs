@@ -8,7 +8,7 @@ use crate::ipc_error::{ErrorCode, IpcError};
 
 use futures::stream::StreamExt;
 
-use super::{workspace_root, AppState};
+use super::AppState;
 
 /// A downloadable model known to the app.
 #[derive(Debug, Clone, Serialize, specta::Type)]
@@ -32,8 +32,7 @@ pub struct ModelInfo {
 /// Each entry carries an optional SHA-256 hex digest. When present,
 /// downloads are verified after completion and rejected on mismatch.
 /// Populate hashes by running `shasum -a 256 <model_file>`.
-fn model_catalog() -> Vec<(ModelInfo, &'static str, Option<&'static str>)> {
-    let root = workspace_root();
+fn model_catalog(root: &std::path::Path) -> Vec<(ModelInfo, &'static str, Option<&'static str>)> {
     let present = |rel: &str| root.join(rel).exists();
 
     vec![
@@ -128,13 +127,26 @@ fn model_catalog() -> Vec<(ModelInfo, &'static str, Option<&'static str>)> {
         (
             ModelInfo {
                 id: "vad-silero".into(),
-                label: "Silero VAD v5 (2 MB)".into(),
+                label: "Silero VAD v5 (1.2 MB, simplified for tract)".into(),
                 kind: "vad".into(),
                 present: present("models/vad/silero_vad.onnx"),
-                size_bytes: 2_200_000,
+                size_bytes: 1_200_000,
             },
-            "https://github.com/snakers4/silero-vad/raw/v5.1.2/src/silero_vad/data/silero_vad.onnx",
-            None, // TODO: populate sha256
+            // Pre-simplified ONNX (If nodes inlined for 16 kHz, BASIC-optimised).
+            // The upstream file has ONNX `If` ops that tract cannot execute.
+            "https://github.com/luismctech/echonote/releases/download/v0.2.1/silero_vad.onnx",
+            Some("d224cf508fbaf8bb1a49f333120b536dbaa1ed2b0ab49bed059d6e44a4f8305c"),
+        ),
+        (
+            ModelInfo {
+                id: "embedder-eres2net".into(),
+                label: "ERes2Net Speaker Embedder (26 MB)".into(),
+                kind: "embedder".into(),
+                present: present("models/embedder/eres2net_en_voxceleb.onnx"),
+                size_bytes: 26_000_000,
+            },
+            "https://huggingface.co/csukuangfj/speaker-embedding-models/resolve/main/3dspeaker_speech_eres2net_sv_en_voxceleb_16k.onnx",
+            None,
         ),
     ]
 }
@@ -151,6 +163,7 @@ fn model_dest_path(id: &str) -> Option<&'static str> {
         "llm-qwen3-14b" => Some("models/llm/Qwen3-14B-Q4_K_M.gguf"),
         "llm-qwen3-8b" => Some("models/llm/Qwen3-8B-Q4_K_M.gguf"),
         "vad-silero" => Some("models/vad/silero_vad.onnx"),
+        "embedder-eres2net" => Some("models/embedder/eres2net_en_voxceleb.onnx"),
         _ => None,
     }
 }
@@ -158,8 +171,8 @@ fn model_dest_path(id: &str) -> Option<&'static str> {
 /// Return the status of all downloadable models.
 #[tauri::command]
 #[specta::specta]
-pub fn get_model_status() -> Vec<ModelInfo> {
-    model_catalog()
+pub fn get_model_status(state: State<'_, AppState>) -> Vec<ModelInfo> {
+    model_catalog(&state.data_root)
         .into_iter()
         .map(|(info, _, _)| info)
         .collect()
@@ -178,6 +191,9 @@ pub enum DownloadEvent {
     /// Download failed.
     #[serde(rename = "failed")]
     Failed { error: String },
+    /// Download was cancelled by the user.
+    #[serde(rename = "cancelled")]
+    Cancelled,
 }
 
 /// Download a model by id, streaming progress events to the frontend.
@@ -193,28 +209,30 @@ pub async fn download_model(
     on_event: Channel<DownloadEvent>,
 ) -> Result<(), IpcError> {
     // ── Guard: reject concurrent downloads of the same model ─────
+    let cancel_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     {
         let mut guard = state
             .in_flight_downloads
             .lock()
             .unwrap_or_else(|p| p.into_inner());
-        if !guard.insert(model_id.clone()) {
+        if guard.contains_key(&model_id) {
             return Err(IpcError::new(
                 ErrorCode::SessionConflict,
                 format!("model {model_id} is already being downloaded"),
             ));
         }
+        guard.insert(model_id.clone(), cancel_flag.clone());
     }
     let downloads_handle = state.in_flight_downloads.clone();
     let mid = model_id.clone();
     // Ensure the guard is removed on all exit paths.
     let _cleanup = scopeguard::guard((), move |()| {
-        if let Ok(mut set) = downloads_handle.lock() {
-            set.remove(&mid);
+        if let Ok(mut map) = downloads_handle.lock() {
+            map.remove(&mid);
         }
     });
 
-    let catalog = model_catalog();
+    let catalog = model_catalog(&state.data_root);
     let (_, url, expected_sha) = catalog
         .iter()
         .find(|(info, _, _)| info.id == model_id)
@@ -224,7 +242,7 @@ pub async fn download_model(
 
     let rel_path = model_dest_path(&model_id)
         .ok_or_else(|| IpcError::not_found(format!("no dest path for model: {model_id}")))?;
-    let dest = workspace_root().join(rel_path);
+    let dest = state.data_root.join(rel_path);
 
     if let Some(parent) = dest.parent() {
         tokio::fs::create_dir_all(parent)
@@ -259,6 +277,14 @@ pub async fn download_model(
         let mut hasher = Sha256::new();
         let mut last_report = std::time::Instant::now();
         while let Some(chunk) = stream.next().await {
+            // ── Check cancel flag ────────────────────────────────
+            if cancel_flag.load(std::sync::atomic::Ordering::Relaxed) {
+                drop(file);
+                let _ = tokio::fs::remove_file(&tmp).await;
+                let _ = on_event.send(DownloadEvent::Cancelled);
+                return Ok(());
+            }
+
             let chunk =
                 chunk.map_err(|e| IpcError::network(format!("download stream error: {e}")))?;
             file.write_all(&chunk)
@@ -324,4 +350,186 @@ pub async fn unload_model(state: State<'_, AppState>, kind: String) -> Result<bo
         "vad" => Ok(state.vad.unload().await),
         _ => Err(IpcError::not_found(format!("unknown model kind: {kind}"))),
     }
+}
+
+/// Cancel an in-flight model download.
+///
+/// Sets the cancel flag for the download loop, which will clean up the
+/// `.part` file and send a `Cancelled` event.
+#[tauri::command]
+#[specta::specta]
+pub async fn cancel_download(
+    state: State<'_, AppState>,
+    model_id: String,
+) -> Result<bool, IpcError> {
+    let guard = state
+        .in_flight_downloads
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    if let Some(flag) = guard.get(&model_id) {
+        flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
+/// Delete a downloaded model from disk.
+///
+/// If the model is currently loaded in memory, it is unloaded first.
+#[tauri::command]
+#[specta::specta]
+pub async fn delete_model(state: State<'_, AppState>, model_id: String) -> Result<(), IpcError> {
+    let rel_path = model_dest_path(&model_id)
+        .ok_or_else(|| IpcError::not_found(format!("unknown model: {model_id}")))?;
+    let dest = state.data_root.join(rel_path);
+
+    if !dest.exists() {
+        return Err(IpcError::not_found(format!(
+            "model file not found: {model_id}"
+        )));
+    }
+
+    // Unload the model from memory if it's currently loaded.
+    let kind = model_id.split('-').next().unwrap_or("");
+    match kind {
+        "asr" => {
+            state.transcriber.unload().await;
+        }
+        "llm" => {
+            state.llm.unload().await;
+        }
+        "vad" => {
+            state.vad.unload().await;
+        }
+        _ => {}
+    }
+
+    tokio::fs::remove_file(&dest)
+        .await
+        .map_err(|e| IpcError::storage(format!("failed to delete model: {e}")))?;
+
+    Ok(())
+}
+
+/// Set the active LLM model. Unloads the currently loaded model (if
+/// any) and switches the path so the next `ensure_llm()` call loads
+/// the selected model.
+///
+/// `model_id` must be an `"llm-*"` id from the catalog whose model
+/// file is already downloaded.
+#[tauri::command]
+#[specta::specta]
+pub async fn set_active_llm(state: State<'_, AppState>, model_id: String) -> Result<(), IpcError> {
+    let rel_path = model_dest_path(&model_id)
+        .ok_or_else(|| IpcError::not_found(format!("unknown model: {model_id}")))?;
+
+    if !model_id.starts_with("llm-") {
+        return Err(IpcError::new(
+            ErrorCode::InvalidInput,
+            format!("{model_id} is not an LLM model"),
+        ));
+    }
+
+    let dest = state.data_root.join(rel_path);
+    if !dest.exists() {
+        return Err(IpcError::not_found(format!(
+            "model not downloaded: {model_id}"
+        )));
+    }
+
+    // Unload the currently loaded LLM (if any).
+    state.llm.unload().await;
+
+    // SAFETY: We hold an exclusive reference via `State` in the Tauri
+    // runtime; this is the only writer. The `unsafe` block is required
+    // because `llm_model_path` is not behind an async mutex (to keep
+    // it cheap to read). The Tauri command pipeline guarantees single-
+    // writer semantics per command invocation.
+    //
+    // We use an interior-mutability pattern via a small helper below
+    // to update the path.
+    state.set_llm_model_path(dest);
+
+    tracing::info!(model_id = %model_id, "active LLM switched");
+    Ok(())
+}
+
+/// Return the model id of the currently configured LLM, or `null`
+/// when no LLM model file exists on disk.
+#[tauri::command]
+#[specta::specta]
+pub fn get_active_llm(state: State<'_, AppState>) -> Option<String> {
+    let path = state.active_llm_path();
+    if !path.exists() {
+        return None;
+    }
+    // Reverse-lookup the catalog id from the filename.
+    let catalog = model_catalog(&state.data_root);
+    for (info, _, _) in &catalog {
+        if info.kind == "llm" {
+            let rel = model_dest_path(&info.id).unwrap_or("");
+            if state.data_root.join(rel) == path {
+                return Some(info.id.clone());
+            }
+        }
+    }
+    None
+}
+
+/// Set the active ASR (speech recognition) model. Unloads the currently
+/// loaded transcriber (if any) and switches the path so the next
+/// `ensure_transcriber()` call loads the selected model.
+///
+/// `model_id` must be an `"asr-*"` id from the catalog whose model
+/// file is already downloaded.
+#[tauri::command]
+#[specta::specta]
+pub async fn set_active_asr(state: State<'_, AppState>, model_id: String) -> Result<(), IpcError> {
+    let rel_path = model_dest_path(&model_id)
+        .ok_or_else(|| IpcError::not_found(format!("unknown model: {model_id}")))?;
+
+    if !model_id.starts_with("asr-") {
+        return Err(IpcError::new(
+            ErrorCode::InvalidInput,
+            format!("{model_id} is not an ASR model"),
+        ));
+    }
+
+    let dest = state.data_root.join(rel_path);
+    if !dest.exists() {
+        return Err(IpcError::not_found(format!(
+            "model not downloaded: {model_id}"
+        )));
+    }
+
+    // Unload the currently loaded transcriber (if any).
+    state.transcriber.unload().await;
+
+    state.set_asr_model_path(dest);
+
+    tracing::info!(model_id = %model_id, "active ASR switched");
+    Ok(())
+}
+
+/// Return the model id of the currently configured ASR model, or `null`
+/// when no ASR model file exists on disk.
+#[tauri::command]
+#[specta::specta]
+pub fn get_active_asr(state: State<'_, AppState>) -> Option<String> {
+    let path = state.active_asr_path();
+    if !path.exists() {
+        return None;
+    }
+    // Reverse-lookup the catalog id from the filename.
+    let catalog = model_catalog(&state.data_root);
+    for (info, _, _) in &catalog {
+        if info.kind == "asr" {
+            let rel = model_dest_path(&info.id).unwrap_or("");
+            if state.data_root.join(rel) == path {
+                return Some(info.id.clone());
+            }
+        }
+    }
+    None
 }

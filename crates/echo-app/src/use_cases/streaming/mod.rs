@@ -23,6 +23,7 @@
 
 mod sample_pool;
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -159,6 +160,8 @@ impl StreamingPipeline {
             }
         }
 
+        let paused = Arc::new(AtomicBool::new(false));
+
         let join = tokio::spawn(run_pipeline(
             self.capture,
             self.resampler,
@@ -170,6 +173,7 @@ impl StreamingPipeline {
             options,
             event_tx,
             stop_rx,
+            Arc::clone(&paused),
         ));
 
         Ok(StreamingHandle {
@@ -177,6 +181,7 @@ impl StreamingPipeline {
             events: event_rx,
             stop_tx: Some(stop_tx),
             join: Some(join),
+            paused,
         })
     }
 }
@@ -194,6 +199,7 @@ pub struct StreamingHandle {
     events: mpsc::Receiver<TranscriptEvent>,
     stop_tx: Option<oneshot::Sender<()>>,
     join: Option<JoinHandle<()>>,
+    paused: Arc<AtomicBool>,
 }
 
 impl StreamingHandle {
@@ -206,6 +212,33 @@ impl StreamingHandle {
     /// Receive the next event, or `None` when the task has finished.
     pub async fn next_event(&mut self) -> Option<TranscriptEvent> {
         self.events.recv().await
+    }
+
+    /// Pause the pipeline. Audio frames continue to arrive but are
+    /// discarded until [`resume`](Self::resume) is called.
+    pub fn pause(&self) {
+        self.paused.store(true, Ordering::Release);
+    }
+
+    /// Resume the pipeline after a pause.
+    pub fn resume(&self) {
+        self.paused.store(false, Ordering::Release);
+    }
+
+    /// Returns `true` if the pipeline is currently paused.
+    #[must_use]
+    pub fn is_paused(&self) -> bool {
+        self.paused.load(Ordering::Acquire)
+    }
+
+    /// Shared reference to the pause flag.
+    ///
+    /// Callers that only need to flip or check the flag can clone this
+    /// `Arc` and avoid locking the full handle — which matters when
+    /// the drain loop holds the lock waiting for the next event.
+    #[must_use]
+    pub fn paused_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.paused)
     }
 
     /// Signal the background task to stop and wait for it to drain.
@@ -244,6 +277,7 @@ async fn run_pipeline(
     options: StreamingOptions,
     events: mpsc::Sender<TranscriptEvent>,
     mut stop_rx: oneshot::Receiver<()>,
+    paused: Arc<AtomicBool>,
 ) {
     info!(%session_id, vad_enabled = vad.is_some(), "streaming pipeline starting");
 
@@ -287,6 +321,7 @@ async fn run_pipeline(
     let mut total_audio_ms: u32 = 0;
     let mut total_segments: u32 = 0;
     let pipeline_started = Instant::now();
+    let mut was_paused = false;
 
     loop {
         tokio::select! {
@@ -304,6 +339,31 @@ async fn run_pipeline(
                     }
                 }
             }
+        }
+
+        let is_paused = paused.load(Ordering::Acquire);
+
+        // Emit state-change events exactly once per transition.
+        if is_paused && !was_paused {
+            debug!(%session_id, "pipeline paused");
+            let _ = events.send(TranscriptEvent::Paused { session_id }).await;
+            was_paused = true;
+        } else if !is_paused && was_paused {
+            debug!(%session_id, "pipeline resumed");
+            // Reset VAD hidden state — the LSTM would be stale after
+            // the gap, producing unreliable voice/silence decisions.
+            if let Some(v) = vad.as_deref_mut() {
+                v.reset();
+            }
+            let _ = events.send(TranscriptEvent::Resumed { session_id }).await;
+            was_paused = false;
+        }
+
+        // While paused, discard all buffered audio so the pipeline
+        // doesn't accumulate a backlog that would explode on resume.
+        if is_paused {
+            buffer.clear();
+            continue;
         }
 
         while buffer.len() >= chunk_samples {

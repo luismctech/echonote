@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest";
 import {
   canStart,
   canStop,
+  canPause,
+  canResume,
   initialRecordingState,
   recordingReducer,
   statusLabel,
@@ -233,9 +235,12 @@ describe("selectors", () => {
     expect(canStart({ kind: "stopping", sessionId: SESSION })).toBe(false);
   });
 
-  it("canStop only when recording", () => {
+  it("canStop only when recording or paused", () => {
     expect(
       canStop({ kind: "recording", sessionId: SESSION, inputFormat: FORMAT }),
+    ).toBe(true);
+    expect(
+      canStop({ kind: "paused", sessionId: SESSION, inputFormat: FORMAT }),
     ).toBe(true);
     expect(canStop({ kind: "stopping", sessionId: SESSION })).toBe(false);
     expect(canStop({ kind: "idle" })).toBe(false);
@@ -256,6 +261,13 @@ describe("selectors", () => {
     );
     expect(
       statusLabel({
+        kind: "paused",
+        sessionId: SESSION,
+        inputFormat: FORMAT,
+      }),
+    ).toMatch(/paused/);
+    expect(
+      statusLabel({
         kind: "persisted",
         lastTotalSegments: 1,
         lastTotalAudioMs: 0,
@@ -264,5 +276,64 @@ describe("selectors", () => {
     expect(
       statusLabel({ kind: "error", message: "x", recoverable: true }),
     ).toMatch(/error/);
+  });
+});
+
+describe("recordingReducer — pause / resume", () => {
+  const RECORDING: RecordingState = {
+    kind: "recording",
+    sessionId: SESSION,
+    inputFormat: FORMAT,
+  };
+
+  it("Recording + STREAMING_PAUSED → Paused", () => {
+    const s = recordingReducer(RECORDING, { type: "STREAMING_PAUSED" });
+    expect(s).toEqual({
+      kind: "paused",
+      sessionId: SESSION,
+      inputFormat: FORMAT,
+    });
+  });
+
+  it("Paused + STREAMING_RESUMED → Recording", () => {
+    const paused: RecordingState = {
+      kind: "paused",
+      sessionId: SESSION,
+      inputFormat: FORMAT,
+    };
+    const s = recordingReducer(paused, { type: "STREAMING_RESUMED" });
+    expect(s).toEqual(RECORDING);
+  });
+
+  it("Paused + STOP_REQUESTED → Stopping", () => {
+    const paused: RecordingState = {
+      kind: "paused",
+      sessionId: SESSION,
+      inputFormat: FORMAT,
+    };
+    const s = recordingReducer(paused, { type: "STOP_REQUESTED" });
+    expect(s).toEqual({ kind: "stopping", sessionId: SESSION });
+  });
+
+  it("canPause only when recording", () => {
+    expect(canPause(RECORDING)).toBe(true);
+    expect(
+      canPause({ kind: "paused", sessionId: SESSION, inputFormat: FORMAT }),
+    ).toBe(false);
+    expect(canPause({ kind: "idle" })).toBe(false);
+  });
+
+  it("canResume only when paused", () => {
+    expect(
+      canResume({ kind: "paused", sessionId: SESSION, inputFormat: FORMAT }),
+    ).toBe(true);
+    expect(canResume(RECORDING)).toBe(false);
+    expect(canResume({ kind: "idle" })).toBe(false);
+  });
+
+  it("canStart is false when paused", () => {
+    expect(
+      canStart({ kind: "paused", sessionId: SESSION, inputFormat: FORMAT }),
+    ).toBe(false);
   });
 });

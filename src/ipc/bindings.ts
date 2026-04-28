@@ -232,6 +232,141 @@ async unloadModel(kind: string) : Promise<Result<boolean, IpcError>> {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
+},
+/**
+ * Cancel an in-flight model download.
+ * 
+ * Sets the cancel flag for the download loop, which will clean up the
+ * `.part` file and send a `Cancelled` event.
+ */
+async cancelDownload(modelId: string) : Promise<Result<boolean, IpcError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("cancel_download", { modelId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Delete a downloaded model from disk.
+ * 
+ * If the model is currently loaded in memory, it is unloaded first.
+ */
+async deleteModel(modelId: string) : Promise<Result<null, IpcError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("delete_model", { modelId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Set the active LLM model. Unloads the currently loaded model (if
+ * any) and switches the path so the next `ensure_llm()` call loads
+ * the selected model.
+ * 
+ * `model_id` must be an `"llm-*"` id from the catalog whose model
+ * file is already downloaded.
+ */
+async setActiveLlm(modelId: string) : Promise<Result<null, IpcError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("set_active_llm", { modelId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Return the model id of the currently configured LLM, or `null`
+ * when no LLM model file exists on disk.
+ */
+async getActiveLlm() : Promise<string | null> {
+    return await TAURI_INVOKE("get_active_llm");
+},
+/**
+ * Set the active ASR (speech recognition) model. Unloads the currently
+ * loaded transcriber (if any) and switches the path so the next
+ * `ensure_transcriber()` call loads the selected model.
+ * 
+ * `model_id` must be an `"asr-*"` id from the catalog whose model
+ * file is already downloaded.
+ */
+async setActiveAsr(modelId: string) : Promise<Result<null, IpcError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("set_active_asr", { modelId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Return the model id of the currently configured ASR model, or `null`
+ * when no ASR model file exists on disk.
+ */
+async getActiveAsr() : Promise<string | null> {
+    return await TAURI_INVOKE("get_active_asr");
+},
+/**
+ * List all user-defined custom templates.
+ */
+async listCustomTemplates() : Promise<Result<CustomTemplate[], IpcError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("list_custom_templates") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Create a new custom template.
+ * 
+ * The `name` and `prompt` fields are required and must be non-empty.
+ * Returns the newly created template with its generated id.
+ */
+async createCustomTemplate(name: string, prompt: string) : Promise<Result<CustomTemplate, IpcError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("create_custom_template", { name, prompt }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Update an existing custom template's name and/or prompt.
+ */
+async updateCustomTemplate(id: CustomTemplateId, name: string, prompt: string) : Promise<Result<CustomTemplate, IpcError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("update_custom_template", { id, name, prompt }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Delete a custom template by id.
+ */
+async deleteCustomTemplate(id: CustomTemplateId) : Promise<Result<null, IpcError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("delete_custom_template", { id }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Generate a summary using a user-defined custom template.
+ * 
+ * Loads the custom template by `template_id`, then runs the LLM with
+ * the user's prompt. The result is stored as
+ * [`echo_domain::SummaryContent::Custom`].
+ */
+async summarizeWithCustomTemplate(meetingId: MeetingId, templateId: CustomTemplateId) : Promise<Result<Summary, IpcError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("summarize_with_custom_template", { meetingId, templateId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
 }
 }
 
@@ -372,6 +507,30 @@ export type ChatRole =
  */
 "assistant"
 /**
+ * A user-created summary prompt template.
+ */
+export type CustomTemplate = { 
+/**
+ * Stable identifier.
+ */
+id: CustomTemplateId; 
+/**
+ * Short display name shown in the template selector (e.g.
+ * "Product Standup", "Board Meeting").
+ */
+name: string; 
+/**
+ * The system-prompt text sent to the LLM. Should describe the
+ * role, desired output format, and any constraints.
+ * Example: "You are a product standup summarizer. Output a JSON
+ * object with keys: blockers, updates, askForHelp."
+ */
+prompt: string }
+/**
+ * Strongly-typed identifier for a [`CustomTemplate`].
+ */
+export type CustomTemplateId = string
+/**
  * A term/definition pair extracted from a lecture or class
 
  */
@@ -399,7 +558,11 @@ export type DownloadEvent =
 /**
  * Download failed.
  */
-{ kind: "failed"; error: string }
+{ kind: "failed"; error: string } | 
+/**
+ * Download was cancelled by the user.
+ */
+{ kind: "cancelled" }
 /**
  * Machine-readable error codes the frontend can match on.
  * 
@@ -841,7 +1004,12 @@ export type Summary =
 /**
  * Graceful degradation when JSON parsing fails twice.
  */
-{ template: "freeText"; text: string }) & { 
+{ template: "freeText"; text: string } | 
+/**
+ * User-defined custom template. The `template_name` identifies
+ * which [`crate::CustomTemplate`] produced this summary.
+ */
+{ template: "custom"; template_name: string; text: string }) & { 
 /**
  * Stable identifier.
  */
@@ -934,8 +1102,8 @@ export type Result<T, E> =
 	| { status: "ok"; data: T }
 	| { status: "error"; error: E };
 
-// @ts-ignore auto-generated by tauri-specta
-function __makeEvents__<T extends Record<string, any>>(
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+export function __makeEvents__<T extends Record<string, any>>(
 	mappings: Record<keyof T, string>,
 ) {
 	return new Proxy(

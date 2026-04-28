@@ -28,6 +28,8 @@ import {
   type FormEvent,
   type ReactNode,
 } from "react";
+import { useTranslation } from "react-i18next";
+import i18next from "i18next";
 
 import type { UseChat, DisplayMessage } from "../../hooks/useChat";
 import type { SegmentId } from "../../types/chat";
@@ -45,6 +47,7 @@ export function ChatPanel({
   chat: UseChat;
   onScrollToSegment?: (segmentId: SegmentId) => void;
 }>) {
+  const { t } = useTranslation();
   const [input, setInput] = useState("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -109,12 +112,12 @@ export function ChatPanel({
 
   return (
     <section
-      aria-label="Chat"
+      aria-label={t("chat.label")}
       className="flex flex-col gap-2 rounded-md border border-zinc-100 bg-zinc-50 p-3 dark:border-zinc-900 dark:bg-zinc-900"
     >
       {/* Header */}
       <header className="flex items-center justify-between gap-2">
-        <h3 className="text-sm font-medium">Chat</h3>
+        <h3 className="text-sm font-medium">{t("chat.label")}</h3>
         {chat.model && (
           <span className="text-[10px] text-zinc-400">{chat.model}</span>
         )}
@@ -124,7 +127,7 @@ export function ChatPanel({
       <div className="flex min-h-[120px] max-h-[320px] flex-col gap-2 overflow-y-auto rounded-md border border-zinc-100 bg-white p-2 dark:border-zinc-800 dark:bg-zinc-950">
         {isEmpty && (
           <p className="py-4 text-center text-xs text-zinc-400">
-            Ask a question about this meeting's transcript.
+            {t("chat.description")}
           </p>
         )}
         {chat.messages.map((msg, i) => (
@@ -172,7 +175,7 @@ export function ChatPanel({
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={handleKeyDown}
-          placeholder="Ask about this meeting…"
+          placeholder={t("chat.placeholder")}
           rows={1}
           disabled={chat.streaming}
           className="min-h-[36px] flex-1 resize-none rounded-md border border-zinc-200 bg-white px-2 py-1.5 text-sm placeholder:text-zinc-400 focus:border-zinc-400 focus:outline-none disabled:opacity-60 dark:border-zinc-700 dark:bg-zinc-900 dark:placeholder:text-zinc-600 dark:focus:border-zinc-500"
@@ -182,7 +185,7 @@ export function ChatPanel({
           disabled={chat.streaming || !input.trim()}
           className="rounded-md border border-zinc-200 bg-white px-3 py-1.5 text-xs font-medium hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-60 dark:border-zinc-800 dark:bg-zinc-900 dark:hover:bg-zinc-800"
         >
-          Send
+          {t("chat.send")}
         </button>
       </form>
     </section>
@@ -248,7 +251,7 @@ function AssistantContent({
       {parts}
       {hadCitations === false && (
         <span className="mt-1 block text-[10px] italic text-zinc-400">
-          respuesta sin citas verificables
+          {i18next.t("chat.noCitations")}
         </span>
       )}
     </span>
@@ -284,7 +287,7 @@ function splitWithCitations(
           key={`cit-${match.index}`}
           type="button"
           onClick={() => onClick?.(segId)}
-          title={`Scroll to segment ${segId.slice(0, 8)}…`}
+          title={i18next.t("chat.scrollToSegment", { id: segId.slice(0, 8) })}
           className="mx-0.5 inline-flex items-center rounded bg-blue-100 px-1 py-0.5 font-mono text-[10px] text-blue-700 hover:bg-blue-200 dark:bg-blue-900/40 dark:text-blue-300 dark:hover:bg-blue-900/60"
         >
           {segId.slice(0, 8)}

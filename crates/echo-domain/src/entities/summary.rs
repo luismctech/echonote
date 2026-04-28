@@ -241,6 +241,16 @@ pub enum SummaryContent {
         /// Whatever the model produced, verbatim.
         text: String,
     },
+
+    /// User-defined custom template. The `template_name` identifies
+    /// which [`crate::CustomTemplate`] produced this summary.
+    #[serde(rename = "custom")]
+    Custom {
+        /// Display name of the custom template (e.g. "Product Standup").
+        template_name: String,
+        /// The LLM output, stored verbatim.
+        text: String,
+    },
 }
 
 impl SummaryContent {
@@ -257,6 +267,7 @@ impl SummaryContent {
             SummaryContent::SalesCall { .. } => "salesCall",
             SummaryContent::Lecture { .. } => "lecture",
             SummaryContent::FreeText { .. } => "freeText",
+            SummaryContent::Custom { .. } => "custom",
         }
     }
 }

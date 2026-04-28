@@ -1,4 +1,5 @@
 import { memo } from "react";
+import { useTranslation } from "react-i18next";
 
 import { formatDate, formatDurationMs } from "../../lib/format";
 import type { MeetingId, MeetingSummary } from "../../types/meeting";
@@ -15,10 +16,11 @@ export const MeetingsList = memo(function MeetingsList({
   onSelect: (m: MeetingSummary) => void;
   onDelete: (m: MeetingSummary) => void;
 }) {
+  const { t } = useTranslation();
   if (meetings.length === 0) {
     return (
       <p className="text-xs text-zinc-400">
-        No meetings yet. Press <strong>Start</strong> to record one.
+        {t("sidebar.noMeetings")}
       </p>
     );
   }
@@ -44,8 +46,7 @@ export const MeetingsList = memo(function MeetingsList({
                   {m.title}
                 </span>
                 <span className="text-[10px] tabular-nums text-zinc-500 dark:text-zinc-400">
-                  {formatDate(m.startedAt)} · {formatDurationMs(m.durationMs)} ·{" "}
-                  {m.segmentCount} seg
+                  {formatDate(m.startedAt)} · {formatDurationMs(m.durationMs)}
                 </span>
               </button>
               <button
@@ -54,7 +55,7 @@ export const MeetingsList = memo(function MeetingsList({
                   e.stopPropagation();
                   onDelete(m);
                 }}
-                aria-label={`Delete ${m.title}`}
+                aria-label={t("sidebar.deleteConfirm", { title: m.title })}
                 className="opacity-0 transition-opacity group-hover:opacity-100 text-zinc-400 hover:text-rose-500"
               >
                 ×

@@ -95,4 +95,12 @@ export type TranscriptEvent =
       type: "failed";
       sessionId: StreamingSessionId;
       message: string;
+    }
+  | {
+      type: "paused";
+      sessionId: StreamingSessionId;
+    }
+  | {
+      type: "resumed";
+      sessionId: StreamingSessionId;
     };

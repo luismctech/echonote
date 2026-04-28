@@ -155,6 +155,18 @@ pub enum TranscriptEvent {
         /// in the backend and not exposed across the wire.
         message: String,
     },
+    /// The pipeline was paused. Audio frames are discarded until resumed.
+    #[serde(rename_all = "camelCase")]
+    Paused {
+        /// Session id.
+        session_id: StreamingSessionId,
+    },
+    /// The pipeline was resumed after a pause.
+    #[serde(rename_all = "camelCase")]
+    Resumed {
+        /// Session id.
+        session_id: StreamingSessionId,
+    },
 }
 
 impl TranscriptEvent {
@@ -166,7 +178,9 @@ impl TranscriptEvent {
             | Self::Chunk { session_id, .. }
             | Self::Skipped { session_id, .. }
             | Self::Stopped { session_id, .. }
-            | Self::Failed { session_id, .. } => *session_id,
+            | Self::Failed { session_id, .. }
+            | Self::Paused { session_id, .. }
+            | Self::Resumed { session_id, .. } => *session_id,
         }
     }
 }

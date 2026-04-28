@@ -47,6 +47,46 @@ use std::path::PathBuf;
 use llama_cpp_2::llama_backend::LlamaBackend;
 use llama_cpp_2::model::LlamaModel;
 
+// ---------------------------------------------------------------------------
+// Think-block stripping (Qwen 3 reasoning suppression)
+// ---------------------------------------------------------------------------
+
+/// Remove `<think>…</think>` reasoning blocks that Qwen 3 emits when
+/// its internal "thinking" mode is active.  These blocks are never
+/// useful to end-users — they contain raw chain-of-thought reasoning
+/// that adds noise to summaries and chat replies.
+///
+/// Handles multiple blocks, nested whitespace, and a trailing
+/// unclosed `<think>` (the model hit max_tokens mid-thought).
+pub(crate) fn strip_think_blocks(text: &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    let mut remaining = text;
+
+    while let Some(start) = remaining.find("<think>") {
+        // Keep everything before <think>
+        result.push_str(&remaining[..start]);
+
+        // Find matching </think>
+        let after_tag = &remaining[start + "<think>".len()..];
+        if let Some(end) = after_tag.find("</think>") {
+            remaining = &after_tag[end + "</think>".len()..];
+        } else {
+            // Unclosed <think> — discard everything after it
+            remaining = "";
+            break;
+        }
+    }
+
+    result.push_str(remaining);
+
+    // Trim leading whitespace left by a stripped block at the start
+    let trimmed = result.trim_start();
+    if trimmed.len() != result.len() {
+        return trimmed.to_string();
+    }
+    result
+}
+
 /// Per-process loaded model + the knobs needed to spawn a per-request
 /// context.
 ///
@@ -71,4 +111,52 @@ pub(crate) struct LoadedModel {
     /// Optional decoder thread count. `None` defers to llama.cpp's
     /// default (typically `num_cpus`). Useful in tests.
     pub n_threads: Option<i32>,
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strip_single_think_block() {
+        let input = "<think>\nI need to analyze this.\n</think>\nHere is the summary.";
+        assert_eq!(strip_think_blocks(input), "Here is the summary.");
+    }
+
+    #[test]
+    fn strip_think_block_preserves_content_before_and_after() {
+        let input = "Prefix <think>reasoning</think> suffix";
+        assert_eq!(strip_think_blocks(input), "Prefix  suffix");
+    }
+
+    #[test]
+    fn strip_multiple_think_blocks() {
+        let input = "<think>a</think>Hello <think>b</think>world";
+        assert_eq!(strip_think_blocks(input), "Hello world");
+    }
+
+    #[test]
+    fn strip_unclosed_think_block() {
+        let input = "<think>model hit max_tokens before closing";
+        assert_eq!(strip_think_blocks(input), "");
+    }
+
+    #[test]
+    fn no_think_block_returns_unchanged() {
+        let input = "Just a plain response with no tags.";
+        assert_eq!(strip_think_blocks(input), input);
+    }
+
+    #[test]
+    fn strip_think_block_with_multiline_reasoning() {
+        let input = "<think>\nStep 1: read transcript\nStep 2: summarize\nStep 3: format\n</think>\n\n# Meeting Summary\n\nWe discussed...";
+        assert_eq!(
+            strip_think_blocks(input),
+            "# Meeting Summary\n\nWe discussed..."
+        );
+    }
 }

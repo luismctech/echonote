@@ -46,6 +46,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
+import { useTranslation } from "react-i18next";
 
 import { useMeetingDetail } from "../hooks/useMeetingDetail";
 import { listMeetings, searchMeetings } from "../ipc/client";
@@ -78,6 +79,7 @@ export type MeetingsContextValue = {
     speakerId: SpeakerId,
     label: string | null,
   ) => Promise<void>;
+  renameMeeting: (title: string) => Promise<void>;
   // Search
   search: {
     input: string;
@@ -107,12 +109,13 @@ export function useMeetings(): MeetingsContextValue {
 const SEARCH_DEBOUNCE_MS = 200;
 
 export function MeetingsProvider({ children }: { children: ReactNode }) {
+  const { t } = useTranslation();
   // Listing -----------------------------------------------------------------
   const [meetings, setMeetings] = useState<MeetingSummary[]>([]);
   const [meetingsError, setMeetingsError] = useState<string | null>(null);
 
   const refreshList = useIpcAction(
-    "Couldn't refresh meetings list.",
+    t("toast.refreshFailed"),
     listMeetings,
   );
   const refreshMeetings = useCallback(async () => {
@@ -121,19 +124,19 @@ export function MeetingsProvider({ children }: { children: ReactNode }) {
     if (rows === undefined) {
       // useIpcAction already toasted; mirror the message inline so it
       // stays visible after the toast auto-dismisses.
-      setMeetingsError("Couldn't refresh meetings list.");
+      setMeetingsError(t("toast.refreshFailed"));
       return;
     }
     setMeetings(rows);
     setMeetingsError(null);
-  }, [refreshList]);
+  }, [refreshList, t]);
 
   // View --------------------------------------------------------------------
   const [view, setView] = useState<MainView>({ kind: "live" });
   const goToLive = useCallback(() => setView({ kind: "live" }), []);
 
   // Meeting actions (open / rename / delete) compose useMeetingDetail.
-  const { openMeeting, renameSpeakerAction, deleteMeetingAction } =
+  const { openMeeting, renameMeetingAction, renameSpeakerAction, deleteMeetingAction } =
     useMeetingDetail({
       view,
       setView,
@@ -198,6 +201,7 @@ export function MeetingsProvider({ children }: { children: ReactNode }) {
       goToMeeting: openMeeting,
       deleteMeeting: deleteMeetingAction,
       renameSpeaker: renameSpeakerAction,
+      renameMeeting: renameMeetingAction,
       search: {
         input: searchInput,
         query: searchQuery,
@@ -216,6 +220,7 @@ export function MeetingsProvider({ children }: { children: ReactNode }) {
       openMeeting,
       deleteMeetingAction,
       renameSpeakerAction,
+      renameMeetingAction,
       searchInput,
       searchQuery,
       searchHits,

@@ -15,13 +15,14 @@ pub mod llm;
 pub mod meetings;
 pub mod models;
 pub mod streaming;
+pub mod templates;
 
 // Re-export public items for non-macro usage (e.g. `commands::AppState`).
 // The `tauri_specta::collect_commands!` macro in `lib.rs` references
 // sub-modules directly: `commands::streaming::start_streaming`, etc.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
@@ -133,7 +134,9 @@ pub struct AppState {
     pub(crate) resampler: Arc<dyn Resampler>,
     /// Lazily-loaded whisper transcriber (concrete so `LazyModel<T>` stays `Sized`).
     pub(crate) transcriber: LazyModel<WhisperCppTranscriber>,
-    pub(crate) model_path: PathBuf,
+    /// Path to the local ASR model. Behind a `RwLock` so
+    /// `set_active_asr` can switch models at runtime.
+    pub(crate) model_path: std::sync::RwLock<PathBuf>,
     /// Where to find the speaker embedder ONNX.
     pub(crate) embed_model_path: PathBuf,
     pub(crate) store: Arc<dyn MeetingStore>,
@@ -141,8 +144,9 @@ pub struct AppState {
     pub(crate) rename_speaker: Arc<RenameSpeaker>,
     /// In-flight streaming sessions.
     pub(crate) sessions: Arc<Mutex<HashMap<StreamingSessionId, SessionEntry>>>,
-    /// Path to the local LLM (.gguf).
-    pub(crate) llm_model_path: PathBuf,
+    /// Path to the local LLM (.gguf). Behind a `RwLock` so
+    /// `set_active_llm` can switch models at runtime.
+    pub(crate) llm_model_path: std::sync::RwLock<PathBuf>,
     /// Lazily-loaded LLM, held as the concrete [`LlamaCppLlm`] so we
     /// can derive both `LlmModel` and `ChatAssistant` from the same
     /// loaded weights.
@@ -151,9 +155,16 @@ pub struct AppState {
     pub(crate) vad_model_path: PathBuf,
     /// Lazily-loaded Silero VAD template.
     pub(crate) vad: LazyModel<SileroVad>,
-    /// Model IDs currently being downloaded. Prevents concurrent
-    /// downloads of the same model from corrupting the `.part` file.
-    pub(crate) in_flight_downloads: Arc<Mutex<std::collections::HashSet<String>>>,
+    /// Model IDs currently being downloaded, mapped to a cancel flag.
+    /// Setting the flag to `true` signals the download loop to abort.
+    pub(crate) in_flight_downloads: Arc<
+        Mutex<std::collections::HashMap<String, std::sync::Arc<std::sync::atomic::AtomicBool>>>,
+    >,
+    /// Root directory for model files and other data assets.
+    /// In debug builds this is the workspace root; in release builds
+    /// it falls back to the Tauri `appDataDir` so models are
+    /// downloaded to a writable, OS-standard location.
+    pub(crate) data_root: PathBuf,
 }
 
 use echo_domain::StreamingSessionId;
@@ -161,12 +172,42 @@ use echo_domain::StreamingSessionId;
 pub(crate) struct SessionEntry {
     pub join: JoinHandle<()>,
     pub handle: Arc<AsyncMutex<StreamingHandle>>,
+    /// Shared pause flag extracted before wrapping the handle in a
+    /// mutex.  `pause_streaming` / `resume_streaming` use this
+    /// directly so they never contend with the drain loop's lock.
+    pub paused: Arc<std::sync::atomic::AtomicBool>,
+    /// RAII guard — prevents the OS from sleeping while recording.
+    /// Dropped automatically when the session entry is removed.
+    pub _keep_awake: Option<keepawake::KeepAwake>,
 }
 
 impl AppState {
     /// Cheap clone of the session-map handle.
     pub(crate) fn sessions_handle(&self) -> Arc<Mutex<HashMap<StreamingSessionId, SessionEntry>>> {
         self.sessions.clone()
+    }
+
+    /// Update the LLM model path at runtime. Must be called after
+    /// `llm.unload()` so the next `ensure_llm()` loads the new model.
+    pub(crate) fn set_llm_model_path(&self, path: PathBuf) {
+        *self.llm_model_path.write().unwrap() = path;
+    }
+
+    /// Read the current LLM model path.
+    pub(crate) fn active_llm_path(&self) -> PathBuf {
+        self.llm_model_path.read().unwrap().clone()
+    }
+
+    /// Update the ASR model path at runtime. Must be called after
+    /// `transcriber.unload()` so the next `ensure_transcriber()` loads
+    /// the new model.
+    pub(crate) fn set_asr_model_path(&self, path: PathBuf) {
+        *self.model_path.write().unwrap() = path;
+    }
+
+    /// Read the current ASR model path.
+    pub(crate) fn active_asr_path(&self) -> PathBuf {
+        self.model_path.read().unwrap().clone()
     }
 
     /// Ordered shutdown sequence invoked from the Tauri `Exit` hook.
@@ -203,15 +244,33 @@ impl AppState {
     /// Build the shared state. Async because opening the SQLite database
     /// runs migrations, which is I/O.
     pub async fn initialize(app_data_dir: Option<PathBuf>) -> Result<Self, IpcError> {
-        let model_path =
-            resolve_asset_path(std::env::var("ECHO_ASR_MODEL").ok(), preferred_asr_model());
+        // In release builds prefer the Tauri app-data directory so
+        // downloaded models land in an OS-writable location instead of
+        // the (non-existent) compile-time source tree.
+        let data_root = if cfg!(debug_assertions) {
+            workspace_root()
+        } else {
+            app_data_dir.clone().unwrap_or_else(workspace_root)
+        };
+        tracing::info!(data_root = %data_root.display(), "resolved data root for model assets");
+
+        let model_path = resolve_asset_path(
+            &data_root,
+            std::env::var("ECHO_ASR_MODEL").ok(),
+            preferred_asr_model(&data_root),
+        );
         let embed_model_path = resolve_asset_path(
+            &data_root,
             std::env::var("ECHO_EMBED_MODEL").ok(),
             "models/embedder/eres2net_en_voxceleb.onnx",
         );
-        let llm_model_path =
-            resolve_asset_path(std::env::var("ECHO_LLM_MODEL").ok(), preferred_llm_model());
+        let llm_model_path = resolve_asset_path(
+            &data_root,
+            std::env::var("ECHO_LLM_MODEL").ok(),
+            preferred_llm_model(&data_root),
+        );
         let vad_model_path = resolve_asset_path(
+            &data_root,
             std::env::var("ECHO_VAD_MODEL").ok(),
             "models/vad/silero_vad.onnx",
         );
@@ -238,17 +297,18 @@ impl AppState {
             capture: Arc::new(RoutingAudioCapture::with_default_adapters()),
             resampler: Arc::new(RubatoResamplerAdapter::new()),
             transcriber: LazyModel::new(),
-            model_path,
+            model_path: std::sync::RwLock::new(model_path),
             embed_model_path,
             store,
             recorder,
             rename_speaker,
             sessions: Arc::new(Mutex::new(HashMap::new())),
-            llm_model_path,
+            llm_model_path: std::sync::RwLock::new(llm_model_path),
             llm: LazyModel::new(),
             vad_model_path,
             vad: LazyModel::new(),
-            in_flight_downloads: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            in_flight_downloads: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            data_root,
         })
     }
 
@@ -258,22 +318,23 @@ impl AppState {
 
     /// Lazily load the local LLM (concrete type for adapters).
     pub(crate) async fn ensure_llm_concrete(&self) -> Result<Arc<LlamaCppLlm>, IpcError> {
-        let model_path = self.llm_model_path.clone();
+        let model_path = self.llm_model_path.read().unwrap().clone();
+        let data_root = self.data_root.clone();
         self.llm
             .get_or_init(|| async move {
                 let path = if model_path.exists() {
                     model_path.clone()
                 } else {
                     let fresh = resolve_asset_path(
+                        &data_root,
                         std::env::var("ECHO_LLM_MODEL").ok(),
-                        preferred_llm_model(),
+                        preferred_llm_model(&data_root),
                     );
                     if !fresh.exists() {
-                        return Err(IpcError::model_not_ready(format!(
-                            "LLM model not found at {}. Download one from the Models panel \
-                             or run `scripts/download-models.sh llm`.",
-                            model_path.display()
-                        )));
+                        return Err(IpcError::model_not_ready(
+                            "No language model installed. Open the Models panel and download one to enable summaries and chat."
+                                .to_string(),
+                        ));
                     }
                     tracing::info!(path = %fresh.display(), "re-resolved LLM path after runtime download");
                     fresh
@@ -313,11 +374,10 @@ impl AppState {
     ) -> Result<Box<dyn Diarizer>, IpcError> {
         let path = override_path.unwrap_or_else(|| self.embed_model_path.clone());
         if !path.exists() {
-            return Err(IpcError::model_not_ready(format!(
-                "speaker embedder not found at {}. Run `scripts/download-models.sh embed` \
-                 or set ECHO_EMBED_MODEL.",
-                path.display()
-            )));
+            return Err(IpcError::model_not_ready(
+                "Speaker embedder model not installed. Open the Models panel and download the ERes2Net model to enable speaker identification."
+                    .to_string(),
+            ));
         }
         let started = std::time::Instant::now();
         let embedder = Eres2NetEmbedder::new(&path).map_err(|e| {
@@ -342,9 +402,8 @@ impl AppState {
         if !self.vad_model_path.exists() {
             tracing::warn!(
                 vad_model = %self.vad_model_path.display(),
-                "Silero VAD model not found; falling back to RMS gate. Run \
-                 `scripts/download-models.sh vad` for sharper voice/non-voice \
-                 discrimination (recommended)."
+                "Silero VAD model not installed; falling back to RMS gate. \
+                 Download it from the Models panel for better voice detection."
             );
             return Ok(None);
         }
@@ -376,22 +435,23 @@ impl AppState {
 
     /// Lazily load the whisper transcriber.
     pub(crate) async fn ensure_transcriber(&self) -> Result<Arc<dyn Transcriber>, IpcError> {
-        let asr_path = self.model_path.clone();
+        let asr_path = self.model_path.read().unwrap().clone();
+        let data_root = self.data_root.clone();
         self.transcriber
             .get_or_init(|| async move {
                 let path = if asr_path.exists() {
                     asr_path.clone()
                 } else {
                     let fresh = resolve_asset_path(
+                        &data_root,
                         std::env::var("ECHO_ASR_MODEL").ok(),
-                        preferred_asr_model(),
+                        preferred_asr_model(&data_root),
                     );
                     if !fresh.exists() {
-                        return Err(IpcError::model_not_ready(format!(
-                            "ASR model not found at {}. Download one from the Models panel \
-                             or run `scripts/download-models.sh`.",
-                            asr_path.display()
-                        )));
+                        return Err(IpcError::model_not_ready(
+                            "No speech recognition model installed. Open the Models panel and download a Whisper model to start transcribing."
+                                .to_string(),
+                        ));
                     }
                     tracing::info!(path = %fresh.display(), "re-resolved ASR path after runtime download");
                     fresh
@@ -440,7 +500,7 @@ fn resolve_db_path(app_data_dir: Option<PathBuf>) -> PathBuf {
     workspace_root().join("echonote.db")
 }
 
-fn preferred_llm_model() -> &'static str {
+fn preferred_llm_model(root: &Path) -> &'static str {
     const CANDIDATES: &[&str] = &[
         "models/llm/Qwen3-30B-A3B-Q4_K_M.gguf",
         "models/llm/Qwen3-14B-Q4_K_M.gguf",
@@ -448,7 +508,6 @@ fn preferred_llm_model() -> &'static str {
         "models/llm/qwen2.5-7b-instruct-q4_k_m.gguf",
         "models/llm/qwen2.5-3b-instruct-q4_k_m.gguf",
     ];
-    let root = workspace_root();
     for rel in CANDIDATES {
         if root.join(rel).exists() {
             return rel;
@@ -457,7 +516,7 @@ fn preferred_llm_model() -> &'static str {
     "models/llm/Qwen3-14B-Q4_K_M.gguf"
 }
 
-fn preferred_asr_model() -> &'static str {
+fn preferred_asr_model(root: &Path) -> &'static str {
     const CANDIDATES: &[&str] = &[
         "models/asr/ggml-large-v3-turbo-es.bin",
         "models/asr/ggml-large-v3-turbo.bin",
@@ -472,7 +531,6 @@ fn preferred_asr_model() -> &'static str {
         "models/asr/ggml-small.en.bin",
         "models/asr/ggml-tiny.en.bin",
     ];
-    let root = workspace_root();
     for rel in CANDIDATES {
         if root.join(rel).exists() {
             return rel;
@@ -481,26 +539,24 @@ fn preferred_asr_model() -> &'static str {
     "models/asr/ggml-large-v3-turbo.bin"
 }
 
-fn resolve_asset_path(override_value: Option<String>, default_relative: &str) -> PathBuf {
-    let workspace_root = workspace_root();
-
+fn resolve_asset_path(
+    root: &Path,
+    override_value: Option<String>,
+    default_relative: &str,
+) -> PathBuf {
     if let Some(raw) = override_value.filter(|s| !s.trim().is_empty()) {
         let raw_path = PathBuf::from(&raw);
         if raw_path.is_absolute() {
             return raw_path;
         }
-        let rooted = workspace_root.join(&raw_path);
+        let rooted = root.join(&raw_path);
         if rooted.exists() {
             return rooted;
         }
         return raw_path;
     }
 
-    let rooted = workspace_root.join(default_relative);
-    if rooted.exists() {
-        return rooted;
-    }
-    rooted
+    root.join(default_relative)
 }
 
 /// Best-effort workspace root: the directory above `src-tauri/`.

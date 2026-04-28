@@ -72,6 +72,33 @@ pub async fn search_meetings(
         .map_err(|e| IpcError::storage(format!("search meetings: {e}")))
 }
 
+/// Rename a meeting's title. Returns the updated summary so the
+/// sidebar and detail view can re-render without an extra round-trip.
+#[tauri::command]
+#[specta::specta]
+pub async fn rename_meeting(
+    state: State<'_, AppState>,
+    id: MeetingId,
+    title: String,
+) -> Result<MeetingSummary, IpcError> {
+    let found = state
+        .store
+        .rename_meeting(id, &title)
+        .await
+        .map_err(|e| IpcError::storage(format!("rename meeting: {e}")))?;
+    if !found {
+        return Err(IpcError::not_found(format!("meeting {id} not found")));
+    }
+    // Return updated summary list entry so sidebar stays in sync.
+    state
+        .store
+        .get(id)
+        .await
+        .map_err(|e| IpcError::storage(format!("reload meeting: {e}")))?
+        .map(|m| m.summary)
+        .ok_or_else(|| IpcError::not_found(format!("meeting {id} disappeared after rename")))
+}
+
 /// Rename a diarized speaker (or clear the label back to anonymous
 /// by passing `null`/empty). Returns the freshly-loaded meeting so
 /// the frontend can re-render speakers + segment chips from a single

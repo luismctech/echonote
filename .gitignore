@@ -125,3 +125,8 @@ fixtures/audio/
 # Bench reports
 # -----------------------------------------------------------------------------
 target/bench-reports/
+
+# -----------------------------------------------------------------------------
+# Runtime data (custom templates are stored in app data dir at runtime)
+# -----------------------------------------------------------------------------
+custom_templates.json

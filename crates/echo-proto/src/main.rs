@@ -814,6 +814,12 @@ async fn run_stream(
             Some(TranscriptEvent::Failed { message, .. }) => {
                 anyhow::bail!("pipeline failed: {message}");
             }
+            Some(TranscriptEvent::Paused { .. }) => {
+                println!("  ‖ paused");
+            }
+            Some(TranscriptEvent::Resumed { .. }) => {
+                println!("  ▸ resumed");
+            }
             None => break,
         }
     }
