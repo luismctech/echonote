@@ -532,6 +532,7 @@ prompt: string }
 export type CustomTemplateId = string
 /**
  * A term/definition pair extracted from a lecture or class
+
  */
 export type Definition = { 
 /**

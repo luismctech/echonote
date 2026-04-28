@@ -3,11 +3,9 @@
 </p>
 <h1 align="center">EchoNote</h1>
 
-<p align="center">
-  <a href="https://github.com/luismctech/echonote/actions/workflows/ci.yml"><img src="https://github.com/luismctech/echonote/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI" /></a>
-  <a href="./LICENSE"><img src="https://img.shields.io/badge/License-AGPL--3.0-blue.svg" alt="License: AGPL-3.0" /></a>
-  <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey" alt="Platform" />
-</p>
+[![CI](https://github.com/luismctech/echonote/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/luismctech/echonote/actions/workflows/ci.yml)
+[![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](./LICENSE)
+[![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey)]()
 
 **EchoNote** is a free, open-source desktop app that transcribes and summarizes your meetings using AI — entirely on your device. No cloud services, no bots joining your calls, no subscriptions.
 
@@ -130,6 +128,7 @@ Models are **not** downloaded automatically — you choose which ones to install
 - [ ] System audio capture (transcribe the other side of the call)
 - [ ] Encrypted local storage
 - [ ] Setup wizard with hardware profile detection
+- [ ] More summary templates (1:1, sprint review, interview, sales call)
 
 ---
 
