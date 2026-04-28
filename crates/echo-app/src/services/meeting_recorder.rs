@@ -446,6 +446,9 @@ mod tests {
         ) -> Result<Option<echo_domain::Summary>, DomainError> {
             unreachable!()
         }
+        async fn rename_meeting(&self, _: MeetingId, _: &str) -> Result<bool, DomainError> {
+            unreachable!()
+        }
     }
 
     fn segment(start_ms: u32, end_ms: u32, text: &str) -> Segment {

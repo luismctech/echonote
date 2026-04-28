@@ -331,11 +331,10 @@ impl AppState {
                         preferred_llm_model(&data_root),
                     );
                     if !fresh.exists() {
-                        return Err(IpcError::model_not_ready(format!(
-                            "LLM model not found at {}. Download one from the Models panel \
-                             or run `scripts/download-models.sh llm`.",
-                            model_path.display()
-                        )));
+                        return Err(IpcError::model_not_ready(
+                            "No language model installed. Open the Models panel and download one to enable summaries and chat."
+                                .to_string(),
+                        ));
                     }
                     tracing::info!(path = %fresh.display(), "re-resolved LLM path after runtime download");
                     fresh
@@ -375,11 +374,10 @@ impl AppState {
     ) -> Result<Box<dyn Diarizer>, IpcError> {
         let path = override_path.unwrap_or_else(|| self.embed_model_path.clone());
         if !path.exists() {
-            return Err(IpcError::model_not_ready(format!(
-                "speaker embedder not found at {}. Run `scripts/download-models.sh embed` \
-                 or set ECHO_EMBED_MODEL.",
-                path.display()
-            )));
+            return Err(IpcError::model_not_ready(
+                "Speaker embedder model not installed. Open the Models panel and download the ERes2Net model to enable speaker identification."
+                    .to_string(),
+            ));
         }
         let started = std::time::Instant::now();
         let embedder = Eres2NetEmbedder::new(&path).map_err(|e| {
@@ -404,9 +402,8 @@ impl AppState {
         if !self.vad_model_path.exists() {
             tracing::warn!(
                 vad_model = %self.vad_model_path.display(),
-                "Silero VAD model not found; falling back to RMS gate. Run \
-                 `scripts/download-models.sh vad` for sharper voice/non-voice \
-                 discrimination (recommended)."
+                "Silero VAD model not installed; falling back to RMS gate. \
+                 Download it from the Models panel for better voice detection."
             );
             return Ok(None);
         }
@@ -451,11 +448,10 @@ impl AppState {
                         preferred_asr_model(&data_root),
                     );
                     if !fresh.exists() {
-                        return Err(IpcError::model_not_ready(format!(
-                            "ASR model not found at {}. Download one from the Models panel \
-                             or run `scripts/download-models.sh`.",
-                            asr_path.display()
-                        )));
+                        return Err(IpcError::model_not_ready(
+                            "No speech recognition model installed. Open the Models panel and download a Whisper model to start transcribing."
+                                .to_string(),
+                        ));
                     }
                     tracing::info!(path = %fresh.display(), "re-resolved ASR path after runtime download");
                     fresh

@@ -15,8 +15,10 @@
  * "Regenerate" targets the right one.
  */
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
+import Markdown from "react-markdown";
+import { CopyButton } from "../../components/CopyButton";
 import { LogoAnimated } from "../../components/Logo";
 import { formatDate } from "../../lib/format";
 import type { Summary, TemplateId } from "../../types/summary";
@@ -44,14 +46,22 @@ export function SummaryPanel({
     refreshCustomTemplates();
   }, []);
 
+  const getSummaryText = useCallback(() => {
+    if (!summary) return "";
+    return summaryToPlainText(summary);
+  }, [summary]);
+
   return (
     <section
-      aria-label="Summary"
-      className="flex flex-col gap-2 rounded-md border border-zinc-100 bg-zinc-50 p-3 dark:border-zinc-900 dark:bg-zinc-900/40"
+      aria-label={t("summary.label")}
+      className="flex min-h-0 flex-col"
     >
-      <header className="flex items-center justify-between gap-2">
-        <h3 className="text-sm font-medium">Summary</h3>
-        <div className="flex items-center gap-2">
+      {/* ── Header bar (never scrolls) ── */}
+      <div className="flex flex-shrink-0 items-center justify-between px-1 py-0.5">
+        <span className="text-xs font-medium uppercase tracking-wide text-zinc-400">
+          {t("summary.label")}
+        </span>
+        <div className="flex items-center gap-1.5">
           <TemplateSelector
             value={selectedTemplate}
             onChange={setSelectedTemplate}
@@ -68,6 +78,7 @@ export function SummaryPanel({
               <path fillRule="evenodd" d="M6.455 1.45A.5.5 0 0 1 6.952 1h2.096a.5.5 0 0 1 .497.45l.186 1.858a4.996 4.996 0 0 1 1.466.848l1.703-.769a.5.5 0 0 1 .63.207l1.048 1.814a.5.5 0 0 1-.133.656l-1.517 1.09a5.026 5.026 0 0 1 0 1.694l1.517 1.09a.5.5 0 0 1 .133.656l-1.048 1.814a.5.5 0 0 1-.63.207l-1.703-.769a4.996 4.996 0 0 1-1.466.848l-.186 1.858a.5.5 0 0 1-.497.45H6.952a.5.5 0 0 1-.497-.45l-.186-1.858a4.993 4.993 0 0 1-1.466-.848l-1.703.769a.5.5 0 0 1-.63-.207L1.422 12.4a.5.5 0 0 1 .133-.656l1.517-1.09a5.026 5.026 0 0 1 0-1.694l-1.517-1.09a.5.5 0 0 1-.133-.656l1.048-1.814a.5.5 0 0 1 .63-.207l1.703.769a4.993 4.993 0 0 1 1.466-.848l.186-1.858ZM8 10.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5Z" clipRule="evenodd" />
             </svg>
           </button>
+          {summary && <CopyButton getText={getSummaryText} title={t("meeting.copySummary")} />}
           <SummaryActions
             summary={summary}
             generating={generating}
@@ -77,7 +88,7 @@ export function SummaryPanel({
             }}
           />
         </div>
-      </header>
+      </div>
 
       {showTemplateManager && (
         <TemplateManager
@@ -86,22 +97,25 @@ export function SummaryPanel({
         />
       )}
 
-      {error && (
-        <p className="text-xs text-amber-700 dark:text-amber-400">{error}</p>
-      )}
+      {/* ── Scrollable body ── */}
+      <div className="min-h-0 flex-1 overflow-y-auto rounded-md border border-zinc-100 bg-zinc-50 p-3 dark:border-zinc-900 dark:bg-zinc-900/40">
+        {error && (
+          <p className="text-xs text-amber-700 dark:text-amber-400">{error}</p>
+        )}
 
-      {loading && (
-        <div className="flex items-center gap-2">
-          <LogoAnimated size={20} className="opacity-40" />
-          <p className="text-xs text-zinc-500">Loading summary…</p>
-        </div>
-      )}
-      {!loading && summary && <SummaryBody summary={summary} />}
-      {!loading && !summary && (
-        <p className="text-xs text-zinc-500">
-          No summary yet. Pick a template and click <em>Generate</em>.
-        </p>
-      )}
+        {loading && (
+          <div className="flex items-center gap-2">
+            <LogoAnimated size={20} className="opacity-40" />
+            <p className="text-xs text-zinc-500">{t("summary.loading")}</p>
+          </div>
+        )}
+        {!loading && summary && <SummaryBody summary={summary} />}
+        {!loading && !summary && (
+          <p className="text-xs text-zinc-500">
+            {t("summary.empty")}
+          </p>
+        )}
+      </div>
     </section>
   );
 }
@@ -124,6 +138,7 @@ function TemplateSelector({
   const selectValue =
     value.kind === "builtin" ? value.id : `custom:${value.id}`;
 
+  const { t } = useTranslation();
   const handleChange = (raw: string) => {
     if (raw.startsWith("custom:")) {
       const cid = raw.slice("custom:".length);
@@ -149,7 +164,7 @@ function TemplateSelector({
         </option>
       ))}
       {customTemplates.length > 0 && (
-        <optgroup label="Custom">
+        <optgroup label={t("templates.customGroup")}>
           {customTemplates.map((ct) => (
             <option key={ct.id} value={`custom:${ct.id}`}>
               {ct.name}
@@ -176,10 +191,11 @@ function SummaryActions({
   loading: boolean;
   onGenerate: () => void;
 }>) {
+  const { t } = useTranslation();
   const disabled = loading || generating;
-  let label = "Generate";
-  if (generating) label = "Generating…";
-  else if (summary) label = "Regenerate";
+  let label = t("summary.generate");
+  if (generating) label = t("summary.generating");
+  else if (summary) label = t("summary.regenerate");
   return (
     <button
       type="button"
@@ -197,24 +213,25 @@ function SummaryActions({
 // ---------------------------------------------------------------------------
 
 function SummaryBody({ summary }: Readonly<{ summary: Summary }>) {
+  const { t } = useTranslation();
   return (
     <div className="flex flex-col gap-3 text-sm">
-      {renderTemplateBody(summary)}
+      {renderTemplateBody(summary, t)}
       <Footer summary={summary} />
     </div>
   );
 }
 
-function renderTemplateBody(summary: Summary) {
+function renderTemplateBody(summary: Summary, t: (key: string) => string) {
   switch (summary.template) {
     case "general":
       return (
         <>
           <p className="text-zinc-800 dark:text-zinc-200">{summary.summary}</p>
-          <SummarySection title="Key points" items={summary.keyPoints} />
-          <SummarySection title="Decisions" items={summary.decisions} />
-          <ActionItemsSection items={summary.actionItems} />
-          <SummarySection title="Open questions" items={summary.openQuestions} />
+          <SummarySection title={t("summary.sections.keyPoints")} items={summary.keyPoints} />
+          <SummarySection title={t("summary.sections.decisions")} items={summary.decisions} />
+          <ActionItemsSection items={summary.actionItems} title={t("summary.sections.actionItems")} />
+          <SummarySection title={t("summary.sections.openQuestions")} items={summary.openQuestions} />
         </>
       );
 
@@ -222,11 +239,11 @@ function renderTemplateBody(summary: Summary) {
       return (
         <>
           <p className="text-zinc-800 dark:text-zinc-200">{summary.summary}</p>
-          <SummarySection title="Wins" items={summary.wins} />
-          <SummarySection title="Blockers" items={summary.blockers} />
-          <SummarySection title="Growth feedback" items={summary.growthFeedback} />
-          <ActionItemsSection items={summary.nextSteps} title="Next steps" />
-          <SummarySection title="Follow-up topics" items={summary.followUpTopics} />
+          <SummarySection title={t("summary.sections.wins")} items={summary.wins} />
+          <SummarySection title={t("summary.sections.blockers")} items={summary.blockers} />
+          <SummarySection title={t("summary.sections.growthFeedback")} items={summary.growthFeedback} />
+          <ActionItemsSection items={summary.nextSteps} title={t("summary.sections.nextSteps")} />
+          <SummarySection title={t("summary.sections.followUp")} items={summary.followUpTopics} />
         </>
       );
 
@@ -234,10 +251,10 @@ function renderTemplateBody(summary: Summary) {
       return (
         <>
           <p className="text-zinc-800 dark:text-zinc-200">{summary.summary}</p>
-          <SummarySection title="Completed" items={summary.completedItems} />
-          <SummarySection title="Carry-over" items={summary.carryOver} />
-          <SummarySection title="Risks" items={summary.risks} />
-          <SummarySection title="Next sprint priorities" items={summary.nextSprintPriorities} />
+          <SummarySection title={t("summary.sections.completed")} items={summary.completedItems} />
+          <SummarySection title={t("summary.sections.carryOver")} items={summary.carryOver} />
+          <SummarySection title={t("summary.sections.risks")} items={summary.risks} />
+          <SummarySection title={t("summary.sections.nextSprintPriorities")} items={summary.nextSprintPriorities} />
         </>
       );
 
@@ -246,9 +263,9 @@ function renderTemplateBody(summary: Summary) {
         <>
           <p className="text-zinc-800 dark:text-zinc-200">{summary.summary}</p>
           <QuotesSection quotes={summary.quotes} />
-          <SummarySection title="Themes" items={summary.themes} />
-          <SummarySection title="Pain points" items={summary.painPoints} />
-          <SummarySection title="Opportunities" items={summary.opportunities} />
+          <SummarySection title={t("summary.sections.themes")} items={summary.themes} />
+          <SummarySection title={t("summary.sections.painPoints")} items={summary.painPoints} />
+          <SummarySection title={t("summary.sections.opportunities")} items={summary.opportunities} />
         </>
       );
 
@@ -259,18 +276,18 @@ function renderTemplateBody(summary: Summary) {
           {summary.customerContext && (
             <div className="flex flex-col gap-1">
               <h4 className="text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
-                Customer context
+                {t("summary.sections.customerContext")}
               </h4>
               <p className="text-zinc-800 dark:text-zinc-200">{summary.customerContext}</p>
             </div>
           )}
-          <SummarySection title="Pain points" items={summary.painPoints} />
-          <SummarySection title="Interest signals" items={summary.interestSignals} />
-          <SummarySection title="Objections" items={summary.objections} />
-          <ActionItemsSection items={summary.nextSteps} title="Next steps" />
+          <SummarySection title={t("summary.sections.painPoints")} items={summary.painPoints} />
+          <SummarySection title={t("summary.sections.interestSignals")} items={summary.interestSignals} />
+          <SummarySection title={t("summary.sections.objections")} items={summary.objections} />
+          <ActionItemsSection items={summary.nextSteps} title={t("summary.sections.nextSteps")} />
           {summary.dealStageIndicator && (
             <p className="text-xs text-zinc-500">
-              Deal stage: <span className="font-medium">{summary.dealStageIndicator}</span>
+              {t("summary.sections.dealStage")} <span className="font-medium">{summary.dealStageIndicator}</span>
             </p>
           )}
         </>
@@ -280,17 +297,17 @@ function renderTemplateBody(summary: Summary) {
       return (
         <>
           <p className="text-zinc-800 dark:text-zinc-200">{summary.summary}</p>
-          <SummarySection title="Concepts covered" items={summary.conceptsCovered} />
+          <SummarySection title={t("summary.sections.conceptsCovered")} items={summary.conceptsCovered} />
           <DefinitionsSection definitions={summary.definitions} />
-          <SummarySection title="Examples" items={summary.examples} />
-          <SummarySection title="Homework / next" items={summary.homeworkOrNext} />
+          <SummarySection title={t("summary.sections.examples")} items={summary.examples} />
+          <SummarySection title={t("summary.sections.homeworkNext")} items={summary.homeworkOrNext} />
         </>
       );
 
     case "freeText":
       return (
-        <div className="whitespace-pre-wrap text-zinc-800 dark:text-zinc-200">
-          {summary.text || "[empty summary]"}
+        <div className="prose prose-sm prose-zinc dark:prose-invert max-w-none">
+          <Markdown>{summary.text || t("summary.emptySummary")}</Markdown>
         </div>
       );
 
@@ -300,8 +317,8 @@ function renderTemplateBody(summary: Summary) {
           <p className="text-xs font-medium text-zinc-500 dark:text-zinc-400">
             {summary.templateName}
           </p>
-          <div className="whitespace-pre-wrap text-zinc-800 dark:text-zinc-200">
-            {summary.text || "[empty summary]"}
+          <div className="prose prose-sm prose-zinc dark:prose-invert max-w-none">
+            <Markdown>{summary.text || t("summary.emptySummary")}</Markdown>
           </div>
         </div>
       );
@@ -309,7 +326,7 @@ function renderTemplateBody(summary: Summary) {
     default:
       return (
         <p className="text-zinc-500 italic">
-          Unknown template. Try regenerating with a known template.
+          {t("summary.unknown")}
         </p>
       );
   }
@@ -343,10 +360,10 @@ function SummarySection({
 
 function ActionItemsSection({
   items,
-  title = "Action items",
+  title,
 }: Readonly<{
   items: { task: string; owner?: string | null; due?: string | null }[];
-  title?: string;
+  title: string;
 }>) {
   if (items.length === 0) return null;
   return (
@@ -376,11 +393,12 @@ function QuotesSection({
 }: Readonly<{
   quotes: { speaker: string; quote: string; context?: string | null }[];
 }>) {
+  const { t } = useTranslation();
   if (quotes.length === 0) return null;
   return (
     <div className="flex flex-col gap-1">
       <h4 className="text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
-        Notable quotes
+        {t("summary.sections.notableQuotes")}
       </h4>
       <ul className="ml-4 space-y-2 text-zinc-800 dark:text-zinc-200">
         {quotes.map((q, i) => (
@@ -404,11 +422,12 @@ function DefinitionsSection({
 }: Readonly<{
   definitions: { term: string; definition: string }[];
 }>) {
+  const { t } = useTranslation();
   if (definitions.length === 0) return null;
   return (
     <div className="flex flex-col gap-1">
       <h4 className="text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
-        Definitions
+        {t("summary.sections.definitions")}
       </h4>
       <dl className="ml-4 space-y-1 text-zinc-800 dark:text-zinc-200">
         {definitions.map((d, i) => (
@@ -429,4 +448,93 @@ function Footer({ summary }: Readonly<{ summary: Summary }>) {
       {summary.language ? ` · ${summary.language}` : ""}
     </p>
   );
+}
+
+// ---------------------------------------------------------------------------
+// Plain-text serialization for clipboard copy
+// ---------------------------------------------------------------------------
+
+function sectionText(title: string, items: string[]): string {
+  if (items.length === 0) return "";
+  const bullets = items.map((it) => "• " + it).join("\n");
+  return "\n" + title + "\n" + bullets;
+}
+
+function actionItemsText(title: string, items: { task: string; owner?: string | null; due?: string | null }[]): string {
+  if (items.length === 0) return "";
+  const bullets = items.map((a) => {
+    let line = "• " + a.task;
+    if (a.owner) line += " (" + a.owner + ")";
+    if (a.due) line += " — " + a.due;
+    return line;
+  }).join("\n");
+  return "\n" + title + "\n" + bullets;
+}
+
+function summaryToPlainText(s: Summary): string {
+  switch (s.template) {
+    case "general":
+      return [
+        s.summary,
+        sectionText("Key points", s.keyPoints),
+        sectionText("Decisions", s.decisions),
+        actionItemsText("Action items", s.actionItems),
+        sectionText("Open questions", s.openQuestions),
+      ].filter(Boolean).join("\n");
+
+    case "oneOnOne":
+      return [
+        s.summary,
+        sectionText("Wins", s.wins),
+        sectionText("Blockers", s.blockers),
+        sectionText("Growth feedback", s.growthFeedback),
+        actionItemsText("Next steps", s.nextSteps),
+        sectionText("Follow-up topics", s.followUpTopics),
+      ].filter(Boolean).join("\n");
+
+    case "sprintReview":
+      return [
+        s.summary,
+        sectionText("Completed", s.completedItems),
+        sectionText("Carry-over", s.carryOver),
+        sectionText("Risks", s.risks),
+        sectionText("Next sprint priorities", s.nextSprintPriorities),
+      ].filter(Boolean).join("\n");
+
+    case "interview":
+      return [
+        s.summary,
+        s.quotes.length > 0 ? "\nQuotes\n" + s.quotes.map((q) => "• \"" + q.quote + "\" — " + q.speaker).join("\n") : "",
+        sectionText("Themes", s.themes),
+        sectionText("Pain points", s.painPoints),
+        sectionText("Opportunities", s.opportunities),
+      ].filter(Boolean).join("\n");
+
+    case "salesCall":
+      return [
+        s.summary,
+        s.customerContext ? `\nCustomer context\n${s.customerContext}` : "",
+        sectionText("Pain points", s.painPoints),
+        sectionText("Interest signals", s.interestSignals),
+        sectionText("Objections", s.objections),
+        actionItemsText("Next steps", s.nextSteps),
+        s.dealStageIndicator ? `\nDeal stage: ${s.dealStageIndicator}` : "",
+      ].filter(Boolean).join("\n");
+
+    case "lecture":
+      return [
+        s.summary,
+        sectionText("Concepts covered", s.conceptsCovered),
+        s.definitions.length > 0 ? "\nDefinitions\n" + s.definitions.map((d) => "• " + d.term + ": " + d.definition).join("\n") : "",
+        sectionText("Examples", s.examples),
+        sectionText("Homework / next", s.homeworkOrNext),
+      ].filter(Boolean).join("\n");
+
+    case "freeText":
+    case "custom":
+      return s.text || "";
+
+    default:
+      return "";
+  }
 }

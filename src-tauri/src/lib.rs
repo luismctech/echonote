@@ -38,6 +38,7 @@ pub fn run() {
             commands::meetings::list_meetings,
             commands::meetings::get_meeting,
             commands::meetings::delete_meeting,
+            commands::meetings::rename_meeting,
             commands::meetings::rename_speaker,
             commands::meetings::search_meetings,
             commands::llm::summarize_meeting,

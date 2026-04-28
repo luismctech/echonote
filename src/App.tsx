@@ -12,17 +12,18 @@
  * for the same reason.
  */
 
-import { useCallback, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { LogoMark } from "./components/Logo";
+import { useToast } from "./components/Toaster";
 import { HealthProbe } from "./features/live/HealthProbe";
 import { LivePane } from "./features/live/LivePane";
 import { MeetingDetail } from "./features/meetings/MeetingDetail";
 import { ModelManager } from "./features/settings/ModelManager";
 import { LanguageSwitcher } from "./features/settings/LanguageSwitcher";
 import { Sidebar } from "./features/sidebar/Sidebar";
-import { useAutoUpdate } from "./hooks/useAutoUpdate";
+import { useAutoUpdate, installUpdate } from "./hooks/useAutoUpdate";
 import { useGlobalShortcuts } from "./hooks/useGlobalShortcuts";
 import { useHealthProbe } from "./hooks/useHealthProbe";
 import { useModelManager } from "./hooks/useModelManager";
@@ -44,6 +45,7 @@ function ModelStatusBadge({
   downloading: boolean;
   onClick: () => void;
 }>) {
+  const { t } = useTranslation();
   const total = models.length;
   const installed = models.filter((m) => m.present).length;
   const allGood = total > 0 && installed === total;
@@ -61,15 +63,21 @@ function ModelStatusBadge({
       <span
         className={`h-1.5 w-1.5 rounded-full ${dotColor(downloading, allGood)}`}
       />
-      {total === 0 ? "models" : `models ${installed}/${total}`}
+      {total === 0 ? t("models.badgeEmpty") : t("models.badge", { installed, total })}
     </button>
   );
 }
 
 export function App() {
   const { t } = useTranslation();
+  const toast = useToast();
   const probe = useHealthProbe();
-  const { goToLive, refreshMeetings, view, renameSpeaker } = useMeetings();
+  const { goToLive, refreshMeetings, view, renameSpeaker, renameMeeting } = useMeetings();
+
+  // Ref-based callback so useRecordingSession can open the models
+  // panel even though the state is declared after the hook.
+  const openModelsRef = useRef<() => void>();
+
   // Pull the primitives we depend on out of the hook return so our
   // useCallback deps below reference stable identities (each member
   // is memoised inside the hook with `useCallback`); depending on
@@ -78,6 +86,7 @@ export function App() {
   const recording = useRecordingSession({
     backendReady: probe.kind === "ok",
     onSessionFinished: refreshMeetings,
+    onOpenModels: () => openModelsRef.current?.(),
   });
   const {
     start: startRecording,
@@ -91,6 +100,7 @@ export function App() {
   const [diarize, setDiarize] = useState(false);
   const [language, setLanguage] = useState<string>("es");
   const [showModels, setShowModels] = useState(false);
+  openModelsRef.current = () => setShowModels(true);
   const modelManager = useModelManager();
 
   // Pressing Start while viewing a stored meeting must also flip the
@@ -116,11 +126,38 @@ export function App() {
     onStop: stopRecording,
   });
 
-  // Silent auto-update check. Logs to console when a new version is
-  // available; a future iteration can surface this in the UI.
-  useAutoUpdate((version) => {
+  // Show a sticky toast when a new version is available so the user
+  // can trigger the install with one click.
+  const { checkForUpdate } = useAutoUpdate((version) => {
     console.info(`[update] new version available: ${version}`);
+    toast.push({
+      kind: "info",
+      message: t("update.available", { version }),
+      durationMs: 0, // sticky — user must act or dismiss
+      action: {
+        label: t("update.install"),
+        onClick: () => {
+          toast.push({ kind: "info", message: t("update.downloading") });
+          installUpdate().catch((err) => {
+            toast.push({
+              kind: "error",
+              message: t("update.failed"),
+              detail: String(err),
+            });
+          });
+        },
+      },
+    });
   });
+
+  const handleCheckVersion = useCallback(async () => {
+    toast.push({ kind: "info", message: t("update.checking") });
+    const found = await checkForUpdate();
+    if (!found) {
+      toast.push({ kind: "success", message: t("update.upToDate") });
+    }
+    // If found, the useAutoUpdate callback already shows the toast.
+  }, [checkForUpdate, toast, t]);
 
   return (
     <main className="flex h-full w-full flex-col gap-3 overflow-hidden px-4 py-3 sm:px-6 sm:py-4">
@@ -143,7 +180,7 @@ export function App() {
             downloading={modelManager.downloading !== null}
             onClick={() => setShowModels(true)}
           />
-          <HealthProbe probe={probe} />
+          <HealthProbe probe={probe} onClickVersion={handleCheckVersion} />
         </div>
       </header>
 
@@ -184,7 +221,7 @@ export function App() {
               onDismissError={dismissError}
             />
           ) : (
-            <MeetingDetail view={view} onRenameSpeaker={renameSpeaker} />
+            <MeetingDetail view={view} onRenameSpeaker={renameSpeaker} onRenameMeeting={renameMeeting} />
           )}
         </section>
       </div>

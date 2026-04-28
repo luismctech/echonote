@@ -33,6 +33,7 @@
  */
 
 import { useCallback } from "react";
+import i18next from "i18next";
 
 import { useToast, type ToastInput } from "../components/Toaster";
 import { isIpcError } from "../types/ipc-error";
@@ -59,11 +60,20 @@ export async function runIpcAction<Args extends unknown[], R>(
   fn: (...args: Args) => Promise<R>,
   push: (toast: ToastInput) => string,
   args: Args,
+  onModelMissing?: () => void,
 ): Promise<R | undefined> {
   try {
     return await fn(...args);
   } catch (err) {
-    if (isIpcError(err)) {
+    if (isIpcError(err) && err.code === "modelNotReady" && onModelMissing) {
+      push({
+        kind: "error",
+        message: label,
+        detail: err.message,
+        durationMs: 0,
+        action: { label: i18next.t("errors.openModels"), onClick: onModelMissing },
+      });
+    } else if (isIpcError(err)) {
       push({ kind: "error", message: label, detail: err.message });
     } else {
       const detail = err instanceof Error ? err.message : String(err);
@@ -85,10 +95,11 @@ export async function runIpcAction<Args extends unknown[], R>(
 export function useIpcAction<Args extends unknown[], R>(
   label: string,
   fn: (...args: Args) => Promise<R>,
+  onModelMissing?: () => void,
 ): IpcAction<Args, R> {
   const { push } = useToast();
   return useCallback(
-    (...args: Args) => runIpcAction(label, fn, push, args),
-    [label, fn, push],
+    (...args: Args) => runIpcAction(label, fn, push, args, onModelMissing),
+    [label, fn, push, onModelMissing],
   );
 }

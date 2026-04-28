@@ -597,6 +597,9 @@ mod tests {
         async fn get_summary(&self, _: MeetingId) -> Result<Option<Summary>, DomainError> {
             unreachable!()
         }
+        async fn rename_meeting(&self, _: MeetingId, _: &str) -> Result<bool, DomainError> {
+            unreachable!()
+        }
     }
 
     /// Scripted chat. Produces a fixed token list (or an early

@@ -137,6 +137,17 @@ fn model_catalog(root: &std::path::Path) -> Vec<(ModelInfo, &'static str, Option
             "https://github.com/luismctech/echonote/releases/download/v0.2.1/silero_vad.onnx",
             Some("d224cf508fbaf8bb1a49f333120b536dbaa1ed2b0ab49bed059d6e44a4f8305c"),
         ),
+        (
+            ModelInfo {
+                id: "embedder-eres2net".into(),
+                label: "ERes2Net Speaker Embedder (26 MB)".into(),
+                kind: "embedder".into(),
+                present: present("models/embedder/eres2net_en_voxceleb.onnx"),
+                size_bytes: 26_000_000,
+            },
+            "https://huggingface.co/csukuangfj/speaker-embedding-models/resolve/main/3dspeaker_speech_eres2net_sv_en_voxceleb_16k.onnx",
+            None,
+        ),
     ]
 }
 
@@ -152,6 +163,7 @@ fn model_dest_path(id: &str) -> Option<&'static str> {
         "llm-qwen3-14b" => Some("models/llm/Qwen3-14B-Q4_K_M.gguf"),
         "llm-qwen3-8b" => Some("models/llm/Qwen3-8B-Q4_K_M.gguf"),
         "vad-silero" => Some("models/vad/silero_vad.onnx"),
+        "embedder-eres2net" => Some("models/embedder/eres2net_en_voxceleb.onnx"),
         _ => None,
     }
 }

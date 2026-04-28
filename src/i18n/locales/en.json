@@ -44,13 +44,14 @@
     "pressStart": "Press Start or ⌘⇧R to begin a session.",
     "modelLoads": "model loads on first start",
     "silence": "silence",
+    "silenceRms": "silence (rms={{rms}})",
     "noSpeech": "[no speech]"
   },
   "health": {
     "warmingUp": "warming up…",
     "probing": "probing backend…",
     "offline": "offline",
-    "ok": "✓ v{{version}}",
+    "ok": "v{{version}}",
     "tooltip": "v{{version}} · {{target}} · {{commit}}"
   },
   "meeting": {
@@ -58,7 +59,11 @@
     "unavailable": "Meeting unavailable.",
     "segments": "segments",
     "noSegments": "No segments persisted for this meeting.",
-    "noSpeech": "[no speech]"
+    "noSpeech": "[no speech]",
+    "transcript": "Transcript",
+    "copySummary": "Copy summary",
+    "copyTranscript": "Copy transcript",
+    "editTitle": "Click to rename"
   },
   "export": {
     "markdown": "Markdown (.md)",
@@ -70,7 +75,8 @@
   "speakers": {
     "label": "Speakers",
     "speaker": "Speaker {{n}}",
-    "rename": "Rename {{name}}"
+    "rename": "Rename {{name}}",
+    "slot": "Speaker slot {{n}}"
   },
   "summary": {
     "label": "Summary",
@@ -115,6 +121,7 @@
     "send": "Send",
     "noVerifiableCitations": "respuesta sin citas verificables",
     "scrollToSegment": "Scroll to segment {{id}}…",
+    "noCitations": "Response without verifiable citations",
     "description": "Ask a question about this meeting's transcript."
   },
   "models": {
@@ -132,7 +139,9 @@
     "cancel": "Cancel",
     "delete": "Delete model",
     "use": "Use",
-    "active": "Active"
+    "active": "Active",
+    "badge": "models {{installed}}/{{total}}",
+    "badgeEmpty": "models"
   },
   "templates": {
     "title": "Custom Templates",
@@ -148,7 +157,8 @@
     "saving": "Saving…",
     "namePlaceholder": "Template name…",
     "promptPlaceholder": "Write your summary prompt here… The meeting transcript will be appended automatically.",
-    "manage": "Manage templates"
+    "manage": "Manage templates",
+    "customGroup": "Custom"
   },
   "errors": {
     "renderCrash": "fatal — render error",
@@ -162,6 +172,9 @@
     "streamingFailed": "Streaming failed — you can retry.",
     "streamingStopFailed": "Streaming failed mid-stop. Some audio may not have been persisted.",
     "summaryFailed": "Couldn't generate summary.",
+    "modelMissing": "Required model not installed",
+    "modelMissingDetail": "Download the missing model from the Models panel to use this feature.",
+    "openModels": "Open Models",
     "outsideTauri": "Running outside Tauri — IPC is unavailable in pnpm dev. Use pnpm tauri:dev.",
     "healthFailed": "Backend health check failed."
   },
@@ -170,12 +183,32 @@
     "copy": "copy",
     "dismiss": "Dismiss notification",
     "meetingSaved": "Meeting saved",
-    "meetingDetail": "{{segments}} segments · {{seconds}} s"
+    "meetingDetail": "{{segments}} segments · {{seconds}} s",
+    "meetingNotFound": "Meeting not found",
+    "loadFailed": "Couldn't load meeting.",
+    "renameFailed": "Couldn't rename meeting.",
+    "renameSpeakerFailed": "Couldn't rename speaker.",
+    "meetingDeleted": "Meeting deleted",
+    "alreadyGone": "Meeting was already gone.",
+    "alreadyGoneDetail": "Refreshed the list to match disk.",
+    "deleteFailed": "Couldn't delete meeting.",
+    "refreshFailed": "Couldn't refresh meetings list."
   },
   "stats": {
     "status": "status",
     "chunks": "chunks",
     "skipped": "skipped",
     "audio": "audio"
+  },
+  "update": {
+    "available": "Version {{version}} is available",
+    "install": "Install",
+    "downloading": "Downloading update…",
+    "failed": "Update failed",
+    "checking": "Checking for updates…",
+    "upToDate": "You're up to date!"
+  },
+  "settings": {
+    "switchLanguage": "Switch language"
   }
 }

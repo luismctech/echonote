@@ -188,6 +188,20 @@ impl MeetingStore for SqliteMeetingStore {
         Ok(result.rows_affected() > 0)
     }
 
+    async fn rename_meeting(
+        &self,
+        meeting_id: MeetingId,
+        title: &str,
+    ) -> Result<bool, DomainError> {
+        let result = sqlx::query("UPDATE meetings SET title = ? WHERE id = ?")
+            .bind(title)
+            .bind(meeting_id.to_string())
+            .execute(&self.pool)
+            .await
+            .map_err(map_sqlx("rename meeting"))?;
+        Ok(result.rows_affected() > 0)
+    }
+
     async fn list_speakers(&self, meeting_id: MeetingId) -> Result<Vec<Speaker>, DomainError> {
         let id_str = meeting_id.to_string();
         let rows = sqlx::query(

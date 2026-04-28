@@ -8,15 +8,6 @@ import { statusLabel, type RecordingState } from "../../state/recording";
 import type { StreamLine } from "../../types/view";
 import { TranscriptRow } from "./TranscriptRow";
 
-/** Subtitle text under the live pane title — model + input format. */
-function modelLabel(stream: RecordingState): string {
-  if ((stream.kind === "recording" || stream.kind === "paused") && stream.inputFormat) {
-    const { sampleRateHz, channels } = stream.inputFormat;
-    return `${sampleRateHz} Hz · ${channels} ch`;
-  }
-  return "";
-}
-
 /** Hint text for the empty transcript area. */
 function emptyHint(stream: RecordingState, t: (key: string) => string): string {
   if (stream.kind === "recording") return t("live.listening");
@@ -83,9 +74,6 @@ export function LivePane({
       <header className="flex flex-shrink-0 flex-wrap items-center justify-between gap-3">
         <div>
           <h2 className="text-base font-medium sm:text-lg">{t("live.title")}</h2>
-          <p className="text-xs text-zinc-500 dark:text-zinc-400">
-            {t("live.description", { label: modelLabel(stream) || t("live.modelLoads") })}
-          </p>
         </div>
         <div className="flex flex-wrap items-center gap-3">
           <label

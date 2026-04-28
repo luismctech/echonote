@@ -1,4 +1,5 @@
 import { memo, useEffect, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import { displayName, paletteFor, shortTag } from "../../lib/speakers";
 import type { Speaker, SpeakerId } from "../../types/speaker";
@@ -18,6 +19,7 @@ export const SpeakerEditor = memo(function SpeakerEditor({
   speaker: Speaker;
   onRename: (speakerId: SpeakerId, label: string | null) => Promise<void>;
 }) {
+  const { t } = useTranslation();
   const [draft, setDraft] = useState(speaker.label ?? "");
   // Re-sync local draft whenever the upstream speaker label changes
   // (e.g. after renameSpeaker resolves with the canonical row), so
@@ -27,7 +29,7 @@ export const SpeakerEditor = memo(function SpeakerEditor({
   }, [speaker.label]);
 
   const palette = paletteFor(speaker.slot);
-  const placeholder = `Speaker ${speaker.slot + 1}`;
+  const placeholder = t("speakers.speaker", { n: speaker.slot + 1 });
   const commit = () => {
     const next = draft.trim();
     const current = speaker.label ?? "";
@@ -53,7 +55,7 @@ export const SpeakerEditor = memo(function SpeakerEditor({
             e.currentTarget.blur();
           }
         }}
-        aria-label={`Rename ${displayName(speaker)}`}
+        aria-label={t("speakers.rename", { name: displayName(speaker) })}
         className="w-28 bg-transparent outline-none placeholder:text-current placeholder:opacity-60"
       />
     </div>

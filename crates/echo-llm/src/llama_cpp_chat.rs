@@ -402,12 +402,16 @@ pub(crate) fn render_qwen_chat_prompt(messages: &[ChatMessage]) -> String {
 struct StreamState {
     total: String,
     stops: Vec<String>,
+    /// `true` while inside a `<think>…</think>` block. Pieces are
+    /// accumulated in `total` (for stop-sequence checking) but NOT
+    /// forwarded to the consumer.
+    in_think: bool,
 }
 
 struct PieceOutcome {
     /// Slice of the just-decoded piece that should be forwarded. Empty
     /// when the piece consists entirely of (the tail of) a stop
-    /// sequence.
+    /// sequence, or when we are inside a `<think>` block.
     delta: String,
     /// `true` once a stop sequence matched. The decoder loop should
     /// exit immediately after emitting the (possibly empty) delta.
@@ -419,6 +423,7 @@ impl StreamState {
         Self {
             total: String::new(),
             stops: stops.into_iter().filter(|s| !s.is_empty()).collect(),
+            in_think: false,
         }
     }
 
@@ -426,6 +431,78 @@ impl StreamState {
         let prev_len = self.total.len();
         self.total.push_str(piece);
 
+        // ── Think-block suppression ──────────────────────────────
+        // Qwen 3 may emit <think>…</think> at the start of the
+        // reply.  We suppress these blocks entirely so the consumer
+        // never sees chain-of-thought reasoning.
+        if !self.in_think {
+            if let Some(idx) = self.total.find("<think>") {
+                // Emit whatever was before <think>, then enter
+                // suppression mode.
+                self.in_think = true;
+                let safe = if idx > prev_len {
+                    self.total[prev_len..idx].to_string()
+                } else {
+                    String::new()
+                };
+                // Check if we also got </think> in the same chunk
+                if let Some(end) = self.total.find("</think>") {
+                    let resume = end + "</think>".len();
+                    self.in_think = false;
+                    let after = if resume < self.total.len() {
+                        self.total[resume..].to_string()
+                    } else {
+                        String::new()
+                    };
+                    let delta = format!("{safe}{after}");
+                    return self.check_stops_after_think(prev_len, delta);
+                }
+                return PieceOutcome {
+                    delta: safe,
+                    stop_hit: false,
+                };
+            }
+        } else {
+            // Still inside <think> — check for </think>
+            if let Some(end) = self.total.find("</think>") {
+                let resume = end + "</think>".len();
+                self.in_think = false;
+                let delta = if resume < self.total.len() {
+                    self.total[resume..].trim_start().to_string()
+                } else {
+                    String::new()
+                };
+                return self.check_stops_after_think(prev_len, delta);
+            }
+            // Still inside the block — suppress entirely
+            return PieceOutcome {
+                delta: String::new(),
+                stop_hit: false,
+            };
+        }
+
+        // ── Stop-sequence detection (normal path) ────────────────
+        self.check_stops(prev_len, piece)
+    }
+
+    /// After exiting a think-block we may have residual text that
+    /// needs stop-sequence checking.
+    fn check_stops_after_think(&self, _prev_len: usize, delta: String) -> PieceOutcome {
+        for stop in &self.stops {
+            if let Some(idx) = delta.find(stop.as_str()) {
+                return PieceOutcome {
+                    delta: delta[..idx].to_string(),
+                    stop_hit: true,
+                };
+            }
+        }
+        PieceOutcome {
+            delta,
+            stop_hit: false,
+        }
+    }
+
+    fn check_stops(&self, prev_len: usize, piece: &str) -> PieceOutcome {
         // Find the *earliest* stop sequence position in `total`. If
         // multiple stops match we want the one that appears first so
         // we don't accidentally emit content beyond it.
@@ -442,7 +519,6 @@ impl StreamState {
                 stop_hit: false,
             },
             Some(cut) => {
-                self.total.truncate(cut);
                 let delta = if cut > prev_len {
                     self.total[prev_len..cut].to_string()
                 } else {
@@ -565,5 +641,39 @@ What's 2+2?<|im_end|>
         // validation gets caught by the test name in `cargo test`.
         fn _signature_check<T: ChatAssistant>() {}
         _signature_check::<LlamaCppChat>();
+    }
+
+    // ── Think-block suppression in streaming ─────────────────────
+
+    #[test]
+    fn stream_state_suppresses_think_block_at_start() {
+        let mut s = StreamState::new(vec!["<|im_end|>".into()]);
+        let o1 = s.push_piece("<think>");
+        assert_eq!(o1.delta, "");
+        assert!(!o1.stop_hit);
+        let o2 = s.push_piece("reasoning here");
+        assert_eq!(o2.delta, "");
+        let o3 = s.push_piece("</think>");
+        assert!(!o3.stop_hit);
+        // After exiting the think block, new content flows through
+        let o4 = s.push_piece("Real answer");
+        assert_eq!(o4.delta, "Real answer");
+    }
+
+    #[test]
+    fn stream_state_suppresses_think_block_in_single_piece() {
+        let mut s = StreamState::new(vec!["<|im_end|>".into()]);
+        let o = s.push_piece("<think>inner</think>Answer");
+        assert_eq!(o.delta, "Answer");
+        assert!(!o.stop_hit);
+    }
+
+    #[test]
+    fn stream_state_think_block_does_not_affect_stop_detection() {
+        let mut s = StreamState::new(vec!["<|im_end|>".into()]);
+        let _ = s.push_piece("<think>reasoning</think>");
+        let o = s.push_piece("answer<|im_end|>junk");
+        assert!(o.stop_hit);
+        assert_eq!(o.delta, "answer");
     }
 }

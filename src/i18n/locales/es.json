@@ -44,13 +44,14 @@
     "pressStart": "Pulsa Iniciar o ⌘⇧R para comenzar una sesión.",
     "modelLoads": "el modelo se carga en el primer inicio",
     "silence": "silencio",
+    "silenceRms": "silencio (rms={{rms}})",
     "noSpeech": "[sin voz]"
   },
   "health": {
     "warmingUp": "calentando…",
     "probing": "verificando backend…",
     "offline": "desconectado",
-    "ok": "✓ v{{version}}",
+    "ok": "v{{version}}",
     "tooltip": "v{{version}} · {{target}} · {{commit}}"
   },
   "meeting": {
@@ -58,7 +59,11 @@
     "unavailable": "Reunión no disponible.",
     "segments": "segmentos",
     "noSegments": "No hay segmentos guardados para esta reunión.",
-    "noSpeech": "[sin voz]"
+    "noSpeech": "[sin voz]",
+    "transcript": "Transcripción",
+    "copySummary": "Copiar resumen",
+    "copyTranscript": "Copiar transcripción",
+    "editTitle": "Clic para renombrar"
   },
   "export": {
     "markdown": "Markdown (.md)",
@@ -70,7 +75,8 @@
   "speakers": {
     "label": "Hablantes",
     "speaker": "Hablante {{n}}",
-    "rename": "Renombrar {{name}}"
+    "rename": "Renombrar {{name}}",
+    "slot": "Hablante slot {{n}}"
   },
   "summary": {
     "label": "Resumen",
@@ -115,6 +121,7 @@
     "send": "Enviar",
     "noVerifiableCitations": "respuesta sin citas verificables",
     "scrollToSegment": "Ir al segmento {{id}}…",
+    "noCitations": "Respuesta sin citas verificables",
     "description": "Haz una pregunta sobre la transcripción de esta reunión."
   },
   "models": {
@@ -132,7 +139,9 @@
     "cancel": "Cancelar",
     "delete": "Eliminar modelo",
     "use": "Usar",
-    "active": "Activo"
+    "active": "Activo",
+    "badge": "modelos {{installed}}/{{total}}",
+    "badgeEmpty": "modelos"
   },
   "templates": {
     "title": "Plantillas personalizadas",
@@ -148,7 +157,8 @@
     "saving": "Guardando…",
     "namePlaceholder": "Nombre de la plantilla…",
     "promptPlaceholder": "Escribe tu prompt de resumen aquí… La transcripción de la reunión se agregará automáticamente.",
-    "manage": "Gestionar plantillas"
+    "manage": "Gestionar plantillas",
+    "customGroup": "Personalizadas"
   },
   "errors": {
     "renderCrash": "fatal — error de renderizado",
@@ -162,6 +172,9 @@
     "streamingFailed": "El streaming falló — puedes reintentar.",
     "streamingStopFailed": "El streaming falló al detener. Puede que no se haya guardado todo el audio.",
     "summaryFailed": "No se pudo generar el resumen.",
+    "modelMissing": "Modelo requerido no instalado",
+    "modelMissingDetail": "Descarga el modelo faltante desde el panel de Modelos para usar esta función.",
+    "openModels": "Abrir Modelos",
     "outsideTauri": "Fuera de Tauri — IPC no disponible con pnpm dev. Usa pnpm tauri:dev.",
     "healthFailed": "Falló la verificación del backend."
   },
@@ -170,12 +183,32 @@
     "copy": "copiar",
     "dismiss": "Descartar notificación",
     "meetingSaved": "Reunión guardada",
-    "meetingDetail": "{{segments}} segmentos · {{seconds}} s"
+    "meetingDetail": "{{segments}} segmentos · {{seconds}} s",
+    "meetingNotFound": "Reunión no encontrada",
+    "loadFailed": "No se pudo cargar la reunión.",
+    "renameFailed": "No se pudo renombrar la reunión.",
+    "renameSpeakerFailed": "No se pudo renombrar el hablante.",
+    "meetingDeleted": "Reunión eliminada",
+    "alreadyGone": "La reunión ya no existía.",
+    "alreadyGoneDetail": "Se actualizó la lista para coincidir con el disco.",
+    "deleteFailed": "No se pudo eliminar la reunión.",
+    "refreshFailed": "No se pudo actualizar la lista de reuniones."
   },
   "stats": {
     "status": "estado",
     "chunks": "chunks",
     "skipped": "omitidos",
     "audio": "audio"
+  },
+  "update": {
+    "available": "La versión {{version}} está disponible",
+    "install": "Instalar",
+    "downloading": "Descargando actualización…",
+    "failed": "Error al actualizar",
+    "checking": "Buscando actualizaciones…",
+    "upToDate": "¡Estás al día!"
+  },
+  "settings": {
+    "switchLanguage": "Cambiar idioma"
   }
 }

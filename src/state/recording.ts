@@ -55,7 +55,7 @@ export type RecordingState =
       lastTotalSegments: number;
       lastTotalAudioMs: number;
     }
-  | { kind: "error"; message: string; recoverable: boolean };
+  | { kind: "error"; message: string; recoverable: boolean; errorCode?: string };
 
 export type RecordingAction =
   | { type: "START_REQUESTED" }
@@ -75,7 +75,7 @@ export type RecordingAction =
       totalAudioMs: number;
     }
   | { type: "STREAMING_FAILED"; message: string }
-  | { type: "BACKEND_ERROR"; message: string }
+  | { type: "BACKEND_ERROR"; message: string; errorCode?: string }
   | { type: "ACKNOWLEDGE" };
 
 export const initialRecordingState: RecordingState = { kind: "idle" };
@@ -102,7 +102,7 @@ export function recordingReducer(
         };
       }
       if (action.type === "BACKEND_ERROR") {
-        return { kind: "error", message: action.message, recoverable: true };
+        return { kind: "error", message: action.message, recoverable: true, ...(action.errorCode != null ? { errorCode: action.errorCode } : {}) };
       }
       if (action.type === "STREAMING_FAILED") {
         return { kind: "error", message: action.message, recoverable: true };
@@ -168,7 +168,7 @@ export function recordingReducer(
         return { kind: "error", message: action.message, recoverable: false };
       }
       if (action.type === "BACKEND_ERROR") {
-        return { kind: "error", message: action.message, recoverable: false };
+        return { kind: "error", message: action.message, recoverable: false, ...(action.errorCode != null ? { errorCode: action.errorCode } : {}) };
       }
       return state;
 
@@ -183,6 +183,11 @@ export function recordingReducer(
         return { kind: "starting" };
       }
       return state;
+
+    default: {
+      const _exhaustive: never = state;
+      return _exhaustive;
+    }
   }
 }
 

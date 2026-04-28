@@ -120,6 +120,17 @@ export async function deleteMeeting(id: MeetingId): Promise<boolean> {
 }
 
 /**
+ * Rename a meeting's title. Returns the updated summary so the
+ * sidebar stays in sync without an extra list round-trip.
+ */
+export async function renameMeeting(
+  id: MeetingId,
+  title: string,
+): Promise<MeetingSummary> {
+  return invoke<MeetingSummary>("rename_meeting", { id, title });
+}
+
+/**
  * Set or clear a speaker's user-visible label. Pass `null` (or an
  * empty string) to revert the speaker to anonymous so the UI renders
  * `Speaker N` again. Returns the freshly-loaded meeting so the caller

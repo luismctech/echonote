@@ -22,11 +22,13 @@
  */
 
 import { useCallback, useEffect, useRef } from "react";
+import { useTranslation } from "react-i18next";
 
 import { useToast } from "../components/Toaster";
 import {
   deleteMeeting,
   getMeeting,
+  renameMeeting,
   renameSpeaker,
 } from "../ipc/client";
 import { useIpcAction } from "../ipc/useIpcAction";
@@ -47,6 +49,7 @@ export function useMeetingDetail({
   refreshMeetings: () => Promise<void>;
   setMeetingsError: (message: string | null) => void;
 }) {
+  const { t } = useTranslation();
   const toast = useToast();
 
   // Keep a ref to the latest `view` so the action callbacks don't
@@ -62,7 +65,7 @@ export function useMeetingDetail({
   // openMeeting and deleteMeeting both have inline error state in
   // addition to the toast, so they keep their own try/catch.
   const renameSpeakerCall = useIpcAction(
-    "Couldn't rename speaker.",
+    t("toast.renameSpeakerFailed"),
     renameSpeaker,
   );
 
@@ -85,7 +88,7 @@ export function useMeetingDetail({
             id,
             meeting: null,
             loading: false,
-            error: "Meeting not found",
+            error: t("toast.meetingNotFound"),
           });
         } else {
           setView({ kind: "meeting", id, meeting, loading: false });
@@ -102,12 +105,12 @@ export function useMeetingDetail({
         });
         toast.push({
           kind: "error",
-          message: "Couldn't load meeting.",
+          message: t("toast.loadFailed"),
           detail: message,
         });
       }
     },
-    [setView, toast],
+    [setView, toast, t],
   );
 
   const renameSpeakerAction = useCallback(
@@ -128,6 +131,32 @@ export function useMeetingDetail({
     [renameSpeakerCall, setView],
   );
 
+  const renameMeetingAction = useCallback(
+    async (title: string) => {
+      const v = viewRef.current;
+      if (v.kind !== "meeting" || !v.meeting) return;
+      const meetingId = v.id;
+      try {
+        await renameMeeting(meetingId, title);
+        // Patch the in-memory meeting so the header re-renders immediately.
+        setView((prev) =>
+          prev.kind === "meeting" && prev.id === meetingId && prev.meeting
+            ? { ...prev, meeting: { ...prev.meeting, title } }
+            : prev,
+        );
+        await refreshMeetings();
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        toast.push({
+          kind: "error",
+          message: t("toast.renameFailed"),
+          detail: message,
+        });
+      }
+    },
+    [setView, refreshMeetings, toast, t],
+  );
+
   const deleteMeetingAction = useCallback(
     async (id: MeetingId) => {
       try {
@@ -141,11 +170,11 @@ export function useMeetingDetail({
         // honestly instead of pretending the delete succeeded.
         toast.push(
           removed
-            ? { kind: "info", message: "Meeting deleted" }
+            ? { kind: "info", message: t("toast.meetingDeleted") }
             : {
                 kind: "warning",
-                message: "Meeting was already gone.",
-                detail: "Refreshed the list to match disk.",
+                message: t("toast.alreadyGone"),
+                detail: t("toast.alreadyGoneDetail"),
               },
         );
       } catch (err) {
@@ -153,16 +182,17 @@ export function useMeetingDetail({
         setMeetingsError(message);
         toast.push({
           kind: "error",
-          message: "Couldn't delete meeting.",
+          message: t("toast.deleteFailed"),
           detail: message,
         });
       }
     },
-    [refreshMeetings, setView, setMeetingsError, toast],
+    [refreshMeetings, setView, setMeetingsError, toast, t],
   );
 
   return {
     openMeeting,
+    renameMeetingAction,
     renameSpeakerAction,
     deleteMeetingAction,
   };

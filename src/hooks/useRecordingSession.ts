@@ -23,10 +23,12 @@
  */
 
 import { useCallback, useEffect, useReducer, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import { useToast } from "../components/Toaster";
 import { startStreaming, stopStreaming, pauseStreaming, resumeStreaming } from "../ipc/client";
 import { isIpcError } from "../types/ipc-error";
+import type { ErrorCode } from "../types/ipc-error";
 import {
   canStart as selectCanStart,
   canStop as selectCanStop,
@@ -59,10 +61,13 @@ export type StartOptions = {
 export function useRecordingSession({
   backendReady,
   onSessionFinished,
+  onOpenModels,
 }: {
   backendReady: boolean;
   onSessionFinished: () => void;
+  onOpenModels?: () => void;
 }) {
+  const { t } = useTranslation();
   const toast = useToast();
   const [stream, dispatch] = useReducer(
     recordingReducer,
@@ -79,6 +84,11 @@ export function useRecordingSession({
   useEffect(() => {
     onSessionFinishedRef.current = onSessionFinished;
   }, [onSessionFinished]);
+
+  const onOpenModelsRef = useRef(onOpenModels);
+  useEffect(() => {
+    onOpenModelsRef.current = onOpenModels;
+  }, [onOpenModels]);
 
   // Auto-scroll the live transcript list as new lines arrive.
   useEffect(() => {
@@ -100,12 +110,29 @@ export function useRecordingSession({
       const signature = `error|${stream.recoverable}|${stream.message}`;
       if (lastReportedRef.current === signature) return;
       lastReportedRef.current = signature;
+
+      const isModelMissing = stream.errorCode === "modelNotReady";
+
+      let message: string;
+      if (isModelMissing) message = t("errors.modelMissing");
+      else if (stream.recoverable) message = t("errors.streamingFailed");
+      else message = t("errors.streamingStopFailed");
+
       toast.push({
         kind: "error",
-        message: stream.recoverable
-          ? "Streaming failed — you can retry."
-          : "Streaming failed mid-stop. Some audio may not have been persisted.",
-        detail: stream.message,
+        message,
+        detail: isModelMissing
+          ? t("errors.modelMissingDetail")
+          : stream.message,
+        durationMs: isModelMissing ? 0 : undefined,
+        ...(isModelMissing && onOpenModelsRef.current
+          ? {
+              action: {
+                label: t("errors.openModels"),
+                onClick: () => onOpenModelsRef.current?.(),
+              },
+            }
+          : {}),
       });
     } else if (stream.kind === "persisted") {
       const signature = `persisted|${stream.lastTotalSegments}|${stream.lastTotalAudioMs}`;
@@ -113,15 +140,16 @@ export function useRecordingSession({
       lastReportedRef.current = signature;
       toast.push({
         kind: "success",
-        message: "Meeting saved",
-        detail: `${stream.lastTotalSegments} segments · ${(
-          stream.lastTotalAudioMs / 1000
-        ).toFixed(1)} s`,
+        message: t("toast.meetingSaved"),
+        detail: t("toast.meetingDetail", {
+          segments: stream.lastTotalSegments,
+          seconds: (stream.lastTotalAudioMs / 1000).toFixed(1),
+        }),
       });
     } else if (stream.kind !== "starting" && stream.kind !== "stopping") {
       lastReportedRef.current = null;
     }
-  }, [stream, toast]);
+  }, [stream, toast, t]);
 
   const handleEvent = useCallback((evt: TranscriptEvent) => {
     switch (evt.type) {
@@ -153,7 +181,7 @@ export function useRecordingSession({
               key: `${evt.sessionId}-${evt.chunkIndex}`,
               chunkIndex: evt.chunkIndex,
               offsetMs: evt.offsetMs,
-              text: text || "[no speech]",
+              text: text || t("live.noSpeech"),
               language: evt.language,
               rtf: evt.rtf,
               speakerSlot: evt.speakerSlot,
@@ -209,7 +237,7 @@ export function useRecordingSession({
         dispatch({ type: "STREAMING_RESUMED" });
         break;
     }
-  }, []);
+  }, [t]);
 
   const start = useCallback(
     async ({ language, diarize }: StartOptions) => {
@@ -229,10 +257,11 @@ export function useRecordingSession({
         );
       } catch (err) {
         let msg: string;
-        if (isIpcError(err)) msg = err.message;
+        let code: ErrorCode | undefined;
+        if (isIpcError(err)) { msg = err.message; code = err.code; }
         else if (err instanceof Error) msg = err.message;
         else msg = String(err);
-        dispatch({ type: "BACKEND_ERROR", message: msg });
+        dispatch({ type: "BACKEND_ERROR", message: msg, ...(code != null ? { errorCode: code } : {}) });
       }
     },
     [handleEvent],
@@ -246,10 +275,11 @@ export function useRecordingSession({
       await stopStreaming(id);
     } catch (err) {
       let msg: string;
-      if (isIpcError(err)) msg = err.message;
+      let code: ErrorCode | undefined;
+      if (isIpcError(err)) { msg = err.message; code = err.code; }
       else if (err instanceof Error) msg = err.message;
       else msg = String(err);
-      dispatch({ type: "BACKEND_ERROR", message: msg });
+      dispatch({ type: "BACKEND_ERROR", message: msg, ...(code != null ? { errorCode: code } : {}) });
     }
   }, [stream]);
 
@@ -261,10 +291,11 @@ export function useRecordingSession({
       await pauseStreaming(id);
     } catch (err) {
       let msg: string;
-      if (isIpcError(err)) msg = err.message;
+      let code: ErrorCode | undefined;
+      if (isIpcError(err)) { msg = err.message; code = err.code; }
       else if (err instanceof Error) msg = err.message;
       else msg = String(err);
-      dispatch({ type: "BACKEND_ERROR", message: msg });
+      dispatch({ type: "BACKEND_ERROR", message: msg, ...(code != null ? { errorCode: code } : {}) });
     }
   }, [stream]);
 
@@ -276,10 +307,11 @@ export function useRecordingSession({
       await resumeStreaming(id);
     } catch (err) {
       let msg: string;
-      if (isIpcError(err)) msg = err.message;
+      let code: ErrorCode | undefined;
+      if (isIpcError(err)) { msg = err.message; code = err.code; }
       else if (err instanceof Error) msg = err.message;
       else msg = String(err);
-      dispatch({ type: "BACKEND_ERROR", message: msg });
+      dispatch({ type: "BACKEND_ERROR", message: msg, ...(code != null ? { errorCode: code } : {}) });
     }
   }, [stream]);
 
