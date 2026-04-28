@@ -12,6 +12,7 @@
 //! signals the thread to tear down.
 
 use std::thread;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -28,6 +29,10 @@ use echo_domain::{
 pub const SYSTEM_OUTPUT_DEVICE_ID: &str = "windows:wasapi:loopback-default";
 
 const CHANNEL_CAPACITY_HINT: usize = 512;
+
+/// Buffer period hint for WASAPI. Overrides the device default period
+/// (which can be 20–100 ms on some drivers) to reduce callback latency.
+const BUFFER_PERIOD: Duration = Duration::from_millis(10);
 
 /// Windows WASAPI loopback capture adapter.
 ///
@@ -268,7 +273,7 @@ fn run_audio_thread(
                     }
                 },
                 err_fn,
-                None,
+                Some(BUFFER_PERIOD),
             )
             .map_err(|e| DomainError::AudioCaptureFailed(format!("build f32 stream: {e}"))),
         SampleFormat::I16 => device
@@ -286,7 +291,7 @@ fn run_audio_thread(
                     }
                 },
                 err_fn,
-                None,
+                Some(BUFFER_PERIOD),
             )
             .map_err(|e| DomainError::AudioCaptureFailed(format!("build i16 stream: {e}"))),
         SampleFormat::U16 => device
@@ -304,7 +309,7 @@ fn run_audio_thread(
                     }
                 },
                 err_fn,
-                None,
+                Some(BUFFER_PERIOD),
             )
             .map_err(|e| DomainError::AudioCaptureFailed(format!("build u16 stream: {e}"))),
         other => Err(DomainError::AudioFormatUnsupported(format!(

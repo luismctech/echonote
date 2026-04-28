@@ -118,7 +118,16 @@ pub fn run() {
                     _ => {}
                 });
                 tray.on_tray_icon_event(|tray, event| {
-                    if matches!(event, TrayIconEvent::Click { .. }) {
+                    // Only react to left-click. On Windows the OS opens
+                    // the context menu on right-click; intercepting all
+                    // clicks steals focus and prevents the menu from
+                    // appearing.
+                    if let TrayIconEvent::Click {
+                        button: tauri::tray::MouseButton::Left,
+                        button_state: tauri::tray::MouseButtonState::Up,
+                        ..
+                    } = event
+                    {
                         if let Some(w) = tray.app_handle().get_webview_window("main") {
                             let _ = w.show();
                             let _ = w.unminimize();
