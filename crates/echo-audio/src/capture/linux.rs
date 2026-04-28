@@ -13,6 +13,7 @@
 //! signals the thread to tear down.
 
 use std::thread;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -29,6 +30,10 @@ use echo_domain::{
 pub const SYSTEM_OUTPUT_DEVICE_ID: &str = "linux:pulseaudio:monitor-default";
 
 const CHANNEL_CAPACITY_HINT: usize = 512;
+
+/// Buffer period hint for PulseAudio / PipeWire. Keeps callback
+/// latency consistent with the microphone adapter.
+const BUFFER_PERIOD: Duration = Duration::from_millis(10);
 
 /// Linux PulseAudio monitor capture adapter.
 ///
@@ -310,7 +315,7 @@ fn run_audio_thread(
                     }
                 },
                 err_fn,
-                None,
+                Some(BUFFER_PERIOD),
             )
             .map_err(|e| DomainError::AudioCaptureFailed(format!("build f32 stream: {e}"))),
         SampleFormat::I16 => device
@@ -328,7 +333,7 @@ fn run_audio_thread(
                     }
                 },
                 err_fn,
-                None,
+                Some(BUFFER_PERIOD),
             )
             .map_err(|e| DomainError::AudioCaptureFailed(format!("build i16 stream: {e}"))),
         SampleFormat::U16 => device
@@ -346,7 +351,7 @@ fn run_audio_thread(
                     }
                 },
                 err_fn,
-                None,
+                Some(BUFFER_PERIOD),
             )
             .map_err(|e| DomainError::AudioCaptureFailed(format!("build u16 stream: {e}"))),
         other => Err(DomainError::AudioFormatUnsupported(format!(
