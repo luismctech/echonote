@@ -87,6 +87,9 @@ jobs:
       with:
         targets: ${{ matrix.rust-targets }}
 
+    - name: Install sccache
+      uses: mozilla-actions/sccache-action@7d986dd989559c6ecdb630a3fd2557667be217ad # v0.0.9
+
     - name: Cache cargo registry and target
       uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
       with:
