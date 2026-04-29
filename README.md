@@ -95,6 +95,36 @@ All processing happens locally using these open-source AI models:
 
 Models are **not** downloaded automatically — you choose which ones to install from the built-in model manager in **Settings → Models**.
 
+### Choosing the right models for your hardware
+
+Not sure which models to pick? Use this guide based on your RAM:
+
+#### ASR (Speech-to-Text)
+
+| Model | Size | RAM needed | Best for |
+|-------|------|-----------|----------|
+| `base` | ~142 MB | 1 GB | Quick testing, very low-end machines |
+| `small` | ~466 MB | 2 GB | Decent quality on older hardware |
+| `large-v3-turbo` ⭐ | ~1.6 GB | 4 GB | **Recommended** — best speed/quality balance, 90+ languages |
+| `large-v3-turbo-q5_0` | ~574 MB | 2 GB | Quantized turbo — lighter footprint, nearly same quality |
+| `large-v3` | ~3.0 GB | 6 GB | Maximum accuracy, slower |
+
+#### LLM (Summaries & Chat)
+
+| Model | Size | RAM needed | Best for |
+|-------|------|-----------|----------|
+| Qwen 3 8B | ~5 GB | 8–12 GB | **Laptops** with 8–16 GB RAM |
+| Qwen 3 14B ⭐ | ~9 GB | 14–18 GB | **Recommended** — best quality for 16 GB+ machines |
+| Qwen 3 30B-A3B (MoE) | ~18 GB | 24–32 GB | Premium quality on 32 GB+ machines (only 3B active per token) |
+
+#### Quick recommendations
+
+| Your machine | ASR model | LLM model | Total disk |
+|-------------|-----------|-----------|-----------|
+| **8 GB RAM** (older laptop) | `large-v3-turbo-q5_0` | Qwen 3 8B | ~6 GB |
+| **16 GB RAM** (most machines) | `large-v3-turbo` | Qwen 3 14B | ~11 GB |
+| **32 GB+ RAM** (pro machine) | `large-v3-turbo` | Qwen 3 30B-A3B | ~20 GB |
+
 ---
 
 ## System requirements
