@@ -41,7 +41,7 @@
     "fatal": "fatal:",
     "dismiss": "dismiss",
     "listening": "Listening… speak into the microphone.",
-    "pressStart": "Press Start or ⌘⇧R to begin a session.",
+    "pressStart": "Press Start or {{shortcut}} to begin a session.",
     "modelLoads": "model loads on first start",
     "silence": "silence",
     "silenceRms": "silence (rms={{rms}})",
@@ -204,6 +204,8 @@
     "available": "Version {{version}} is available",
     "install": "Install",
     "downloading": "Downloading update…",
+    "downloadingPct": "Downloading update… {{pct}}%",
+    "installed": "Update ready! Close and reopen the app.",
     "failed": "Update failed",
     "checking": "Checking for updates…",
     "upToDate": "You're up to date!"

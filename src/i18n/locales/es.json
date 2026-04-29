@@ -41,7 +41,7 @@
     "fatal": "fatal:",
     "dismiss": "cerrar",
     "listening": "Escuchando… habla por el micrófono.",
-    "pressStart": "Pulsa Iniciar o ⌘⇧R para comenzar una sesión.",
+    "pressStart": "Pulsa Iniciar o {{shortcut}} para comenzar una sesión.",
     "modelLoads": "el modelo se carga en el primer inicio",
     "silence": "silencio",
     "silenceRms": "silencio (rms={{rms}})",
@@ -204,6 +204,8 @@
     "available": "La versión {{version}} está disponible",
     "install": "Instalar",
     "downloading": "Descargando actualización…",
+    "downloadingPct": "Descargando actualización… {{pct}}%",
+    "installed": "¡Actualización lista! Cierra y vuelve a abrir la app.",
     "failed": "Error al actualizar",
     "checking": "Buscando actualizaciones…",
     "upToDate": "¡Estás al día!"

@@ -36,6 +36,9 @@ export function useAutoUpdate(onUpdateFound?: OnUpdateFound) {
   const onUpdateFoundRef = useRef(onUpdateFound);
   onUpdateFoundRef.current = onUpdateFound;
 
+  /** Tracks the last version we surfaced so we don't fire the callback twice. */
+  const lastNotifiedRef = useRef<string | null>(null);
+
   const checkForUpdate = useCallback(async (): Promise<boolean> => {
     if (!isTauri()) return false;
 
@@ -43,6 +46,8 @@ export function useAutoUpdate(onUpdateFound?: OnUpdateFound) {
       const { check } = await import("@tauri-apps/plugin-updater");
       const update = await check();
       if (update) {
+        if (lastNotifiedRef.current === update.version) return true;
+        lastNotifiedRef.current = update.version;
         onUpdateFoundRef.current?.(update.version, update.body ?? undefined);
         return true;
       }
@@ -71,15 +76,25 @@ export function useAutoUpdate(onUpdateFound?: OnUpdateFound) {
 /**
  * Download and install a pending update, then relaunch the app.
  * Call this from a UI button (e.g. toast action or settings panel).
+ *
+ * @param onProgress — called with a fraction 0→1 during download.
+ * @param onPhase — called when the phase changes so the UI can
+ *   surface "downloading…", "installing…", "restarting…" etc.
  */
 export async function installUpdate(
   onProgress?: (fraction: number) => void,
+  onPhase?: (phase: "downloading" | "installed" | "no-update") => void,
 ): Promise<void> {
   const { check } = await import("@tauri-apps/plugin-updater");
   const { relaunch } = await import("@tauri-apps/plugin-process");
 
   const update = await check();
-  if (!update) return;
+  if (!update) {
+    onPhase?.("no-update");
+    return;
+  }
+
+  onPhase?.("downloading");
 
   let downloaded = 0;
   let contentLength = 1;
@@ -99,5 +114,21 @@ export async function installUpdate(
     }
   });
 
-  await relaunch();
+  // At this point the new version is already on disk. Show the user
+  // a clear "close & reopen" message, then *try* to relaunch as a
+  // convenience — if it works the app closes instantly; if not, the
+  // toast is already visible with instructions.
+  onPhase?.("installed");
+
+  // Give the user ~5 s to read the "installed" toast before the app
+  // potentially closes via relaunch.
+  await new Promise((r) => setTimeout(r, 5_000));
+
+  // Best-effort restart. If it fails, the update is still installed
+  // and will be active on the next manual launch.
+  try {
+    await relaunch();
+  } catch {
+    // Swallow — the "installed" toast already told the user what to do.
+  }
 }
