@@ -49,6 +49,7 @@ export type ToastInput = Omit<Toast, "id" | "createdAt" | "durationMs"> & {
 
 type ToastAction =
   | { type: "PUSH"; toast: Toast }
+  | { type: "UPDATE"; id: string; fields: Partial<Omit<Toast, "id" | "createdAt">> }
   | { type: "DISMISS"; id: string }
   | { type: "CLEAR" };
 
@@ -60,6 +61,10 @@ function reducer(state: Toast[], action: ToastAction): Toast[] {
       const idx = state.findIndex((t) => t.kind !== "error");
       const next = idx >= 0 ? state.filter((_, i) => i !== idx) : state.slice(1);
       return [...next, action.toast];
+    case "UPDATE":
+      return state.map((t) =>
+        t.id === action.id ? { ...t, ...action.fields } : t,
+      );
     case "DISMISS":
       return state.filter((t) => t.id !== action.id);
     case "CLEAR":
@@ -88,6 +93,7 @@ function reducer(state: Toast[], action: ToastAction): Toast[] {
 
 type ToastApi = {
   push: (toast: ToastInput) => string;
+  update: (id: string, fields: Partial<Omit<Toast, "id" | "createdAt">>) => void;
   dismiss: (id: string) => void;
   clear: () => void;
 };
@@ -148,11 +154,18 @@ export function ToastProvider({ children }: { children: ReactNode }) {
     dispatch({ type: "DISMISS", id });
   }, []);
 
+  const update = useCallback(
+    (id: string, fields: Partial<Omit<Toast, "id" | "createdAt">>) => {
+      dispatch({ type: "UPDATE", id, fields });
+    },
+    [],
+  );
+
   const clear = useCallback(() => dispatch({ type: "CLEAR" }), []);
 
   const api = useMemo<ToastApi>(
-    () => ({ push, dismiss, clear }),
-    [push, dismiss, clear],
+    () => ({ push, update, dismiss, clear }),
+    [push, update, dismiss, clear],
   );
 
   return (

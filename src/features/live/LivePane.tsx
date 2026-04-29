@@ -8,11 +8,17 @@ import { statusLabel, type RecordingState } from "../../state/recording";
 import type { StreamLine } from "../../types/view";
 import { TranscriptRow } from "./TranscriptRow";
 
+const isMac =
+  typeof navigator !== "undefined" &&
+  /mac|iphone|ipad/i.test(navigator.userAgent);
+
+const SHORTCUT = isMac ? "⌘⇧R" : "Ctrl+Shift+R";
+
 /** Hint text for the empty transcript area. */
-function emptyHint(stream: RecordingState, t: (key: string) => string): string {
-  if (stream.kind === "recording") return t("live.listening");
-  if (stream.kind === "paused") return t("live.pausedHint");
-  return t("live.pressStart");
+function emptyHint(stream: RecordingState, t: ReturnType<typeof useTranslation>["t"]): string {
+  if (stream.kind === "recording") return String(t("live.listening"));
+  if (stream.kind === "paused") return String(t("live.pausedHint"));
+  return String(t("live.pressStart", { shortcut: SHORTCUT }));
 }
 
 export function LivePane({

@@ -137,8 +137,37 @@ export function App() {
       action: {
         label: t("update.install"),
         onClick: () => {
-          toast.push({ kind: "info", message: t("update.downloading") });
-          installUpdate().catch((err) => {
+          const progressId = toast.push({
+            kind: "info",
+            message: t("update.downloadingPct", { pct: 0 }),
+            durationMs: 0, // sticky while download is in flight
+          });
+          installUpdate(
+            (fraction) => {
+              const pct = Math.round(fraction * 100);
+              toast.update(progressId, {
+                message: t("update.downloadingPct", { pct }),
+              });
+            },
+            (phase) => {
+              switch (phase) {
+                case "downloading":
+                  // Already showing the download toast.
+                  break;
+                case "installed":
+                  toast.update(progressId, {
+                    kind: "success",
+                    message: t("update.installed"),
+                  });
+                  break;
+                case "no-update":
+                  toast.dismiss(progressId);
+                  toast.push({ kind: "warning", message: t("update.upToDate") });
+                  break;
+              }
+            },
+          ).catch((err) => {
+            toast.dismiss(progressId);
             toast.push({
               kind: "error",
               message: t("update.failed"),
