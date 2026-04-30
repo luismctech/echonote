@@ -22,6 +22,7 @@
 #                                             # (requires Python; see Pack C below)
 #   scripts/download-models.sh vad            # Silero VAD v5.1.2 (~2 MB)
 #   scripts/download-models.sh embed          # 3D-Speaker ERes2Net (~26 MB)
+#   scripts/download-models.sh segmenter      # pyannote-segmentation-3.0 (~17 MB)
 #   scripts/download-models.sh llm            # Qwen 3 14B Instruct Q4_K_M (~9 GB)
 #   scripts/download-models.sh llm-small      # Qwen 3 8B Instruct Q4_K_M (~5 GB)
 #   scripts/download-models.sh llm-moe        # Qwen 3 30B-A3B Instruct Q4_K_M (~18 GB)
@@ -41,8 +42,9 @@ REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 ASR_DIR="${REPO_ROOT}/models/asr"
 VAD_DIR="${REPO_ROOT}/models/vad"
 EMBED_DIR="${REPO_ROOT}/models/embedder"
+SEG_DIR="${REPO_ROOT}/models/segmenter"
 LLM_DIR="${REPO_ROOT}/models/llm"
-mkdir -p "$ASR_DIR" "$VAD_DIR" "$EMBED_DIR" "$LLM_DIR"
+mkdir -p "$ASR_DIR" "$VAD_DIR" "$EMBED_DIR" "$SEG_DIR" "$LLM_DIR"
 # Back-compat alias for code paths that still reference $MODELS_DIR.
 MODELS_DIR="$ASR_DIR"
 
@@ -75,6 +77,18 @@ SILERO_VAD_URL="https://github.com/snakers4/silero-vad/raw/v5.1.2/src/silero_vad
 # maintainer); upstream lives on ModelScope. ~26 MB, opset 13, outputs
 # a 192-dim embedding from 80-bin Kaldi fbank features.
 ERES2NET_URL="https://huggingface.co/csukuangfj/speaker-embedding-models/resolve/main/3dspeaker_speech_eres2net_sv_en_voxceleb_16k.onnx"
+# CAM++ (Context-Aware Masking++) speaker embedder from the 3D-Speaker
+# project. ~28 MB, same 192-dim Kaldi-fbank pipeline as ERes2Net.
+# Better EER (0.73 % on VoxCeleb-O, 51 % fewer params than ECAPA-TDNN)
+# and stronger multilingual generalisation — recommended for Spanish-
+# primary meetings where ERes2Net (VoxCeleb-EN only) can over-split.
+# Mirrored by csukuangfj on the same HF repo as ERes2Net.
+CAMPP_URL="https://huggingface.co/csukuangfj/speaker-embedding-models/resolve/main/3dspeaker_speech_campplus_sv_en_voxceleb_16k.onnx"
+# pyannote-segmentation-3.0 ONNX export from the sherpa-onnx project.
+# ~17 MB, detects speaker boundaries at 10 ms granularity. Used by the
+# PyannoteSegmenter adapter in echo-diarize to split 5-second chunks
+# into speaker-homogeneous sub-regions before embedding.
+PYANNOTE_SEG_URL="https://huggingface.co/csukuangfj/sherpa-onnx-pyannote-segmentation-3-0/resolve/main/model.onnx"
 # Two-speaker English fixture from the same HF mirror. Used by the
 # echo-diarize integration tests as ground-truth cross-speaker audio.
 ERES2NET_FIXTURE_URL="https://huggingface.co/csukuangfj/speaker-embedding-models/resolve/main/1-two-speakers-en.wav"
@@ -291,6 +305,86 @@ download_eres2net() {
   printf "  ${GRN}✓${RST} two_speakers_en.wav (%d KiB)\n" "$fix_kib"
 }
 
+download_camplusplus() {
+  local out="${EMBED_DIR}/campplus_en_voxceleb.onnx"
+  local need_model=1
+  if [[ -f "$out" ]]; then
+    local got_mib
+    got_mib=$(( $(wc -c < "$out") / 1048576 ))
+    if (( got_mib < 20 )); then
+      warn "campplus_en_voxceleb.onnx present but truncated (${got_mib} MiB, expected ~28 MiB). Re-downloading."
+      rm -f "$out"
+    else
+      info "campplus_en_voxceleb.onnx already present (${got_mib} MiB) — skipping."
+      need_model=0
+    fi
+  fi
+
+  if (( need_model )); then
+    info "Fetching CAM++ (3D-Speaker, EN VoxCeleb) → ${out}"
+    if command -v curl >/dev/null 2>&1; then
+      curl --fail --location --progress-bar --output "$out" "$CAMPP_URL"
+    elif command -v wget >/dev/null 2>&1; then
+      wget --show-progress --output-document="$out" "$CAMPP_URL"
+    else
+      fail "Neither curl nor wget is installed."
+    fi
+    local got_mib
+    got_mib=$(( $(wc -c < "$out") / 1048576 ))
+    if (( got_mib < 20 )); then
+      fail "campplus_en_voxceleb.onnx downloaded incompletely (${got_mib} MiB)"
+    fi
+    printf "  ${GRN}✓${RST} campplus_en_voxceleb.onnx (%d MiB)\n" "$got_mib"
+  fi
+
+  # Share the two-speaker fixture with ERes2Net — download it if missing.
+  mkdir -p "$ERES2NET_FIXTURE_DIR"
+  local fixture_out="${ERES2NET_FIXTURE_DIR}/two_speakers_en.wav"
+  if [[ -f "$fixture_out" && $(wc -c < "$fixture_out") -gt 400000 ]]; then
+    info "two_speakers_en.wav already present — skipping fixture."
+    return
+  fi
+  info "Fetching two-speaker fixture → ${fixture_out}"
+  if command -v curl >/dev/null 2>&1; then
+    curl --fail --location --progress-bar --output "$fixture_out" "$ERES2NET_FIXTURE_URL"
+  elif command -v wget >/dev/null 2>&1; then
+    wget --show-progress --output-document="$fixture_out" "$ERES2NET_FIXTURE_URL"
+  fi
+  local fix_kib
+  fix_kib=$(( $(wc -c < "$fixture_out") / 1024 ))
+  printf "  ${GRN}✓${RST} two_speakers_en.wav (%d KiB)\n" "$fix_kib"
+}
+
+download_pyannote_segmenter() {
+  local out="${SEG_DIR}/pyannote_segmentation_3.onnx"
+  if [[ -f "$out" ]]; then
+    local got_mib
+    got_mib=$(( $(wc -c < "$out") / 1048576 ))
+    if (( got_mib < 10 )); then
+      warn "pyannote_segmentation_3.onnx present but truncated (${got_mib} MiB, expected ~17 MiB). Re-downloading."
+      rm -f "$out"
+    else
+      info "pyannote_segmentation_3.onnx already present (${got_mib} MiB) — skipping."
+      return
+    fi
+  fi
+
+  info "Fetching pyannote-segmentation-3.0 (sherpa-onnx) → ${out}"
+  if command -v curl >/dev/null 2>&1; then
+    curl --fail --location --progress-bar --output "$out" "$PYANNOTE_SEG_URL"
+  elif command -v wget >/dev/null 2>&1; then
+    wget --show-progress --output-document="$out" "$PYANNOTE_SEG_URL"
+  else
+    fail "Neither curl nor wget is installed."
+  fi
+  local got_mib
+  got_mib=$(( $(wc -c < "$out") / 1048576 ))
+  if (( got_mib < 10 )); then
+    fail "pyannote_segmentation_3.onnx downloaded incompletely (${got_mib} MiB)"
+  fi
+  printf "  ${GRN}✓${RST} pyannote_segmentation_3.onnx (%d MiB)\n" "$got_mib"
+}
+
 download_llm() {
   local url="$1"
   local fname="$2"
@@ -349,6 +443,20 @@ main() {
     embed|embedder|eres2net)
       download_eres2net
       info "Embedder in ${EMBED_DIR}. Set ECHO_EMBED_MODEL=${EMBED_DIR}/eres2net_en_voxceleb.onnx if you move it."
+      return
+      ;;
+    cam-plus-plus|camplusplus|cam++)
+      # Recommended embedder for Spanish-first meetings (lower EER,
+      # multilingual training vs ERes2Net VoxCeleb-EN).
+      download_camplusplus
+      info "CAM++ embedder in ${EMBED_DIR}. Set ECHO_EMBED_MODEL=${EMBED_DIR}/campplus_en_voxceleb.onnx if you move it."
+      return
+      ;;
+    segmenter|pyannote|pyannote-segmentation)
+      # pyannote-segmentation-3.0 ONNX for sub-chunk speaker boundary
+      # detection. Used by PyannoteSegmenter in echo-diarize (~17 MB).
+      download_pyannote_segmenter
+      info "Segmenter in ${SEG_DIR}. Set ECHO_SEG_MODEL=${SEG_DIR}/pyannote_segmentation_3.onnx if you move it."
       return
       ;;
     llm|llm-14b|qwen3-14b)

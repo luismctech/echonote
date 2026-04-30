@@ -54,6 +54,8 @@ pub fn run() {
             commands::models::get_active_llm,
             commands::models::set_active_asr,
             commands::models::get_active_asr,
+            commands::models::set_active_embedder,
+            commands::models::get_active_embedder,
             commands::templates::list_custom_templates,
             commands::templates::create_custom_template,
             commands::templates::update_custom_template,

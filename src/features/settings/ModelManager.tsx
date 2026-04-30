@@ -26,7 +26,7 @@ export function ModelManager({
   state: UseModelManager;
   onClose: () => void;
 }>) {
-  const { models, loading, downloading, error, activeLlm, activeAsr } = state;
+  const { models, loading, downloading, error, activeLlm, activeAsr, activeEmbedder } = state;
   const { t } = useTranslation();
   const { data: recommendation } = useHardwareRecommendation();
 
@@ -35,10 +35,12 @@ export function ModelManager({
   const activeIds: Record<string, string | null> = {
     llm: activeLlm,
     asr: activeAsr,
+    embedder: activeEmbedder,
   };
   const selectHandlers: Record<string, (id: string) => void> = {
     llm: state.selectLlm,
     asr: state.selectAsr,
+    embedder: state.selectEmbedder,
   };
 
   const recommendedIds = new Set<string>();
@@ -95,7 +97,7 @@ export function ModelManager({
 }
 
 function groupByKind(models: ModelInfo[]): [string, ModelInfo[]][] {
-  const order = ["asr", "llm", "vad", "embedder"];
+  const order = ["asr", "llm", "vad", "embedder", "segmenter"];
   const map = new Map<string, ModelInfo[]>();
   for (const m of models) {
     const arr = map.get(m.kind) ?? [];
@@ -116,6 +118,7 @@ const KIND_LABELS: Record<string, string> = {
   llm: "models.llm",
   vad: "models.vad",
   embedder: "models.embedder",
+  segmenter: "models.segmenter",
 };
 
 function ModelGroup({
@@ -140,7 +143,7 @@ function ModelGroup({
   onSelect?: (id: string) => void;
 }>) {
   const { t } = useTranslation();
-  const selectable = kind === "llm" || kind === "asr";
+  const selectable = kind === "llm" || kind === "asr" || kind === "embedder";
   return (
     <div className="flex flex-col gap-2">
       <h3 className="text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
@@ -153,7 +156,7 @@ function ModelGroup({
           downloading={downloading}
           isActive={selectable && m.id === activeId}
           isRecommended={recommendedIds.has(m.id)}
-          isRequired={kind === "vad" || kind === "embedder"}
+          isRequired={kind === "vad"}
           showUse={selectable}
           onDownload={onDownload}
           onCancel={onCancel}

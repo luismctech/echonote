@@ -29,6 +29,7 @@ pub use ports::chat::{ChatAssistant, ChatMessage, ChatOptions, ChatRequest, Chat
 pub use ports::diarizer::Diarizer;
 pub use ports::llm::{GenerateOptions, LlmModel};
 pub use ports::resampler::Resampler;
+pub use ports::segmenter::{Segmenter, SpeakerSegment};
 pub use ports::transcriber::{TranscribeOptions, Transcriber, Transcript};
 pub use ports::vad::{Vad, VoiceState};
 

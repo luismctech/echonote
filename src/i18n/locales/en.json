@@ -132,6 +132,7 @@
     "llm": "Language Model (Summary & Chat)",
     "vad": "Voice Activity Detection",
     "embedder": "Speaker Embedder",
+    "segmenter": "Speaker Segmentation (pyannote)",
     "connecting": "Connecting…",
     "installed": "Installed",
     "downloading": "Downloading…",

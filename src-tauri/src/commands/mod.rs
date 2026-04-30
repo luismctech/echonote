@@ -37,7 +37,10 @@ use crate::ipc_error::{ErrorCode, IpcError};
 use echo_app::{MeetingRecorder, RenameSpeaker, StreamingHandle};
 use echo_asr::WhisperCppTranscriber;
 use echo_audio::{RoutingAudioCapture, RubatoResamplerAdapter, SileroVad};
-use echo_diarize::{Eres2NetEmbedder, OnlineDiarizer};
+use echo_diarize::{
+    embedding::SpeakerEmbedder, CamPlusPlusEmbedder, Eres2NetEmbedder, OnlineDiarizer,
+    PyannoteSegmenter,
+};
 use echo_domain::{
     AudioCapture, ChatAssistant, Diarizer, LlmModel, MeetingStore, Resampler, Transcriber,
 };
@@ -139,8 +142,13 @@ pub struct AppState {
     /// Path to the local ASR model. Behind a `RwLock` so
     /// `set_active_asr` can switch models at runtime.
     pub(crate) model_path: std::sync::RwLock<PathBuf>,
-    /// Where to find the speaker embedder ONNX.
-    pub(crate) embed_model_path: PathBuf,
+    /// Where to find the speaker embedder ONNX. Behind a `RwLock` so
+    /// `set_active_embedder` can switch between ERes2Net and CAM++ at runtime.
+    pub(crate) embed_model_path: std::sync::RwLock<PathBuf>,
+    /// Where to find the pyannote segmentation ONNX (optional).
+    /// When the file exists, `build_diarizer` attaches a
+    /// `PyannoteSegmenter` to the `OnlineDiarizer` automatically.
+    pub(crate) seg_model_path: PathBuf,
     pub(crate) store: Arc<dyn MeetingStore>,
     pub(crate) recorder: Arc<MeetingRecorder>,
     pub(crate) rename_speaker: Arc<RenameSpeaker>,
@@ -212,6 +220,16 @@ impl AppState {
         self.model_path.read().unwrap().clone()
     }
 
+    /// Switch the embedder path. The next `build_diarizer` call picks it up.
+    pub(crate) fn set_embed_model_path(&self, path: PathBuf) {
+        *self.embed_model_path.write().unwrap() = path;
+    }
+
+    /// Read the current embedder path.
+    pub(crate) fn active_embed_path(&self) -> PathBuf {
+        self.embed_model_path.read().unwrap().clone()
+    }
+
     /// Ordered shutdown sequence invoked from the Tauri `Exit` hook.
     pub async fn shutdown(&self) {
         let entries: Vec<SessionEntry> = match self.sessions.lock() {
@@ -264,7 +282,12 @@ impl AppState {
         let embed_model_path = resolve_asset_path(
             &data_root,
             std::env::var("ECHO_EMBED_MODEL").ok(),
-            "models/embedder/eres2net_en_voxceleb.onnx",
+            preferred_embed_model(&data_root),
+        );
+        let seg_model_path = resolve_asset_path(
+            &data_root,
+            std::env::var("ECHO_SEG_MODEL").ok(),
+            "models/segmenter/pyannote_segmentation_3.onnx",
         );
         let llm_model_path = resolve_asset_path(
             &data_root,
@@ -281,6 +304,7 @@ impl AppState {
         tracing::info!(
             asr_model = %model_path.display(),
             embed_model = %embed_model_path.display(),
+            seg_model = %seg_model_path.display(),
             llm_model = %llm_model_path.display(),
             vad_model = %vad_model_path.display(),
             db_path = %db_path.display(),
@@ -300,7 +324,8 @@ impl AppState {
             resampler: Arc::new(RubatoResamplerAdapter::new()),
             transcriber: LazyModel::new(),
             model_path: std::sync::RwLock::new(model_path),
-            embed_model_path,
+            embed_model_path: std::sync::RwLock::new(embed_model_path),
+            seg_model_path,
             store,
             recorder,
             rename_speaker,
@@ -370,30 +395,99 @@ impl AppState {
     }
 
     /// Build a fresh diarizer for the upcoming session.
+    ///
+    /// Embedder selection: if the resolved path filename contains
+    /// "camplusplus" or "campplus", `CamPlusPlusEmbedder` is loaded;
+    /// otherwise `Eres2NetEmbedder` is used. The pyannote segmenter is
+    /// attached automatically when its model file is present on disk.
     pub(crate) fn build_diarizer(
         &self,
         override_path: Option<PathBuf>,
     ) -> Result<Box<dyn Diarizer>, IpcError> {
-        let path = override_path.unwrap_or_else(|| self.embed_model_path.clone());
+        let path = override_path.unwrap_or_else(|| self.active_embed_path());
         if !path.exists() {
             return Err(IpcError::model_not_ready(
-                "Speaker embedder model not installed. Open the Models panel and download the ERes2Net model to enable speaker identification."
+                "Speaker embedder model not installed. Open the Models panel and download ERes2Net or CAM++ to enable speaker identification."
                     .to_string(),
             ));
         }
+
+        let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
         let started = std::time::Instant::now();
-        let embedder = Eres2NetEmbedder::new(&path).map_err(|e| {
-            IpcError::new(
-                ErrorCode::Diarization,
-                format!("load speaker embedder at {}: {e}", path.display()),
-            )
-        })?;
-        tracing::info!(
-            model = %path.display(),
-            load_ms = started.elapsed().as_millis() as u64,
-            "speaker embedder ready"
-        );
-        Ok(Box::new(OnlineDiarizer::with_defaults(Box::new(embedder))))
+        let embedder: Box<dyn SpeakerEmbedder> =
+            if file_name.contains("camplusplus") || file_name.contains("campplus") {
+                let emb = CamPlusPlusEmbedder::new(&path).map_err(|e| {
+                    IpcError::new(
+                        ErrorCode::Diarization,
+                        format!("load CAM++ at {}: {e}", path.display()),
+                    )
+                })?;
+                tracing::info!(
+                    model = %path.display(),
+                    load_ms = started.elapsed().as_millis() as u64,
+                    "CAM++ speaker embedder ready"
+                );
+                Box::new(emb)
+            } else {
+                let emb = Eres2NetEmbedder::new(&path).map_err(|e| {
+                    IpcError::new(
+                        ErrorCode::Diarization,
+                        format!("load ERes2Net at {}: {e}", path.display()),
+                    )
+                })?;
+                tracing::info!(
+                    model = %path.display(),
+                    load_ms = started.elapsed().as_millis() as u64,
+                    "ERes2Net speaker embedder ready"
+                );
+                Box::new(emb)
+            };
+
+        // CAM++ 512-dim embeddings have a higher cross-speaker baseline
+        // than ERes2Net 192-dim. In controlled English fixtures
+        // cross-speaker cosine is ~0.57, but real-world Spanish podcasts
+        // (same mic, same gender, similar timbre) can push cross-speaker
+        // to 0.70–0.78. We set:
+        //   - similarity_threshold = 0.78: high enough to separate same-
+        //     gender speakers sharing a mic, low enough that the same
+        //     speaker's centroids don't over-split.
+        //   - merge_threshold = 1.0: DISABLE online centroid merging.
+        //     The EMA centroids drift toward each other over time, and at
+        //     0.85 they cascade-merge all speakers into one. The offline
+        //     AHC pass (refine_offline) handles merging properly after the
+        //     session ends, using full-session means instead of noisy EMAs.
+        let cluster_cfg = if file_name.contains("camplusplus") || file_name.contains("campplus") {
+            echo_diarize::OnlineClusterConfig {
+                similarity_threshold: 0.78,
+                merge_threshold: 1.0, // disable online merge for CAM++
+                ..Default::default()
+            }
+        } else {
+            echo_diarize::OnlineClusterConfig::default()
+        };
+        let mut diarizer = OnlineDiarizer::new(embedder, cluster_cfg);
+
+        // Attach pyannote segmenter if the model file is installed.
+        if self.seg_model_path.exists() {
+            match PyannoteSegmenter::new(&self.seg_model_path) {
+                Ok(seg) => {
+                    tracing::info!(
+                        model = %self.seg_model_path.display(),
+                        "pyannote segmenter attached — sub-chunk speaker boundaries enabled"
+                    );
+                    diarizer = diarizer.with_segmenter(Box::new(seg));
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        model = %self.seg_model_path.display(),
+                        "failed to load pyannote segmenter; continuing without sub-chunk segmentation"
+                    );
+                }
+            }
+        }
+
+        Ok(Box::new(diarizer))
     }
 
     /// Lazily load the Silero VAD ONNX once per process.
@@ -516,6 +610,21 @@ fn preferred_llm_model(root: &Path) -> &'static str {
         }
     }
     "models/llm/Qwen3-14B-Q4_K_M.gguf"
+}
+
+fn preferred_embed_model(root: &Path) -> &'static str {
+    // CAM++ has lower EER and better multilingual coverage than ERes2Net,
+    // so prefer it when already installed.
+    const CANDIDATES: &[&str] = &[
+        "models/embedder/camplusplus_en_voxceleb.onnx",
+        "models/embedder/eres2net_en_voxceleb.onnx",
+    ];
+    for rel in CANDIDATES {
+        if root.join(rel).exists() {
+            return rel;
+        }
+    }
+    "models/embedder/eres2net_en_voxceleb.onnx"
 }
 
 fn preferred_asr_model(root: &Path) -> &'static str {

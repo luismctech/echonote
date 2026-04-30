@@ -13,15 +13,31 @@
 //! per-track contract documented on [`Diarizer`].
 
 use async_trait::async_trait;
-use echo_domain::{Diarizer, DomainError, Sample, Speaker, SpeakerId};
+use echo_domain::{Diarizer, DomainError, Sample, Segmenter, Speaker, SpeakerId};
 
 use crate::cluster::{OnlineCluster, OnlineClusterConfig};
 use crate::embedding::SpeakerEmbedder;
+use crate::offline_refine::{refine_speakers, OfflineRefineConfig};
 
 /// Streaming diarizer backed by a swappable embedder + online cluster.
+///
+/// In addition to real-time assignment, the diarizer optionally
+/// accumulates every embedding it computes so that an offline AHC
+/// refinement pass can be run after the session ends (see
+/// [`OnlineDiarizer::refine_offline`]).  Accumulation is disabled by
+/// default to avoid a memory cost on long recordings when the caller
+/// does not intend to use the offline pass.
 pub struct OnlineDiarizer {
     embedder: Box<dyn SpeakerEmbedder>,
     cluster: OnlineCluster,
+    /// When `Some`, every embedding computed by `assign` is appended
+    /// here alongside the online-assigned [`SpeakerId`].
+    embedding_log: Option<Vec<(Vec<f32>, SpeakerId)>>,
+    /// Optional sub-chunk speaker boundary detector. When present,
+    /// each audio chunk is split into speaker-homogeneous segments
+    /// before embedding, improving accuracy when multiple speakers
+    /// alternate within a single VAD chunk.
+    segmenter: Option<Box<dyn Segmenter>>,
 }
 
 impl OnlineDiarizer {
@@ -34,6 +50,8 @@ impl OnlineDiarizer {
         Self {
             embedder,
             cluster: OnlineCluster::new(cluster_config),
+            embedding_log: None,
+            segmenter: None,
         }
     }
 
@@ -41,6 +59,59 @@ impl OnlineDiarizer {
     #[must_use]
     pub fn with_defaults(embedder: Box<dyn SpeakerEmbedder>) -> Self {
         Self::new(embedder, OnlineClusterConfig::default())
+    }
+
+    /// Attach a [`Segmenter`] that will split each chunk into
+    /// speaker-homogeneous sub-regions before embedding. The dominant
+    /// speaker (by sample count) is returned from [`Diarizer::assign`].
+    ///
+    /// When the segmenter returns an empty result (e.g. a silent chunk),
+    /// the diarizer falls back to whole-chunk embedding.
+    #[must_use]
+    pub fn with_segmenter(mut self, segmenter: Box<dyn Segmenter>) -> Self {
+        self.segmenter = Some(segmenter);
+        self
+    }
+
+    /// Enable embedding accumulation for the offline refinement pass.
+    ///
+    /// When called before the session starts, every embedding computed
+    /// by [`Diarizer::assign`] is stored in memory alongside its
+    /// online-assigned speaker ID.  Call [`Self::refine_offline`] after
+    /// the session ends to re-cluster the accumulated embeddings and
+    /// obtain a merge map.
+    ///
+    /// Not enabled by default because long meetings can accumulate
+    /// several hundred embeddings (192 floats each), adding a modest
+    /// but non-zero memory cost.
+    #[must_use]
+    pub fn with_offline_refinement(mut self) -> Self {
+        self.embedding_log = Some(Vec::new());
+        self
+    }
+
+    /// Run the offline AHC refinement pass over all accumulated
+    /// embeddings and return a list of `(absorbed_id, surviving_id)`
+    /// speaker merges.
+    ///
+    /// Returns an empty `Vec` when:
+    /// - offline accumulation was not enabled ([`Self::with_offline_refinement`]),
+    /// - fewer than two speakers were detected, or
+    /// - the AHC pass found no pairs above `config.merge_threshold`.
+    ///
+    /// The caller is responsible for applying the returned merges to
+    /// the stored segment records (typically in the stop-recording use
+    /// case, before persisting to the database).
+    pub fn refine_offline(&self, config: OfflineRefineConfig) -> Vec<(SpeakerId, SpeakerId)> {
+        let Some(ref log) = self.embedding_log else {
+            return Vec::new();
+        };
+        refine_speakers(log, &self.cluster.speakers(), config)
+    }
+
+    /// Convenience overload using [`OfflineRefineConfig::default`].
+    pub fn refine_offline_default(&self) -> Vec<(SpeakerId, SpeakerId)> {
+        self.refine_offline(OfflineRefineConfig::default())
     }
 
     /// Direct cluster handle for tests and observability. Not part
@@ -58,10 +129,39 @@ impl Diarizer for OnlineDiarizer {
     }
 
     async fn assign(&mut self, samples: &[Sample]) -> Result<Option<SpeakerId>, DomainError> {
+        // Segmented path: split the chunk into speaker-homogeneous
+        // sub-regions, embed each separately, return the dominant speaker.
+        if let Some(ref mut segmenter) = self.segmenter {
+            let segments = segmenter.segment(samples)?;
+            if !segments.is_empty() {
+                let mut best: Option<(SpeakerId, usize)> = None;
+                for seg in &segments {
+                    let end = seg.end_sample.min(samples.len());
+                    let sub = &samples[seg.start_sample..end];
+                    if let Some(embedding) = self.embedder.embed(sub)? {
+                        let id = self.cluster.assign(embedding.clone());
+                        if let Some(ref mut log) = self.embedding_log {
+                            log.push((embedding, id));
+                        }
+                        let len = end.saturating_sub(seg.start_sample);
+                        best = Some(match best {
+                            Some((prev_id, prev_len)) if prev_len >= len => (prev_id, prev_len),
+                            _ => (id, len),
+                        });
+                    }
+                }
+                return Ok(best.map(|(id, _)| id));
+            }
+        }
+        // Whole-chunk path (no segmenter, or segmenter returned nothing).
         let Some(embedding) = self.embedder.embed(samples)? else {
             return Ok(None);
         };
-        Ok(Some(self.cluster.assign(embedding)))
+        let id = self.cluster.assign(embedding.clone());
+        if let Some(ref mut log) = self.embedding_log {
+            log.push((embedding, id));
+        }
+        Ok(Some(id))
     }
 
     fn speakers(&self) -> Vec<Speaker> {
@@ -74,6 +174,9 @@ impl Diarizer for OnlineDiarizer {
 
     fn reset(&mut self) {
         self.cluster.reset();
+        if let Some(ref mut log) = self.embedding_log {
+            log.clear();
+        }
     }
 }
 

@@ -278,6 +278,16 @@ export async function getActiveAsr(): Promise<string | null> {
   return invoke<string | null>("get_active_asr");
 }
 
+/** Set the active speaker embedder (ERes2Net or CAM++). Takes effect on the next diarization session. */
+export async function setActiveEmbedder(modelId: string): Promise<void> {
+  return invoke<void>("set_active_embedder", { modelId });
+}
+
+/** Get the currently active embedder model id, or null. */
+export async function getActiveEmbedder(): Promise<string | null> {
+  return invoke<string | null>("get_active_embedder");
+}
+
 // ---------------------------------------------------------------------------
 // Custom templates (user-defined summary prompts)
 // ---------------------------------------------------------------------------

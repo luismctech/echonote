@@ -82,6 +82,22 @@ pub struct SileroVadConfig {
     /// `16` ≈ 512 ms, which keeps natural breath pauses inside an
     /// utterance.
     pub end_frames: u8,
+    /// Consecutive silent 512-sample windows (≈ 32 ms each) that must
+    /// accumulate *across chunk boundaries* before the LSTM hidden
+    /// state is reset at the start of the next [`SileroVad::push`]
+    /// call.
+    ///
+    /// Setting this to `0` restores the legacy per-chunk reset
+    /// behaviour. `u8::MAX` disables automatic resets entirely
+    /// (only [`SileroVad::reset`] clears the state).
+    ///
+    /// **Rationale:** keeping the LSTM state alive across chunk
+    /// boundaries lets the model carry temporal context through
+    /// active speech and short inter-chunk pauses. Resetting only
+    /// after genuine long silences (default: 32 windows ≈ 1 s)
+    /// prevents the cumulative drift that can otherwise lock the
+    /// model into a permanent voiced or silent prediction.
+    pub lstm_state_reset_frames: u8,
 }
 
 impl Default for SileroVadConfig {
@@ -91,6 +107,7 @@ impl Default for SileroVadConfig {
             end_threshold: 0.35,
             start_frames: 1,
             end_frames: 16,
+            lstm_state_reset_frames: 32, // ≈ 1 s of silence
         }
     }
 }
@@ -106,6 +123,7 @@ impl SileroVadConfig {
             end_threshold: 0.20,
             start_frames: 1,
             end_frames: 16,
+            lstm_state_reset_frames: 32, // ≈ 1 s of silence
         }
     }
 }
@@ -125,6 +143,10 @@ pub struct SileroVad {
     hysteresis: VoiceState,
     voiced_run: u8,
     silent_run: u8,
+    /// Consecutive silent 512-sample windows accumulated across chunk
+    /// boundaries. When this reaches `config.lstm_state_reset_frames`
+    /// the LSTM state is reset at the next `push` call.
+    cross_chunk_silent_windows: u8,
 }
 
 impl std::fmt::Debug for SileroVad {
@@ -134,6 +156,10 @@ impl std::fmt::Debug for SileroVad {
             .field("state", &"<Tensor [2,1,128]>")
             .field("carry_len", &self.carry.len())
             .field("hysteresis", &self.hysteresis)
+            .field(
+                "cross_chunk_silent_windows",
+                &self.cross_chunk_silent_windows,
+            )
             .finish()
     }
 }
@@ -182,6 +208,7 @@ impl SileroVad {
             hysteresis: VoiceState::Silence,
             voiced_run: 0,
             silent_run: 0,
+            cross_chunk_silent_windows: 0,
         })
     }
 
@@ -210,6 +237,7 @@ impl SileroVad {
             hysteresis: VoiceState::Silence,
             voiced_run: 0,
             silent_run: 0,
+            cross_chunk_silent_windows: 0,
         }
     }
 
@@ -283,14 +311,20 @@ impl Vad for SileroVad {
     }
 
     async fn push(&mut self, samples: &[Sample]) -> Result<VoiceState, DomainError> {
-        // Reset the LSTM hidden state at the start of each chunk so
-        // cross-chunk state drift cannot lock the model into permanent
-        // silence. Each 5-second chunk still gets ~156 windows of
-        // intra-chunk LSTM context (plenty for Silero to build a
-        // temporal model). Cross-chunk coherence is provided by the
-        // hysteresis counters (voiced_run / silent_run) which persist
-        // across calls.
-        self.state = zero_state();
+        // Reset the LSTM hidden state only when enough consecutive silent
+        // windows have accumulated across chunk boundaries. During active
+        // speech or short inter-chunk pauses the state propagates freely,
+        // giving the model cross-chunk temporal context. After a genuine
+        // long silence (≥ lstm_state_reset_frames × 32 ms) the state is
+        // cleared before processing the next chunk to prevent drift.
+        //
+        // Setting lstm_state_reset_frames = 0 restores the legacy
+        // per-chunk reset (zero means "always reset").
+        if self.config.lstm_state_reset_frames == 0
+            || self.cross_chunk_silent_windows >= self.config.lstm_state_reset_frames
+        {
+            self.state = zero_state();
+        }
 
         // Concat carry + new samples, then drain in 512-sample windows.
         let mut buf: Vec<Sample> = if self.carry.is_empty() {
@@ -331,6 +365,11 @@ impl Vad for SileroVad {
             }
             if prob >= self.config.end_threshold {
                 n_above_end += 1;
+                // Any voice energy resets the cross-chunk silence counter
+                // so the LSTM state is preserved into the next chunk.
+                self.cross_chunk_silent_windows = 0;
+            } else {
+                self.cross_chunk_silent_windows = self.cross_chunk_silent_windows.saturating_add(1);
             }
             cursor += SILERO_FRAME_SAMPLES;
         }
@@ -371,6 +410,7 @@ impl Vad for SileroVad {
         self.hysteresis = VoiceState::Silence;
         self.voiced_run = 0;
         self.silent_run = 0;
+        self.cross_chunk_silent_windows = 0;
     }
 }
 
@@ -518,6 +558,7 @@ mod tests {
         assert_eq!(child.hysteresis, VoiceState::Silence);
         assert_eq!(child.voiced_run, 0);
         assert_eq!(child.silent_run, 0);
+        assert_eq!(child.cross_chunk_silent_windows, 0);
         assert!(child.carry.is_empty());
 
         // And it should still classify pure silence as silent on a
@@ -541,6 +582,70 @@ mod tests {
         // After reset, classifying a single small buffer that does
         // not cover a full window must keep the state at Silence.
         let state = vad.push(&[0.0_f32; 100]).await.unwrap();
+        assert_eq!(state, VoiceState::Silence);
+    }
+
+    /// Verify that the cross-chunk silence counter drives LSTM state
+    /// resets correctly:
+    ///
+    /// - After enough silent windows the counter should reach the
+    ///   threshold and the state will be reset on the next push.
+    /// - Any voiced window resets the counter back to zero.
+    #[tokio::test]
+    async fn cross_chunk_silence_counter_resets_on_voice() {
+        let Some(path) = model_path() else {
+            return;
+        };
+        // Use a small reset threshold so the test does not need to
+        // push many seconds of silence.
+        let config = SileroVadConfig {
+            lstm_state_reset_frames: 4, // 4 × 32 ms = 128 ms
+            ..SileroVadConfig::meetings()
+        };
+        let mut vad = SileroVad::from_path(&path, config).expect("load model");
+
+        // Push silent windows to accumulate the counter.
+        // Each push of 512 samples is exactly one window.
+        let silent_window = vec![0.0_f32; SILERO_FRAME_SAMPLES];
+        for _ in 0..4 {
+            vad.push(&silent_window).await.unwrap();
+        }
+        assert!(
+            vad.cross_chunk_silent_windows >= 4,
+            "counter should have reached threshold after 4 silent windows"
+        );
+
+        // A subsequent push with voiced content (even just a sine)
+        // should reset the counter within the loop.
+        let voiced = sine(440.0, 500, 0.5);
+        vad.push(&voiced).await.unwrap();
+        // The model may or may not classify the sine as voiced, but
+        // even if it does, the loop resets cross_chunk_silent_windows
+        // to 0 on the first window above end_threshold. We verify the
+        // counter is strictly less than the threshold.
+        assert!(
+            vad.cross_chunk_silent_windows < config.lstm_state_reset_frames,
+            "counter should be below threshold after voiced content"
+        );
+    }
+
+    /// Verify that setting lstm_state_reset_frames = 0 restores the
+    /// legacy per-chunk reset behaviour (state is always zeroed at
+    /// the start of each push, regardless of silence count).
+    #[tokio::test]
+    async fn legacy_reset_mode_when_frames_zero() {
+        let Some(path) = model_path() else {
+            return;
+        };
+        let config = SileroVadConfig {
+            lstm_state_reset_frames: 0,
+            ..SileroVadConfig::meetings()
+        };
+        let mut vad = SileroVad::from_path(&path, config).expect("load model");
+        // Even with cross_chunk_silent_windows = 0 the state must
+        // be reset on every push when the threshold is 0. Just
+        // verify it doesn't panic and classifies silence as silence.
+        let state = vad.push(&vec![0.0_f32; 16_000]).await.unwrap();
         assert_eq!(state, VoiceState::Silence);
     }
 }

@@ -148,6 +148,28 @@ fn model_catalog(root: &std::path::Path) -> Vec<(ModelInfo, &'static str, Option
             "https://huggingface.co/csukuangfj/speaker-embedding-models/resolve/main/3dspeaker_speech_eres2net_sv_en_voxceleb_16k.onnx",
             None,
         ),
+        (
+            ModelInfo {
+                id: "embedder-camplusplus".into(),
+                label: "CAM++ Speaker Embedder — recommended for Spanish (28 MB)".into(),
+                kind: "embedder".into(),
+                present: present("models/embedder/campplus_en_voxceleb.onnx"),
+                size_bytes: 28_000_000,
+            },
+            "https://huggingface.co/csukuangfj/speaker-embedding-models/resolve/main/3dspeaker_speech_campplus_sv_en_voxceleb_16k.onnx",
+            None,
+        ),
+        (
+            ModelInfo {
+                id: "segmenter-pyannote".into(),
+                label: "pyannote Segmentation 3.0 — speaker boundary detection (17 MB)".into(),
+                kind: "segmenter".into(),
+                present: present("models/segmenter/pyannote_segmentation_3.onnx"),
+                size_bytes: 17_000_000,
+            },
+            "https://huggingface.co/csukuangfj/sherpa-onnx-pyannote-segmentation-3-0/resolve/main/model.onnx",
+            None,
+        ),
     ]
 }
 
@@ -164,6 +186,8 @@ fn model_dest_path(id: &str) -> Option<&'static str> {
         "llm-qwen3-8b" => Some("models/llm/Qwen3-8B-Q4_K_M.gguf"),
         "vad-silero" => Some("models/vad/silero_vad.onnx"),
         "embedder-eres2net" => Some("models/embedder/eres2net_en_voxceleb.onnx"),
+        "embedder-camplusplus" => Some("models/embedder/campplus_en_voxceleb.onnx"),
+        "segmenter-pyannote" => Some("models/segmenter/pyannote_segmentation_3.onnx"),
         _ => None,
     }
 }
@@ -468,6 +492,60 @@ pub fn get_active_llm(state: State<'_, AppState>) -> Option<String> {
     let catalog = model_catalog(&state.data_root);
     for (info, _, _) in &catalog {
         if info.kind == "llm" {
+            let rel = model_dest_path(&info.id).unwrap_or("");
+            if state.data_root.join(rel) == path {
+                return Some(info.id.clone());
+            }
+        }
+    }
+    None
+}
+
+/// Set the active speaker embedder model. The next diarization session
+/// will load the chosen model (ERes2Net or CAM++).
+///
+/// `model_id` must be an `"embedder-*"` id from the catalog whose
+/// model file is already downloaded.
+#[tauri::command]
+#[specta::specta]
+pub async fn set_active_embedder(
+    state: State<'_, AppState>,
+    model_id: String,
+) -> Result<(), IpcError> {
+    let rel_path = model_dest_path(&model_id)
+        .ok_or_else(|| IpcError::not_found(format!("unknown model: {model_id}")))?;
+
+    if !model_id.starts_with("embedder-") {
+        return Err(IpcError::new(
+            ErrorCode::InvalidInput,
+            format!("{model_id} is not an embedder model"),
+        ));
+    }
+
+    let dest = state.data_root.join(rel_path);
+    if !dest.exists() {
+        return Err(IpcError::not_found(format!(
+            "model not downloaded: {model_id}"
+        )));
+    }
+
+    state.set_embed_model_path(dest);
+    tracing::info!(model_id = %model_id, "active embedder switched");
+    Ok(())
+}
+
+/// Return the model id of the currently configured embedder, or `null`
+/// when no embedder model file exists on disk.
+#[tauri::command]
+#[specta::specta]
+pub fn get_active_embedder(state: State<'_, AppState>) -> Option<String> {
+    let path = state.active_embed_path();
+    if !path.exists() {
+        return None;
+    }
+    let catalog = model_catalog(&state.data_root);
+    for (info, _, _) in &catalog {
+        if info.kind == "embedder" {
             let rel = model_dest_path(&info.id).unwrap_or("");
             if state.data_root.join(rel) == path {
                 return Some(info.id.clone());

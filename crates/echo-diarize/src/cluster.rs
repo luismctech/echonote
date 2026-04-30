@@ -185,17 +185,17 @@ impl OnlineCluster {
 
         let (assigned_idx, id) = match best {
             Some((idx, sim)) if sim >= self.config.similarity_threshold => {
-                tracing::trace!(speaker_slot = self.centroids[idx].speaker.slot, cosine = %format!("{sim:.3}"), "assign → existing (above threshold)");
+                tracing::debug!(speaker_slot = self.centroids[idx].speaker.slot, cosine = %format!("{sim:.3}"), threshold = %format!("{:.3}", self.config.similarity_threshold), "assign → existing (above threshold)");
                 self.update_centroid(idx, &embedding);
                 (idx, self.centroids[idx].speaker.id)
             }
             Some((idx, sim)) if self.centroids.len() >= self.config.max_speakers => {
-                tracing::trace!(speaker_slot = self.centroids[idx].speaker.slot, cosine = %format!("{sim:.3}"), "assign → forced merge (cap reached)");
+                tracing::debug!(speaker_slot = self.centroids[idx].speaker.slot, cosine = %format!("{sim:.3}"), "assign → forced merge (cap reached)");
                 self.update_centroid(idx, &embedding);
                 (idx, self.centroids[idx].speaker.id)
             }
             Some((_, sim)) => {
-                tracing::debug!(best_cosine = %format!("{sim:.3}"), n_speakers = self.centroids.len(), "assign → new speaker (below threshold)");
+                tracing::debug!(best_cosine = %format!("{sim:.3}"), threshold = %format!("{:.3}", self.config.similarity_threshold), n_speakers = self.centroids.len(), "assign → new speaker (below threshold)");
                 let new_idx = self.centroids.len();
                 let new_id = self.spawn(embedding);
                 (new_idx, new_id)

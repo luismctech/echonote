@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { cancelDownload, deleteModel, downloadModel, getModelStatus, setActiveLlm, getActiveLlm, setActiveAsr, getActiveAsr } from "../ipc/client";
+import { cancelDownload, deleteModel, downloadModel, getModelStatus, setActiveLlm, getActiveLlm, setActiveAsr, getActiveAsr, setActiveEmbedder, getActiveEmbedder } from "../ipc/client";
 import { isIpcError } from "../types/ipc-error";
 import type { DownloadEvent, ModelInfo } from "../types/models";
 
@@ -16,12 +16,14 @@ export type UseModelManager = {
   error: string | null;
   activeLlm: string | null;
   activeAsr: string | null;
+  activeEmbedder: string | null;
   refresh: () => void;
   download: (modelId: string) => void;
   cancelDl: (modelId: string) => void;
   remove: (modelId: string) => void;
   selectLlm: (modelId: string) => void;
   selectAsr: (modelId: string) => void;
+  selectEmbedder: (modelId: string) => void;
 };
 
 export function useModelManager(): UseModelManager {
@@ -31,17 +33,19 @@ export function useModelManager(): UseModelManager {
   const [error, setError] = useState<string | null>(null);
   const [activeLlm, setActiveLlmState] = useState<string | null>(null);
   const [activeAsr, setActiveAsrState] = useState<string | null>(null);
+  const [activeEmbedder, setActiveEmbedderState] = useState<string | null>(null);
   const mountedRef = useRef(true);
 
   const fetchStatus = useCallback(() => {
     setLoading(true);
     setError(null);
-    Promise.all([getModelStatus(), getActiveLlm(), getActiveAsr()])
-      .then(([result, activeLlmId, activeAsrId]) => {
+    Promise.all([getModelStatus(), getActiveLlm(), getActiveAsr(), getActiveEmbedder()])
+      .then(([result, activeLlmId, activeAsrId, activeEmbedderId]) => {
         if (mountedRef.current) {
           setModels(result);
           setActiveLlmState(activeLlmId);
           setActiveAsrState(activeAsrId);
+          setActiveEmbedderState(activeEmbedderId);
         }
       })
       .catch((err) => {
@@ -173,5 +177,25 @@ export function useModelManager(): UseModelManager {
     [],
   );
 
-  return { models, loading, downloading, error, activeLlm, activeAsr, refresh: fetchStatus, download, cancelDl, remove, selectLlm, selectAsr };
+  const selectEmbedder = useCallback(
+    (modelId: string) => {
+      setError(null);
+      setActiveEmbedder(modelId)
+        .then(() => {
+          if (mountedRef.current) setActiveEmbedderState(modelId);
+        })
+        .catch((err) => {
+          if (mountedRef.current) {
+            let msg: string;
+            if (isIpcError(err)) msg = err.message;
+            else if (err instanceof Error) msg = err.message;
+            else msg = String(err);
+            setError(msg);
+          }
+        });
+    },
+    [],
+  );
+
+  return { models, loading, downloading, error, activeLlm, activeAsr, activeEmbedder, refresh: fetchStatus, download, cancelDl, remove, selectLlm, selectAsr, selectEmbedder };
 }

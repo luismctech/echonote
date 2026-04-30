@@ -132,6 +132,7 @@
     "llm": "Modelo de lenguaje (Resumen y Chat)",
     "vad": "Detección de actividad vocal",
     "embedder": "Embedder de hablantes",
+    "segmenter": "Segmentación de hablantes (pyannote)",
     "connecting": "Conectando…",
     "installed": "Instalado",
     "downloading": "Descargando…",

@@ -12,6 +12,7 @@ pub mod chat;
 pub mod diarizer;
 pub mod llm;
 pub mod resampler;
+pub mod segmenter;
 pub mod storage;
 pub mod transcriber;
 pub mod vad;
