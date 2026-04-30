@@ -229,38 +229,11 @@ export async function summarizeMeeting(
   meetingId: MeetingId,
   template?: string,
   includeNotes?: boolean,
-  language?: string,
 ): Promise<Summary> {
   return invoke<Summary>("summarize_meeting", {
     meetingId,
     template: template ?? null,
     includeNotes: includeNotes ?? false,
-    language: language ?? null,
-  });
-}
-
-/**
- * Streaming variant of {@link summarizeMeeting}. Sends tokens as they
- * are decoded so the UI can render them incrementally.
- *
- * The stream finishes with a `completed` event carrying the persisted
- * {@link Summary}, or a `failed` event on error.
- */
-export async function summarizeMeetingStream(
-  meetingId: MeetingId,
-  template: string | undefined,
-  includeNotes: boolean,
-  onEvent: (event: SummarizeEvent) => void,
-  language?: string,
-): Promise<void> {
-  const channel = new Channel<SummarizeEvent>();
-  channel.onmessage = onEvent;
-  return invoke<void>("summarize_meeting_stream", {
-    meetingId,
-    template: template ?? null,
-    includeNotes,
-    language: language ?? null,
-    onEvent: channel,
   });
 }
 
@@ -397,13 +370,11 @@ export async function summarizeWithCustomTemplate(
   meetingId: MeetingId,
   templateId: CustomTemplateId,
   includeNotes?: boolean,
-  language?: string,
 ): Promise<Summary> {
   return invoke<Summary>("summarize_with_custom_template", {
     meetingId,
     templateId,
     includeNotes: includeNotes ?? false,
-    language: language ?? null,
   });
 }
 

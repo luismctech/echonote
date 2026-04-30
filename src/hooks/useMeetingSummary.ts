@@ -124,31 +124,9 @@ export function useMeetingSummary(meetingId: MeetingId | null): UseMeetingSummar
     try {
       let fresh: Summary | undefined;
       if (selectedTemplate.kind === "custom") {
-        // Custom templates use non-streaming path (no streaming command for custom yet).
-        fresh = await generateCustomCall(meetingId, selectedTemplate.id, includeNotes, lang);
+        fresh = await generateCustomCall(meetingId, selectedTemplate.id, includeNotes);
       } else {
-        // Built-in templates use streaming for progressive rendering.
-        fresh = await new Promise<Summary | undefined>((resolve, reject) => {
-          summarizeMeetingStream(
-            meetingId,
-            selectedTemplate.id,
-            includeNotes,
-            (event) => {
-              switch (event.kind) {
-                case "token":
-                  setStreamingText((prev) => prev + event.delta);
-                  break;
-                case "completed":
-                  resolve(event.summary);
-                  break;
-                case "failed":
-                  reject(new Error(event.error));
-                  break;
-              }
-            },
-            lang,
-          ).catch(reject);
-        });
+        fresh = await generateBuiltinCall(meetingId, selectedTemplate.id, includeNotes);
       }
       if (fresh && requestedRef.current === meetingId) {
         setSummary(fresh);
@@ -162,7 +140,7 @@ export function useMeetingSummary(meetingId: MeetingId | null): UseMeetingSummar
       setGenerating(false);
       setStreamingText("");
     }
-  }, [meetingId, selectedTemplate, includeNotes, generateCustomCall, i18n.language]);
+  }, [meetingId, selectedTemplate, includeNotes, generateBuiltinCall, generateCustomCall]);
 
   return {
     summary,
