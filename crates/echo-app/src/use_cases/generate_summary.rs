@@ -299,7 +299,6 @@ impl SummarizeMeeting {
         meeting_id: MeetingId,
         template: &str,
         include_notes: bool,
-        language_override: Option<&str>,
     ) -> Result<BoxStream<'static, SummarizeEvent>, SummarizeMeetingError> {
         if !TEMPLATE_IDS.contains(&template) {
             return Err(SummarizeMeetingError::InvalidTemplate(template.to_string()));
@@ -323,9 +322,7 @@ impl SummarizeMeeting {
             None
         };
 
-        let language = language_override
-            .map(String::from)
-            .or_else(|| meeting.summary.language.clone());
+        let language = meeting.summary.language.clone();
         let language_instruction = language_instruction(language.as_deref());
 
         let prompt = build_prompt(

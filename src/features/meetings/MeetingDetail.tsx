@@ -234,41 +234,9 @@ export function MeetingDetail({
         <ExportButton meetingId={m.id} title={m.title} />
       </header>
 
-      {/* ── Speakers (inline, compact) ── */}
-      {m.speakers.length > 0 && (
-        <SpeakersPanel speakers={m.speakers} segments={m.segments} onRename={onRenameSpeaker} />
-      )}
-
-      {/* ── Tab bar ── */}
-      <nav className="flex gap-1 border-b border-subtle" aria-label="Meeting sections">
-        {tabs.map((tab) => (
-          <button
-            key={tab.id}
-            type="button"
-            onClick={() => setActiveTab(tab.id)}
-            className={`relative px-3 py-2 text-ui-sm font-medium transition-colors ${
-              activeTab === tab.id
-                ? "text-content-primary"
-                : "text-content-tertiary hover:text-content-secondary"
-            }`}
-          >
-            {tab.label}
-            {tab.count != null && tab.count > 0 && (
-              <span className="ml-1.5 inline-flex min-w-[18px] items-center justify-center rounded-full bg-surface-sunken px-1 text-micro font-medium tabular-nums text-content-tertiary">
-                {tab.count}
-              </span>
-            )}
-            {activeTab === tab.id && (
-              <span className="absolute inset-x-0 -bottom-px h-0.5 rounded-full bg-content-primary" />
-            )}
-          </button>
-        ))}
-      </nav>
-
-      {/* ── Tab content ── */}
-      <div className="flex min-h-0 flex-1 flex-col">
-        {activeTab === "summary" && (
-          <SummaryPanel state={summaryState} />
+      <div className="flex min-h-0 flex-1 flex-col gap-3">
+        {m.speakers.length > 0 && (
+          <SpeakersPanel speakers={m.speakers} segments={m.segments} onRename={onRenameSpeaker} />
         )}
 
         {/* Resizable split: Summary (top) + Transcript+Notes (bottom) */}

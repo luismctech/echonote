@@ -159,7 +159,6 @@ pub async fn summarize_meeting_stream(
     meeting_id: MeetingId,
     template: Option<String>,
     include_notes: bool,
-    language: Option<String>,
     on_event: Channel<SummarizeEvent>,
 ) -> Result<(), IpcError> {
     let llm = state.ensure_llm().await?;
@@ -167,7 +166,7 @@ pub async fn summarize_meeting_stream(
     let tmpl = template.as_deref().unwrap_or("general");
 
     let mut stream = use_case
-        .execute_stream(meeting_id, tmpl, include_notes, language.as_deref())
+        .execute_stream(meeting_id, tmpl, include_notes)
         .await
         .map_err(IpcError::from)?;
 

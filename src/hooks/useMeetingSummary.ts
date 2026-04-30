@@ -109,7 +109,7 @@ export function useMeetingSummary(meetingId: MeetingId | null): UseMeetingSummar
     };
   }, [meetingId]);
 
-  const { t, i18n } = useTranslation();
+  const { t } = useTranslation();
 
   const generateCustomCall = useIpcAction(
     t("errors.summaryFailed"),
@@ -120,13 +120,33 @@ export function useMeetingSummary(meetingId: MeetingId | null): UseMeetingSummar
     if (!meetingId) return undefined;
     setGenerating(true);
     setStreamingText("");
-    const lang = i18n.language;
     try {
       let fresh: Summary | undefined;
       if (selectedTemplate.kind === "custom") {
+        // Custom templates use non-streaming path (no streaming command for custom yet).
         fresh = await generateCustomCall(meetingId, selectedTemplate.id, includeNotes);
       } else {
-        fresh = await generateBuiltinCall(meetingId, selectedTemplate.id, includeNotes);
+        // Built-in templates use streaming for progressive rendering.
+        fresh = await new Promise<Summary | undefined>((resolve, reject) => {
+          summarizeMeetingStream(
+            meetingId,
+            selectedTemplate.id,
+            includeNotes,
+            (event) => {
+              switch (event.kind) {
+                case "token":
+                  setStreamingText((prev) => prev + event.delta);
+                  break;
+                case "completed":
+                  resolve(event.summary);
+                  break;
+                case "failed":
+                  reject(new Error(event.error));
+                  break;
+              }
+            },
+          ).catch(reject);
+        });
       }
       if (fresh && requestedRef.current === meetingId) {
         setSummary(fresh);
@@ -140,7 +160,7 @@ export function useMeetingSummary(meetingId: MeetingId | null): UseMeetingSummar
       setGenerating(false);
       setStreamingText("");
     }
-  }, [meetingId, selectedTemplate, includeNotes, generateBuiltinCall, generateCustomCall]);
+  }, [meetingId, selectedTemplate, includeNotes, generateCustomCall]);
 
   return {
     summary,

@@ -238,6 +238,29 @@ export async function summarizeMeeting(
 }
 
 /**
+ * Streaming variant of {@link summarizeMeeting}. Sends tokens as they
+ * are decoded so the UI can render them incrementally.
+ *
+ * The stream finishes with a `completed` event carrying the persisted
+ * {@link Summary}, or a `failed` event on error.
+ */
+export async function summarizeMeetingStream(
+  meetingId: MeetingId,
+  template: string | undefined,
+  includeNotes: boolean,
+  onEvent: (event: SummarizeEvent) => void,
+): Promise<void> {
+  const channel = new Channel<SummarizeEvent>();
+  channel.onmessage = onEvent;
+  return invoke<void>("summarize_meeting_stream", {
+    meetingId,
+    template: template ?? null,
+    includeNotes,
+    onEvent: channel,
+  });
+}
+
+/**
  * Fetch the most recent summary for a meeting, or `null` when none
  * has been generated yet. Wired into `MeetingDetail` mount so the
  * panel can decide between rendering an existing summary and the

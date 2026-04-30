@@ -33,7 +33,7 @@ export function SummaryPanel({
 }: Readonly<{
   state: UseMeetingSummary;
 }>) {
-  const { summary, loading, generating, error, selectedTemplate, setSelectedTemplate, includeNotes, setIncludeNotes } = state;
+  const { summary, loading, generating, streamingText, error, selectedTemplate, setSelectedTemplate, includeNotes, setIncludeNotes } = state;
   const { t } = useTranslation();
   const [customTemplates, setCustomTemplates] = useState<CustomTemplate[]>([]);
   const [showTemplateManager, setShowTemplateManager] = useState(false);
@@ -120,7 +120,7 @@ export function SummaryPanel({
           </div>
         )}
         {!loading && generating && streamingText && (
-          <div className="prose prose-sm max-w-none text-ui-md leading-relaxed">
+          <div className="prose prose-sm dark:prose-invert max-w-none text-xs leading-relaxed">
             <Markdown>{streamingText}</Markdown>
             <span className="ml-0.5 inline-block h-3 w-1.5 animate-pulse rounded-sm bg-emerald-500" />
           </div>
@@ -128,21 +128,14 @@ export function SummaryPanel({
         {!loading && generating && !streamingText && (
           <div className="flex items-center gap-2">
             <LogoAnimated size={20} className="opacity-40" />
-            <p className="text-ui-sm text-content-tertiary">{t("summary.generating")}</p>
+            <p className="text-xs text-zinc-500">{t("summary.generating")}</p>
           </div>
         )}
         {!loading && !generating && summary && <SummaryBody summary={summary} />}
         {!loading && !generating && !summary && (
-          <div className="flex flex-col items-center justify-center gap-3 py-12 text-center">
-            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" className="h-10 w-10 text-content-placeholder opacity-40">
-              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-              <polyline points="14 2 14 8 20 8" />
-              <line x1="16" y1="13" x2="8" y2="13" />
-              <line x1="16" y1="17" x2="8" y2="17" />
-              <polyline points="10 9 9 9 8 9" />
-            </svg>
-            <p className="text-ui-sm text-content-placeholder">{t("summary.empty")}</p>
-          </div>
+          <p className="text-xs text-zinc-500">
+            {t("summary.empty")}
+          </p>
         )}
       </div>
     </section>
