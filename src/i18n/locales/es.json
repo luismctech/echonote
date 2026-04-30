@@ -91,6 +91,7 @@
     "generate": "Generar",
     "generating": "Generando…",
     "regenerate": "Regenerar",
+    "includeNotes": "Incluir notas",
     "unknown": "Plantilla desconocida. Intenta regenerar con una plantilla conocida.",
     "emptySummary": "[resumen vacío]",
     "sections": {

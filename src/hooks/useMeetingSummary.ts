@@ -44,6 +44,8 @@ export type UseMeetingSummary = {
   error: string | null;
   selectedTemplate: SelectedTemplate;
   setSelectedTemplate: (t: SelectedTemplate) => void;
+  includeNotes: boolean;
+  setIncludeNotes: (v: boolean) => void;
   generate: () => Promise<Summary | undefined>;
 };
 
@@ -56,6 +58,7 @@ export function useMeetingSummary(meetingId: MeetingId | null): UseMeetingSummar
     kind: "builtin",
     id: "general",
   });
+  const [includeNotes, setIncludeNotes] = useState(true);
 
   const requestedRef = useRef<MeetingId | null>(null);
 
@@ -121,9 +124,9 @@ export function useMeetingSummary(meetingId: MeetingId | null): UseMeetingSummar
     try {
       let fresh: Summary | undefined;
       if (selectedTemplate.kind === "custom") {
-        fresh = await generateCustomCall(meetingId, selectedTemplate.id);
+        fresh = await generateCustomCall(meetingId, selectedTemplate.id, includeNotes);
       } else {
-        fresh = await generateBuiltinCall(meetingId, selectedTemplate.id);
+        fresh = await generateBuiltinCall(meetingId, selectedTemplate.id, includeNotes);
       }
       if (fresh && requestedRef.current === meetingId) {
         setSummary(fresh);
@@ -132,7 +135,7 @@ export function useMeetingSummary(meetingId: MeetingId | null): UseMeetingSummar
     } finally {
       setGenerating(false);
     }
-  }, [meetingId, selectedTemplate, generateBuiltinCall, generateCustomCall]);
+  }, [meetingId, selectedTemplate, includeNotes, generateBuiltinCall, generateCustomCall]);
 
   return {
     summary,
@@ -141,6 +144,8 @@ export function useMeetingSummary(meetingId: MeetingId | null): UseMeetingSummar
     error,
     selectedTemplate,
     setSelectedTemplate,
+    includeNotes,
+    setIncludeNotes,
     generate,
   };
 }

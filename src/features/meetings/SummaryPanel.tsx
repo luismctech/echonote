@@ -33,7 +33,7 @@ export function SummaryPanel({
 }: Readonly<{
   state: UseMeetingSummary;
 }>) {
-  const { summary, loading, generating, error, selectedTemplate, setSelectedTemplate } = state;
+  const { summary, loading, generating, error, selectedTemplate, setSelectedTemplate, includeNotes, setIncludeNotes } = state;
   const { t } = useTranslation();
   const [customTemplates, setCustomTemplates] = useState<CustomTemplate[]>([]);
   const [showTemplateManager, setShowTemplateManager] = useState(false);
@@ -57,7 +57,7 @@ export function SummaryPanel({
       className="flex min-h-0 flex-col"
     >
       {/* ── Header bar (never scrolls) ── */}
-      <div className="flex flex-shrink-0 items-center justify-between px-1 py-0.5">
+      <div className="flex flex-shrink-0 items-center justify-between px-1 py-1">
         <span className="text-xs font-medium uppercase tracking-wide text-zinc-400">
           {t("summary.label")}
         </span>
@@ -78,6 +78,16 @@ export function SummaryPanel({
               <path fillRule="evenodd" d="M6.455 1.45A.5.5 0 0 1 6.952 1h2.096a.5.5 0 0 1 .497.45l.186 1.858a4.996 4.996 0 0 1 1.466.848l1.703-.769a.5.5 0 0 1 .63.207l1.048 1.814a.5.5 0 0 1-.133.656l-1.517 1.09a5.026 5.026 0 0 1 0 1.694l1.517 1.09a.5.5 0 0 1 .133.656l-1.048 1.814a.5.5 0 0 1-.63.207l-1.703-.769a4.996 4.996 0 0 1-1.466.848l-.186 1.858a.5.5 0 0 1-.497.45H6.952a.5.5 0 0 1-.497-.45l-.186-1.858a4.993 4.993 0 0 1-1.466-.848l-1.703.769a.5.5 0 0 1-.63-.207L1.422 12.4a.5.5 0 0 1 .133-.656l1.517-1.09a5.026 5.026 0 0 1 0-1.694l-1.517-1.09a.5.5 0 0 1-.133-.656l1.048-1.814a.5.5 0 0 1 .63-.207l1.703.769a4.993 4.993 0 0 1 1.466-.848l.186-1.858ZM8 10.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5Z" clipRule="evenodd" />
             </svg>
           </button>
+          <label className="flex cursor-pointer items-center gap-1 text-[11px] text-zinc-500 dark:text-zinc-400">
+            <input
+              type="checkbox"
+              checked={includeNotes}
+              onChange={(e) => setIncludeNotes(e.target.checked)}
+              disabled={loading || generating}
+              className="h-3 w-3 rounded border-zinc-300 accent-emerald-600 dark:border-zinc-600"
+            />
+            {t("summary.includeNotes")}
+          </label>
           {summary && <CopyButton getText={getSummaryText} title={t("meeting.copySummary")} />}
           <SummaryActions
             summary={summary}

@@ -228,10 +228,12 @@ export async function deleteNote(noteId: NoteId): Promise<boolean> {
 export async function summarizeMeeting(
   meetingId: MeetingId,
   template?: string,
+  includeNotes?: boolean,
 ): Promise<Summary> {
   return invoke<Summary>("summarize_meeting", {
     meetingId,
     template: template ?? null,
+    includeNotes: includeNotes ?? false,
   });
 }
 
@@ -367,10 +369,12 @@ export async function deleteCustomTemplate(
 export async function summarizeWithCustomTemplate(
   meetingId: MeetingId,
   templateId: CustomTemplateId,
+  includeNotes?: boolean,
 ): Promise<Summary> {
   return invoke<Summary>("summarize_with_custom_template", {
     meetingId,
     templateId,
+    includeNotes: includeNotes ?? false,
   });
 }
 

@@ -91,6 +91,7 @@
     "generate": "Generate",
     "generating": "Generating…",
     "regenerate": "Regenerate",
+    "includeNotes": "Include notes",
     "unknown": "Unknown template. Try regenerating with a known template.",
     "emptySummary": "[empty summary]",
     "sections": {

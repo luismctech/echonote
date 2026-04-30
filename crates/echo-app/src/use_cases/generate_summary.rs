@@ -98,6 +98,7 @@ impl SummarizeMeeting {
         &self,
         meeting_id: MeetingId,
         template: &str,
+        include_notes: bool,
     ) -> Result<Summary, SummarizeMeetingError> {
         if !TEMPLATE_IDS.contains(&template) {
             return Err(SummarizeMeetingError::InvalidTemplate(template.to_string()));
@@ -115,11 +116,23 @@ impl SummarizeMeeting {
             return Err(SummarizeMeetingError::EmptyTranscript(meeting_id));
         }
 
+        let notes_context = if include_notes {
+            render_notes(&meeting)
+        } else {
+            None
+        };
+
         let language = meeting.summary.language.clone();
         let language_instruction = language_instruction(language.as_deref());
 
         let build_prompt = |feedback: Option<&str>| {
-            build_prompt(template, &transcript, &language_instruction, feedback)
+            build_prompt(
+                template,
+                &transcript,
+                &language_instruction,
+                notes_context.as_deref(),
+                feedback,
+            )
         };
         let parse = |raw: &str| parse_payload(template, raw);
 
@@ -189,6 +202,7 @@ impl SummarizeMeeting {
         &self,
         meeting_id: MeetingId,
         custom: &CustomTemplate,
+        include_notes: bool,
     ) -> Result<Summary, SummarizeMeetingError> {
         let meeting = self
             .store
@@ -202,10 +216,21 @@ impl SummarizeMeeting {
             return Err(SummarizeMeetingError::EmptyTranscript(meeting_id));
         }
 
+        let notes_context = if include_notes {
+            render_notes(&meeting)
+        } else {
+            None
+        };
+
         let language = meeting.summary.language.clone();
         let language_instruction = language_instruction(language.as_deref());
 
-        let prompt = build_custom_prompt(custom, &transcript, &language_instruction);
+        let prompt = build_custom_prompt(
+            custom,
+            &transcript,
+            &language_instruction,
+            notes_context.as_deref(),
+        );
         let response = self
             .llm
             .generate(&prompt, &generate_opts())
@@ -302,6 +327,25 @@ fn render_transcript(meeting: &Meeting) -> String {
     format!("{head}\n[… (transcript truncated for length) …]\n{tail}")
 }
 
+/// Render the meeting's notes into a context block for the LLM.
+/// Returns `None` when the meeting has no notes.
+fn render_notes(meeting: &Meeting) -> Option<String> {
+    if meeting.notes.is_empty() {
+        return None;
+    }
+    let mut buf = String::new();
+    for note in &meeting.notes {
+        let total_sec = note.timestamp_ms / 1000;
+        let min = total_sec / 60;
+        let sec = total_sec % 60;
+        if !buf.is_empty() {
+            buf.push('\n');
+        }
+        buf.push_str(&format!("[{min:02}:{sec:02}] {}", note.text));
+    }
+    Some(buf)
+}
+
 fn speaker_display_name(s: &Speaker) -> String {
     s.label
         .clone()
@@ -329,6 +373,7 @@ fn build_prompt(
     template: &str,
     transcript: &str,
     language_instruction: &str,
+    notes: Option<&str>,
     parser_feedback: Option<&str>,
 ) -> String {
     let schema = schema_for(template);
@@ -338,6 +383,7 @@ fn build_prompt(
         language_instruction,
         schema,
         transcript,
+        notes,
         parser_feedback,
     )
 }
@@ -349,6 +395,7 @@ fn build_custom_prompt(
     custom: &CustomTemplate,
     transcript: &str,
     language_instruction: &str,
+    notes: Option<&str>,
 ) -> String {
     let system = format!(
         "{}\n\
@@ -360,7 +407,15 @@ fn build_custom_prompt(
         custom.prompt,
     );
 
-    let user = format!("Transcript:\n---\n{transcript}\n---\n/no_think");
+    let mut user = format!("Transcript:\n---\n{transcript}\n---");
+
+    if let Some(notes_text) = notes {
+        user.push_str(&format!(
+            "\n\nUser notes taken during the meeting:\n---\n{notes_text}\n---"
+        ));
+    }
+
+    user.push_str("\n/no_think");
 
     format!(
         "<|im_start|>system\n{system}<|im_end|>\n\
@@ -467,6 +522,7 @@ fn wrap_qwen_prompt(
     language_instruction: &str,
     schema: &str,
     transcript: &str,
+    notes: Option<&str>,
     parser_feedback: Option<&str>,
 ) -> String {
     let system = format!(
@@ -477,8 +533,15 @@ fn wrap_qwen_prompt(
          {schema}"
     );
 
-    let mut user =
-        format!("Transcript:\n---\n{transcript}\n---\n\nReturn the JSON object only.\n/no_think");
+    let mut user = format!("Transcript:\n---\n{transcript}\n---");
+
+    if let Some(notes_text) = notes {
+        user.push_str(&format!(
+            "\n\nUser notes taken during the meeting:\n---\n{notes_text}\n---"
+        ));
+    }
+
+    user.push_str("\n\nReturn the JSON object only.\n/no_think");
 
     if let Some(err) = parser_feedback {
         user.push_str(&format!(
@@ -863,7 +926,7 @@ mod tests {
         .into())]));
 
         let uc = SummarizeMeeting::new(llm.clone(), store.clone());
-        let summary = uc.execute(id, "general").await.unwrap();
+        let summary = uc.execute(id, "general", false).await.unwrap();
 
         assert_eq!(llm.calls(), 1);
         assert_eq!(summary.template(), "general");
@@ -912,7 +975,7 @@ mod tests {
         ]));
 
         let uc = SummarizeMeeting::new(llm.clone(), store.clone());
-        let summary = uc.execute(id, "general").await.unwrap();
+        let summary = uc.execute(id, "general", false).await.unwrap();
 
         assert_eq!(llm.calls(), 2, "expected one retry");
         assert_eq!(summary.template(), "general");
@@ -935,7 +998,7 @@ mod tests {
         ]));
 
         let uc = SummarizeMeeting::new(llm.clone(), store.clone());
-        let summary = uc.execute(id, "general").await.unwrap();
+        let summary = uc.execute(id, "general", false).await.unwrap();
 
         assert_eq!(llm.calls(), 2);
         match summary.content {
@@ -954,7 +1017,7 @@ mod tests {
         let llm = Arc::new(ScriptedLlm::new(vec![]));
 
         let uc = SummarizeMeeting::new(llm.clone(), store.clone());
-        let err = uc.execute(id, "general").await.unwrap_err();
+        let err = uc.execute(id, "general", false).await.unwrap_err();
         assert!(
             matches!(err, SummarizeMeetingError::EmptyTranscript(mid) if mid == id),
             "got {err:?}"
@@ -968,7 +1031,10 @@ mod tests {
         let llm = Arc::new(ScriptedLlm::new(vec![]));
 
         let uc = SummarizeMeeting::new(llm.clone(), store.clone());
-        let err = uc.execute(MeetingId::new(), "general").await.unwrap_err();
+        let err = uc
+            .execute(MeetingId::new(), "general", false)
+            .await
+            .unwrap_err();
         assert!(matches!(err, SummarizeMeetingError::NotFound(_)), "{err:?}");
     }
 
@@ -981,7 +1047,7 @@ mod tests {
         ))]));
 
         let uc = SummarizeMeeting::new(llm.clone(), store.clone());
-        let err = uc.execute(id, "general").await.unwrap_err();
+        let err = uc.execute(id, "general", false).await.unwrap_err();
         assert!(matches!(err, SummarizeMeetingError::Llm(_)), "{err:?}");
     }
 
@@ -1118,7 +1184,7 @@ mod tests {
         .into())]));
 
         let uc = SummarizeMeeting::new(llm, store);
-        let summary = uc.execute(id, "oneOnOne").await.unwrap();
+        let summary = uc.execute(id, "oneOnOne", false).await.unwrap();
         assert_eq!(summary.template(), "oneOnOne");
         match &summary.content {
             SummaryContent::OneOnOne {
@@ -1151,7 +1217,7 @@ mod tests {
         .into())]));
 
         let uc = SummarizeMeeting::new(llm, store);
-        let summary = uc.execute(id, "interview").await.unwrap();
+        let summary = uc.execute(id, "interview", false).await.unwrap();
         assert_eq!(summary.template(), "interview");
         match &summary.content {
             SummaryContent::Interview { quotes, themes, .. } => {
@@ -1170,7 +1236,7 @@ mod tests {
         let llm = Arc::new(ScriptedLlm::new(vec![]));
 
         let uc = SummarizeMeeting::new(llm, store);
-        let err = uc.execute(id, "nonexistent").await.unwrap_err();
+        let err = uc.execute(id, "nonexistent", false).await.unwrap_err();
         assert!(
             matches!(err, SummarizeMeetingError::InvalidTemplate(ref t) if t == "nonexistent"),
             "{err:?}"

@@ -23,12 +23,13 @@ pub async fn summarize_meeting(
     state: State<'_, AppState>,
     meeting_id: MeetingId,
     template: Option<String>,
+    include_notes: bool,
 ) -> Result<Summary, IpcError> {
     let llm = state.ensure_llm().await?;
     let use_case = SummarizeMeeting::new(llm, state.store.clone());
     let tmpl = template.as_deref().unwrap_or("general");
     use_case
-        .execute(meeting_id, tmpl)
+        .execute(meeting_id, tmpl, include_notes)
         .await
         .map_err(IpcError::from)
 }
@@ -61,6 +62,7 @@ pub async fn summarize_with_custom_template(
     state: State<'_, AppState>,
     meeting_id: MeetingId,
     template_id: CustomTemplateId,
+    include_notes: bool,
 ) -> Result<Summary, IpcError> {
     // Load the custom template from disk.
     let templates = super::templates::read_templates_from(&state)?;
@@ -72,7 +74,7 @@ pub async fn summarize_with_custom_template(
     let llm = state.ensure_llm().await?;
     let use_case = SummarizeMeeting::new(llm, state.store.clone());
     use_case
-        .execute_custom(meeting_id, custom)
+        .execute_custom(meeting_id, custom, include_notes)
         .await
         .map_err(IpcError::from)
 }

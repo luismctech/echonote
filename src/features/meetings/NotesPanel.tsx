@@ -36,7 +36,7 @@ export function NotesPanel({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <div className="flex items-center justify-between px-1 py-0.5">
+      <div className="flex items-center justify-between px-1 py-1">
         <span className="text-xs font-medium uppercase tracking-wide text-zinc-400">
           {t("meeting.notes")} ({notes.length})
         </span>
