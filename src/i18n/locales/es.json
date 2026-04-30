@@ -50,10 +50,7 @@
     "noSpeech": "[sin voz]",
     "notePlaceholder": "Agrega una nota…",
     "addNote": "Agregar",
-    "notes": "Notas",
-    "refineTranscript": "Afinando transcripción…",
-    "refineSpeakers": "Detectando speakers…",
-    "refineSummary": "Generando resumen…"
+    "notes": "Notas"
   },
   "health": {
     "warmingUp": "calentando…",

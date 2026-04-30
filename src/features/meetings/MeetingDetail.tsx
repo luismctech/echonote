@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useVirtualizer } from "@tanstack/react-virtual";
+import { ResizableHandle } from "../../components/ResizableHandle";
+import { ResizableHandleVertical } from "../../components/ResizableHandleVertical";
 import { CopyButton } from "../../components/CopyButton";
 import { ResizableHandleVertical } from "../../components/ResizableHandleVertical";
 
@@ -10,7 +12,6 @@ import { LogoAnimated } from "../../components/Logo";
 import { formatDate, formatDurationMs, formatTimestamp } from "../../lib/format";
 import { displayName, indexSpeakers } from "../../lib/speakers";
 import type { Note, NoteId } from "../../types/meeting";
-import type { SegmentId } from "../../types/chat";
 import type { SpeakerId } from "../../types/speaker";
 import type { MainView } from "../../types/view";
 import { ChatPanel } from "./ChatPanel";
@@ -111,8 +112,33 @@ export function MeetingDetail({
   const { t } = useTranslation();
   const scrollRef = useRef<HTMLDivElement>(null);
   const splitRef = useRef<HTMLDivElement>(null);
+  const summaryRef = useRef<HTMLDivElement>(null);
+  const hSplitRef = useRef<HTMLDivElement>(null);
 
-  const [activeTab, setActiveTab] = useState<DetailTab>("transcript");
+  /** Fraction of the split container given to the summary (top panel). */
+  const MIN_RATIO = 1 / 3;
+  const MAX_RATIO = 2 / 3;
+  const [summaryRatio, setSummaryRatio] = useState(0.5);
+
+  /** Horizontal split: transcript (left) vs notes (right). */
+  const H_MIN = 0.4;
+  const H_MAX = 0.85;
+  const [hRatio, setHRatio] = useState(0.65);
+  const clampedHRatio = Math.min(H_MAX, Math.max(H_MIN, hRatio));
+  const handleHRatioChange = useCallback((r: number) => {
+    setHRatio(Math.min(H_MAX, Math.max(H_MIN, r)));
+  }, []);
+  /** Track whether the user has manually dragged the handle. */
+  const [userResized, setUserResized] = useState(false);
+  const clampedRatio = Math.min(MAX_RATIO, Math.max(MIN_RATIO, summaryRatio));
+  const handleRatioChange = useCallback(
+    (r: number) => {
+      const clamped = Math.min(MAX_RATIO, Math.max(MIN_RATIO, r));
+      setUserResized(true);
+      setSummaryRatio(clamped);
+    },
+    [],
+  );
 
   // Resizable split ratio for notes | transcript
   const SPLIT_MIN = 0.25;
@@ -245,32 +271,34 @@ export function MeetingDetail({
           <SummaryPanel state={summaryState} />
         )}
 
-        {activeTab === "transcript" && (
-          <div ref={splitRef} className="flex min-h-0 flex-1 flex-row">
-            {/* Notes panel (left) — only when notes exist */}
-            {notes.length > 0 && (
-              <>
-                <div
-                  className="flex min-h-0 min-w-0 flex-col overflow-y-auto"
-                  style={{ width: `${clampedSplit * 100}%` }}
-                >
-                  <NotesPanel notes={notes} onDeleted={handleNoteDeleted} />
-                </div>
-                <ResizableHandleVertical
-                  containerRef={splitRef}
-                  ratio={clampedSplit}
-                  onRatioChange={handleSplitChange}
-                />
-              </>
-            )}
+        {/* Resizable split: Summary (top) + Transcript+Notes (bottom) */}
+        <div ref={splitRef} className="flex min-h-0 flex-1 flex-col">
+          {/* ── Summary (fixed ratio only when content exists) ── */}
+          <div
+            ref={summaryRef}
+            className="flex min-h-0 flex-col"
+            style={summaryPanelStyle}
+          >
+            <SummaryPanel state={summaryState} />
+          </div>
 
-            {/* Transcript panel (right, or full-width if no notes) */}
+          {summaryState.summary && (
+            <ResizableHandle
+              containerRef={splitRef}
+              ratio={clampedRatio}
+              onRatioChange={handleRatioChange}
+            />
+          )}
+
+          {/* ── Transcript + Notes side-by-side ── */}
+          <div ref={hSplitRef} className="flex min-h-0 flex-1">
+            {/* Left: Transcript */}
             <div
-              className="flex min-h-0 min-w-0 flex-1 flex-col gap-1"
-              style={notes.length > 0 ? { width: `${(1 - clampedSplit) * 100}%` } : undefined}
+              className="flex min-h-0 min-w-0 flex-col"
+              style={notes.length > 0 ? { flex: `0 0 ${(clampedHRatio * 100).toFixed(1)}%` } : { flex: "1 1 0%" }}
             >
-              <div className="flex items-center justify-between px-1 py-1">
-                <span className="text-ui-xs font-medium uppercase tracking-wide text-content-placeholder">
+              <div className="flex items-center justify-between px-1 py-0.5">
+                <span className="text-xs font-medium uppercase tracking-wide text-zinc-400">
                   {t("meeting.transcript")}
                 </span>
                 {m.segments.length > 0 && (
@@ -279,10 +307,10 @@ export function MeetingDetail({
               </div>
               <div
                 ref={scrollRef}
-                className="min-h-0 flex-1 overflow-y-auto rounded-md border border-subtle bg-surface-sunken p-3 text-ui-md leading-relaxed"
+                className="min-h-0 flex-1 overflow-y-auto rounded-md border border-zinc-100 bg-zinc-50 p-3 text-sm leading-relaxed dark:border-zinc-900 dark:bg-zinc-900"
               >
                 {m.segments.length === 0 ? (
-                  <p className="text-content-placeholder">{t("meeting.noSegments")}</p>
+                  <p className="text-zinc-400">{t("meeting.noSegments")}</p>
                 ) : (
                   <ol
                     className="relative w-full"
@@ -315,21 +343,23 @@ export function MeetingDetail({
                 )}
               </div>
             </div>
-          </div>
-        )}
 
-        {activeTab === "chat" && (
-          <div className="flex min-h-0 flex-1 flex-col">
-            <ChatPanel
-              chat={chat}
-              onScrollToSegment={handleScrollToSegment}
-              segmentTimestamps={m.segments.reduce<Record<string, number>>((acc, seg) => {
-                acc[seg.id] = seg.startMs;
-                return acc;
-              }, {})}
-            />
+            {/* Vertical resize handle + Notes panel (only when notes exist) */}
+            {notes.length > 0 && (
+              <>
+                <ResizableHandleVertical
+                  containerRef={hSplitRef}
+                  ratio={clampedHRatio}
+                  onRatioChange={handleHRatioChange}
+                />
+                <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+                  <NotesPanel notes={notes} onDeleted={handleNoteDeleted} />
+                </div>
+              </>
+            )}
           </div>
-        )}
+        {/* ── end split ── */}
+        </div>
       </div>
     </>
   );
