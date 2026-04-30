@@ -140,6 +140,9 @@
     "delete": "Delete model",
     "use": "Use",
     "active": "Active",
+    "required": "Required",
+    "recommended": "Recommended",
+    "hardwareDetected": "Hardware detected",
     "badge": "models {{installed}}/{{total}}",
     "badgeEmpty": "models"
   },

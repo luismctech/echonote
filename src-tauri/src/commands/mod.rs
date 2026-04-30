@@ -11,9 +11,11 @@
 //! - [`models`] — model catalog, status, and download
 
 pub mod export;
+pub mod hardware;
 pub mod llm;
 pub mod meetings;
 pub mod models;
+pub mod recommendation;
 pub mod streaming;
 pub mod templates;
 

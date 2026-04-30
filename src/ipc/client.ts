@@ -16,6 +16,7 @@ import { Channel, invoke } from "@tauri-apps/api/core";
 
 import type { ChatEvent, ChatMessage } from "../types/chat";
 import type { DownloadEvent, ModelInfo } from "../types/models";
+import type { HardwareProfile, ModelRecommendation } from "../types/hardware";
 import type { HealthStatus } from "../types/health";
 import type {
   Meeting,
@@ -358,4 +359,18 @@ export async function askAboutMeeting(
     question,
     onEvent: channel,
   });
+}
+
+// ---------------------------------------------------------------------------
+// Hardware & model recommendation
+// ---------------------------------------------------------------------------
+
+/** Get detected hardware profile (CPU, RAM, GPU). */
+export async function getHardwareProfile(): Promise<HardwareProfile> {
+  return invoke<HardwareProfile>("get_hardware_profile");
+}
+
+/** Get model recommendation based on system hardware. */
+export async function getModelRecommendation(): Promise<ModelRecommendation> {
+  return invoke<ModelRecommendation>("get_model_recommendation");
 }

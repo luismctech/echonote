@@ -165,12 +165,85 @@ jobs:
 
           | Platform | Download |
           |----------|----------|
-          | macOS (Apple Silicon) | `.dmg` |
-          | macOS (Intel) | `.dmg` |
-          | Windows | `.msi` or `.exe` |
-          | Linux (Debian/Ubuntu) | `.deb` |
-          | Linux (universal) | `.AppImage` |
+          | macOS (Apple Silicon) | `EchoNote_x.x.x_macOS-AppleSilicon.dmg` |
+          | macOS (Intel) | `EchoNote_x.x.x_macOS-Intel.dmg` |
+          | Windows | `EchoNote_x.x.x_Windows-x64.exe` |
+          | Linux | `EchoNote_x.x.x_Linux-x64.AppImage` |
         releaseDraft: true
         prerelease: ${{ contains(github.ref_name, '-') }}
         args: ${{ matrix.tauri-args }}
         updaterJsonPreferNsis: true
+
+  # ---------------------------------------------------------------------------
+  # Post-build: rename assets for clarity and remove redundant files.
+  # ---------------------------------------------------------------------------
+  cleanup:
+    name: Clean up release assets
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+    - name: Rename installers and remove .sig files
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        TAG="${GITHUB_REF_NAME}"
+        VERSION="${TAG#v}"
+        REPO="${GITHUB_REPOSITORY}"
+
+        # Give the last upload a moment to finalize
+        sleep 5
+
+        RELEASE_ID=$(gh api "repos/$REPO/releases/tags/$TAG" --jq '.id')
+
+        # --- Rename map: old suffix → new name ---
+        # Includes both user-facing installers and updater artifacts (.tar.gz)
+        declare -A RENAMES=(
+          ["EchoNote_${VERSION}_aarch64.dmg"]="EchoNote_${VERSION}_macOS-AppleSilicon.dmg"
+          ["EchoNote_${VERSION}_x64.dmg"]="EchoNote_${VERSION}_macOS-Intel.dmg"
+          ["EchoNote_${VERSION}_x64-setup.exe"]="EchoNote_${VERSION}_Windows-x64.exe"
+          ["EchoNote_${VERSION}_amd64.deb"]="EchoNote_${VERSION}_Linux-x64.deb"
+          ["EchoNote_${VERSION}_amd64.AppImage"]="EchoNote_${VERSION}_Linux-x64.AppImage"
+          ["EchoNote_${VERSION}_amd64.AppImage.tar.gz"]="EchoNote_${VERSION}_Linux-x64.AppImage.tar.gz"
+        )
+
+        # --- Process each asset ---
+        gh api "repos/$REPO/releases/$RELEASE_ID/assets" --paginate --jq '.[] | [.id, .name] | @tsv' | \
+        while IFS=$'\t' read -r ASSET_ID ASSET_NAME; do
+          # Try to rename
+          NEW_NAME="${RENAMES[$ASSET_NAME]:-}"
+          if [[ -n "$NEW_NAME" ]]; then
+            echo "✏️  Renaming: $ASSET_NAME → $NEW_NAME"
+            gh api --method PATCH "repos/$REPO/releases/assets/$ASSET_ID" \
+              -f name="$NEW_NAME" --silent
+            continue
+          fi
+
+          # Delete standalone .sig files (signatures are embedded in latest.json)
+          if [[ "$ASSET_NAME" == *.sig ]]; then
+            echo "🗑️  Deleting: $ASSET_NAME"
+            gh api --method DELETE "repos/$REPO/releases/assets/$ASSET_ID" --silent
+            continue
+          fi
+        done
+
+        # --- Update latest.json URLs to match renamed files ---
+        JSON_ASSET_ID=$(gh api "repos/$REPO/releases/$RELEASE_ID/assets" \
+          --jq '.[] | select(.name == "latest.json") | .id' || true)
+
+        if [[ -n "$JSON_ASSET_ID" ]]; then
+          echo "📝 Updating latest.json URLs..."
+          gh api "repos/$REPO/releases/assets/$JSON_ASSET_ID" \
+            -H "Accept: application/octet-stream" > latest.json
+
+          sed -i "s/_x64-setup.exe/_Windows-x64.exe/g" latest.json
+          sed -i "s/_amd64.AppImage/_Linux-x64.AppImage/g" latest.json
+
+          gh api --method DELETE "repos/$REPO/releases/assets/$JSON_ASSET_ID" --silent
+          gh release upload "$TAG" latest.json --repo "$REPO"
+        fi
+
+        echo "✅ Release assets cleaned up"
