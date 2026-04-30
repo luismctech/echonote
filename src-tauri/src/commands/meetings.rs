@@ -4,7 +4,7 @@ use tauri::State;
 
 use crate::ipc_error::IpcError;
 
-use echo_domain::{Meeting, MeetingId, MeetingSearchHit, MeetingSummary, SpeakerId};
+use echo_domain::{Meeting, MeetingId, MeetingSearchHit, MeetingSummary, Note, NoteId, SpeakerId};
 
 use super::AppState;
 
@@ -124,4 +124,46 @@ pub async fn rename_speaker(
         .ok_or_else(|| {
             IpcError::not_found(format!("meeting {meeting_id} disappeared after rename"))
         })
+}
+
+/// Add a timestamped note to a meeting. `timestamp_ms` is relative to
+/// the recording start (same timeline as segment offsets).
+#[tauri::command]
+#[specta::specta]
+pub async fn add_note(
+    state: State<'_, AppState>,
+    meeting_id: MeetingId,
+    text: String,
+    timestamp_ms: u32,
+) -> Result<Note, IpcError> {
+    state
+        .store
+        .add_note(meeting_id, &text, timestamp_ms)
+        .await
+        .map_err(|e| IpcError::storage(format!("add note: {e}")))
+}
+
+/// List all notes for a meeting, ordered by recording timestamp.
+#[tauri::command]
+#[specta::specta]
+pub async fn list_notes(
+    state: State<'_, AppState>,
+    meeting_id: MeetingId,
+) -> Result<Vec<Note>, IpcError> {
+    state
+        .store
+        .list_notes(meeting_id)
+        .await
+        .map_err(|e| IpcError::storage(format!("list notes: {e}")))
+}
+
+/// Delete a single note by id.
+#[tauri::command]
+#[specta::specta]
+pub async fn delete_note(state: State<'_, AppState>, note_id: NoteId) -> Result<bool, IpcError> {
+    state
+        .store
+        .delete_note(note_id)
+        .await
+        .map_err(|e| IpcError::storage(format!("delete note: {e}")))
 }

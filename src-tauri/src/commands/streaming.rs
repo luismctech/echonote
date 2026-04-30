@@ -317,3 +317,17 @@ pub async fn resume_streaming(
         .is_ok();
     Ok(swapped)
 }
+
+/// Look up the database `MeetingId` associated with a streaming session.
+/// The streaming session id and the meeting id are distinct UUIDs — the
+/// recorder creates a fresh meeting row on `Started` and keeps the mapping
+/// internally. This command exposes that mapping so the frontend can
+/// address the meeting (e.g. to add notes) while the session is running.
+#[tauri::command]
+#[specta::specta]
+pub async fn get_meeting_id(
+    state: State<'_, AppState>,
+    session_id: StreamingSessionId,
+) -> Result<Option<echo_domain::MeetingId>, IpcError> {
+    Ok(state.recorder.meeting_id_for_session(session_id).await)
+}

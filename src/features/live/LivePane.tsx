@@ -1,11 +1,15 @@
-import type { RefObject } from "react";
+import { type RefObject, useCallback, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useVirtualizer } from "@tanstack/react-virtual";
 
 import { LogoAnimated } from "../../components/Logo";
+import { ResizableHandleVertical } from "../../components/ResizableHandleVertical";
 import { StatsBar } from "../../components/StatsBar";
 import { statusLabel, type RecordingState } from "../../state/recording";
+import type { Note } from "../../types/meeting";
 import type { StreamLine } from "../../types/view";
+import { NoteInput } from "./NoteInput";
+import { NoteList } from "./NoteList";
 import { TranscriptRow } from "./TranscriptRow";
 
 const isMac =
@@ -25,6 +29,7 @@ export function LivePane({
   stream,
   stats,
   lines,
+  notes,
   listRef,
   canStart,
   canStop,
@@ -38,11 +43,13 @@ export function LivePane({
   onStop,
   onPause,
   onResume,
+  onAddNote,
   onDismissError,
 }: Readonly<{
   stream: RecordingState;
   stats: { chunks: number; skipped: number; audioMs: number };
   lines: StreamLine[];
+  notes: Note[];
   listRef: RefObject<HTMLDivElement>;
   canStart: boolean;
   canStop: boolean;
@@ -56,6 +63,7 @@ export function LivePane({
   onStop: () => void;
   onPause: () => void;
   onResume: () => void;
+  onAddNote: (text: string) => void;
   onDismissError: () => void;
 }>) {
   // Toggle is locked once a session is in flight: changing the
@@ -74,6 +82,14 @@ export function LivePane({
     estimateSize: () => 28,
     overscan: 5,
   });
+
+  const splitRef = useRef<HTMLDivElement>(null);
+  const [splitRatio, setSplitRatio] = useState(0.5);
+  const clampedRatio = Math.min(0.85, Math.max(0.15, splitRatio));
+
+  const handleRatioChange = useCallback((r: number) => {
+    setSplitRatio(Math.min(0.85, Math.max(0.15, r)));
+  }, []);
 
   return (
     <>
@@ -197,40 +213,70 @@ export function LivePane({
 
       <StatsBar status={statusLabel(stream)} stats={stats} />
 
-      <div
-        ref={listRef}
-        className="min-h-0 flex-1 overflow-y-auto rounded-md border border-zinc-100 bg-zinc-50 p-3 font-mono text-xs leading-relaxed dark:border-zinc-900 dark:bg-zinc-900/60"
-      >
-        {lines.length === 0 ? (
-          <div className="flex flex-col items-center justify-center gap-3 py-8">
-            <LogoAnimated size={48} className="opacity-40" />
-            <p className="text-zinc-400">
-              {emptyHint(stream, t)}
-            </p>
-          </div>
-        ) : (
-          <ul
-            className="relative w-full"
-            style={{ height: `${virtualizer.getTotalSize()}px` }}
+      <div ref={splitRef} className="flex min-h-0 flex-1 flex-row">
+        {/* ── Transcript (left panel) ── */}
+        <div
+          className="flex min-w-0 flex-col overflow-hidden"
+          style={{ width: `${clampedRatio * 100}%` }}
+        >
+          <div
+            ref={listRef}
+            className="min-h-0 flex-1 overflow-y-auto rounded-md border border-zinc-100 bg-zinc-50 p-3 font-mono text-xs leading-relaxed dark:border-zinc-900 dark:bg-zinc-900/60"
           >
-            {virtualizer.getVirtualItems().map((vItem) => {
-              const line = lines[vItem.index]!;
-              return (
-                <li
-                  key={line.key}
-                  className={`absolute left-0 top-0 flex w-full items-baseline gap-3${
-                    line.kind === "skipped" ? " text-zinc-400" : ""
-                  }`}
-                  style={{ transform: `translateY(${vItem.start}px)` }}
-                  data-index={vItem.index}
-                  ref={virtualizer.measureElement}
-                >
-                  <TranscriptRow line={line} />
-                </li>
-              );
-            })}
-          </ul>
-        )}
+            {lines.length === 0 ? (
+              <div className="flex flex-col items-center justify-center gap-3 py-8">
+                <LogoAnimated size={48} className="opacity-40" />
+                <p className="text-zinc-400">
+                  {emptyHint(stream, t)}
+                </p>
+              </div>
+            ) : (
+              <ul
+                className="relative w-full"
+                style={{ height: `${virtualizer.getTotalSize()}px` }}
+              >
+                {virtualizer.getVirtualItems().map((vItem) => {
+                  const line = lines[vItem.index]!;
+                  return (
+                    <li
+                      key={line.key}
+                      className={`absolute left-0 top-0 flex w-full items-baseline gap-3${
+                        line.kind === "skipped" ? " text-zinc-400" : ""
+                      }`}
+                      style={{ transform: `translateY(${vItem.start}px)` }}
+                      data-index={vItem.index}
+                      ref={virtualizer.measureElement}
+                    >
+                      <TranscriptRow line={line} />
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </div>
+        </div>
+
+        {/* ── Vertical resize handle ── */}
+        <ResizableHandleVertical
+          containerRef={splitRef}
+          ratio={clampedRatio}
+          onRatioChange={handleRatioChange}
+        />
+
+        {/* ── Notes (right panel) ── */}
+        <div
+          className="flex min-w-0 flex-col gap-2 overflow-hidden"
+          style={{ width: `${(1 - clampedRatio) * 100}%` }}
+        >
+          <NoteInput
+            elapsedMs={stats.audioMs}
+            onSubmit={onAddNote}
+            disabled={stream.kind !== "recording" && stream.kind !== "paused"}
+          />
+          <div className="min-h-0 flex-1 overflow-y-auto rounded-md border border-zinc-100 bg-zinc-50 p-3 dark:border-zinc-900 dark:bg-zinc-900/60">
+            <NoteList notes={notes} />
+          </div>
+        </div>
       </div>
     </>
   );

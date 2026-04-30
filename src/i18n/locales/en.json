@@ -45,7 +45,10 @@
     "modelLoads": "model loads on first start",
     "silence": "silence",
     "silenceRms": "silence (rms={{rms}})",
-    "noSpeech": "[no speech]"
+    "noSpeech": "[no speech]",
+    "notePlaceholder": "Add a note…",
+    "addNote": "Add",
+    "notes": "Notes"
   },
   "health": {
     "warmingUp": "warming up…",
@@ -60,9 +63,12 @@
     "segments": "segments",
     "noSegments": "No segments persisted for this meeting.",
     "noSpeech": "[no speech]",
+    "notes": "Notes",
+    "deleteNote": "Delete note",
     "transcript": "Transcript",
     "copySummary": "Copy summary",
     "copyTranscript": "Copy transcript",
+    "copyNotes": "Copy notes",
     "editTitle": "Click to rename"
   },
   "export": {

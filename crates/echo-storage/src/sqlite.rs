@@ -13,8 +13,8 @@ use uuid::Uuid;
 
 use echo_domain::{
     AudioFormat, CreateMeeting, DomainError, FinalizeMeeting, Meeting, MeetingId, MeetingSearchHit,
-    MeetingStore, MeetingSummary, Segment, SegmentId, Speaker, SpeakerId, Summary, SummaryContent,
-    SummaryId,
+    MeetingStore, MeetingSummary, Note, NoteId, Segment, SegmentId, Speaker, SpeakerId, Summary,
+    SummaryContent, SummaryId,
 };
 
 /// Embedded migrations (`crates/echo-storage/migrations/`).
@@ -366,12 +366,14 @@ impl MeetingStore for SqliteMeetingStore {
         }
 
         let speakers = self.list_speakers(meeting_id).await?;
+        let notes = self.list_notes(meeting_id).await?;
 
         Ok(Some(Meeting {
             summary,
             input_format,
             segments,
             speakers,
+            notes,
         }))
     }
 
@@ -576,6 +578,77 @@ impl MeetingStore for SqliteMeetingStore {
             created_at: parse_rfc3339(&created_text, "summary created_at")?,
             content,
         }))
+    }
+
+    async fn add_note(
+        &self,
+        meeting_id: MeetingId,
+        text: &str,
+        timestamp_ms: u32,
+    ) -> Result<Note, DomainError> {
+        let id = NoteId::new();
+        let created_at = OffsetDateTime::now_utc()
+            .format(&Rfc3339)
+            .map_err(|e| db_err(format!("format note created_at: {e}")))?;
+
+        sqlx::query(
+            r#"INSERT INTO notes (id, meeting_id, text, timestamp_ms, created_at)
+               VALUES (?, ?, ?, ?, ?)"#,
+        )
+        .bind(id.0.to_string())
+        .bind(meeting_id.to_string())
+        .bind(text)
+        .bind(i64::from(timestamp_ms))
+        .bind(&created_at)
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx("add note"))?;
+
+        debug!(meeting.id = %meeting_id, note.id = %id, "note added");
+
+        Ok(Note {
+            id,
+            meeting_id,
+            text: text.to_owned(),
+            timestamp_ms,
+            created_at,
+        })
+    }
+
+    async fn list_notes(&self, meeting_id: MeetingId) -> Result<Vec<Note>, DomainError> {
+        let rows = sqlx::query(
+            r#"SELECT id, text, timestamp_ms, created_at
+                 FROM notes
+                WHERE meeting_id = ?
+             ORDER BY timestamp_ms ASC"#,
+        )
+        .bind(meeting_id.to_string())
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sqlx("list notes"))?;
+
+        let mut notes = Vec::with_capacity(rows.len());
+        for row in rows {
+            let id_text: String = row.get(0);
+            notes.push(Note {
+                id: NoteId(parse_uuid(&id_text, "note")?),
+                meeting_id,
+                text: row.get(1),
+                timestamp_ms: u32::try_from(row.get::<i64, _>(2))
+                    .map_err(|e| db_err(format!("note timestamp_ms overflow: {e}")))?,
+                created_at: row.get(3),
+            });
+        }
+        Ok(notes)
+    }
+
+    async fn delete_note(&self, note_id: NoteId) -> Result<bool, DomainError> {
+        let result = sqlx::query("DELETE FROM notes WHERE id = ?")
+            .bind(note_id.0.to_string())
+            .execute(&self.pool)
+            .await
+            .map_err(map_sqlx("delete note"))?;
+        Ok(result.rows_affected() > 0)
     }
 }
 

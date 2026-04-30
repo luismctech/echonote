@@ -13,6 +13,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::entities::meeting::{Meeting, MeetingId, MeetingSearchHit, MeetingSummary};
+use crate::entities::note::Note;
 use crate::entities::segment::Segment;
 use crate::entities::speaker::{Speaker, SpeakerId};
 use crate::entities::summary::Summary;
@@ -165,6 +166,27 @@ pub trait MeetingStore: Send + Sync {
     /// "general" template, so this returns at most one row; once
     /// other templates land we'll add a `template` parameter.
     async fn get_summary(&self, meeting_id: MeetingId) -> Result<Option<Summary>, DomainError>;
+
+    /// Add a user note to a meeting. The note is persisted immediately
+    /// so no data is lost if the app crashes. Returns the persisted
+    /// note (with its generated `id` and `created_at`).
+    async fn add_note(
+        &self,
+        meeting_id: MeetingId,
+        text: &str,
+        timestamp_ms: u32,
+    ) -> Result<Note, DomainError>;
+
+    /// List all notes for a meeting, ordered by `timestamp_ms`
+    /// ascending. Returns an empty vec when no notes exist.
+    async fn list_notes(&self, meeting_id: MeetingId) -> Result<Vec<Note>, DomainError>;
+
+    /// Delete a single note by id. Returns `false` when the note did
+    /// not exist.
+    async fn delete_note(
+        &self,
+        note_id: crate::entities::note::NoteId,
+    ) -> Result<bool, DomainError>;
 
     /// Release any expensive resources (database pool, file handles)
     /// the adapter holds. Called once on app shutdown so the underlying

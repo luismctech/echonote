@@ -23,6 +23,8 @@ import type {
   MeetingId,
   MeetingSearchHit,
   MeetingSummary,
+  Note,
+  NoteId,
 } from "../types/meeting";
 import type { SpeakerId } from "../types/speaker";
 import type {
@@ -95,6 +97,16 @@ export async function resumeStreaming(
   sessionId: StreamingSessionId,
 ): Promise<boolean> {
   return invoke<boolean>("resume_streaming", { sessionId });
+}
+
+/**
+ * Look up the database MeetingId for a streaming session.
+ * Returns `null` when the session is unknown or not yet started.
+ */
+export async function getMeetingId(
+  sessionId: StreamingSessionId,
+): Promise<MeetingId | null> {
+  return invoke<MeetingId | null>("get_meeting_id", { sessionId });
 }
 
 // ---------------------------------------------------------------------------
@@ -170,6 +182,36 @@ export async function searchMeetings(
   limit = 20,
 ): Promise<MeetingSearchHit[]> {
   return invoke<MeetingSearchHit[]>("search_meetings", { query, limit });
+}
+
+// ---------------------------------------------------------------------------
+// Meeting notes
+// ---------------------------------------------------------------------------
+
+/**
+ * Add a timestamped note to a meeting. `timestampMs` is relative to
+ * the recording start (same timeline as segment offsets).
+ */
+export async function addNote(
+  meetingId: MeetingId,
+  text: string,
+  timestampMs: number,
+): Promise<Note> {
+  return invoke<Note>("add_note", { meetingId, text, timestampMs });
+}
+
+/**
+ * List all notes for a meeting, ordered by recording timestamp.
+ */
+export async function listNotes(meetingId: MeetingId): Promise<Note[]> {
+  return invoke<Note[]>("list_notes", { meetingId });
+}
+
+/**
+ * Delete a single note by id.
+ */
+export async function deleteNote(noteId: NoteId): Promise<boolean> {
+  return invoke<boolean>("delete_note", { noteId });
 }
 
 // ---------------------------------------------------------------------------

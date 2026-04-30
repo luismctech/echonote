@@ -600,6 +600,20 @@ mod tests {
         async fn rename_meeting(&self, _: MeetingId, _: &str) -> Result<bool, DomainError> {
             unreachable!()
         }
+        async fn add_note(
+            &self,
+            _: MeetingId,
+            _: &str,
+            _: u32,
+        ) -> Result<echo_domain::Note, DomainError> {
+            unreachable!()
+        }
+        async fn list_notes(&self, _: MeetingId) -> Result<Vec<echo_domain::Note>, DomainError> {
+            Ok(Vec::new())
+        }
+        async fn delete_note(&self, _: echo_domain::NoteId) -> Result<bool, DomainError> {
+            unreachable!()
+        }
     }
 
     /// Scripted chat. Produces a fixed token list (or an early
@@ -713,6 +727,7 @@ mod tests {
             input_format: AudioFormat::WHISPER,
             segments: segs,
             speakers: vec![],
+            notes: vec![],
         });
         (id, ids)
     }

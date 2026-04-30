@@ -234,6 +234,7 @@ export function App() {
               stream={recording.stream}
               stats={recording.stats}
               lines={recording.lines}
+              notes={recording.notes}
               listRef={recording.listRef}
               canStart={recording.canStart}
               canStop={recording.canStop}
@@ -247,6 +248,7 @@ export function App() {
               onStop={stopRecording}
               onPause={recording.pause}
               onResume={recording.resume}
+              onAddNote={recording.addNote}
               onDismissError={dismissError}
             />
           ) : (

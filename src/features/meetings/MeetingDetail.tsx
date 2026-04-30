@@ -2,15 +2,18 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { ResizableHandle } from "../../components/ResizableHandle";
+import { ResizableHandleVertical } from "../../components/ResizableHandleVertical";
 import { CopyButton } from "../../components/CopyButton";
 
 import { useMeetingSummary } from "../../hooks/useMeetingSummary";
 import { LogoAnimated } from "../../components/Logo";
 import { formatDate, formatDurationMs, formatTimestamp } from "../../lib/format";
 import { displayName, indexSpeakers } from "../../lib/speakers";
+import type { Note, NoteId } from "../../types/meeting";
 import type { SpeakerId } from "../../types/speaker";
 import type { MainView } from "../../types/view";
 import { ExportButton } from "./ExportButton";
+import { NotesPanel } from "./NotesPanel";
 import { SegmentRow } from "./SegmentRow";
 import { SpeakersPanel } from "./SpeakersPanel";
 import { SummaryPanel } from "./SummaryPanel";
@@ -104,11 +107,21 @@ export function MeetingDetail({
   const scrollRef = useRef<HTMLDivElement>(null);
   const splitRef = useRef<HTMLDivElement>(null);
   const summaryRef = useRef<HTMLDivElement>(null);
+  const hSplitRef = useRef<HTMLDivElement>(null);
 
   /** Fraction of the split container given to the summary (top panel). */
   const MIN_RATIO = 1 / 3;
   const MAX_RATIO = 2 / 3;
   const [summaryRatio, setSummaryRatio] = useState(0.5);
+
+  /** Horizontal split: transcript (left) vs notes (right). */
+  const H_MIN = 0.4;
+  const H_MAX = 0.85;
+  const [hRatio, setHRatio] = useState(0.65);
+  const clampedHRatio = Math.min(H_MAX, Math.max(H_MIN, hRatio));
+  const handleHRatioChange = useCallback((r: number) => {
+    setHRatio(Math.min(H_MAX, Math.max(H_MIN, r)));
+  }, []);
   /** Track whether the user has manually dragged the handle. */
   const [userResized, setUserResized] = useState(false);
   const clampedRatio = Math.min(MAX_RATIO, Math.max(MIN_RATIO, summaryRatio));
@@ -133,6 +146,15 @@ export function MeetingDetail({
     () => (m ? indexSpeakers(m.speakers) : new Map()),
     [m?.speakers],
   );
+
+  // Local notes state allows optimistic deletes without refetching.
+  const [notes, setNotes] = useState<Note[]>(m?.notes ?? []);
+  useEffect(() => {
+    setNotes(m?.notes ?? []);
+  }, [m?.notes]);
+  const handleNoteDeleted = useCallback((noteId: NoteId) => {
+    setNotes((prev) => prev.filter((n) => n.id !== noteId));
+  }, []);
 
   const getTranscriptText = useCallback(() => {
     if (!m) return "";
@@ -197,7 +219,7 @@ export function MeetingDetail({
           <SpeakersPanel speakers={m.speakers} onRename={onRenameSpeaker} />
         )}
 
-        {/* Resizable split: Summary (top) + Transcript (bottom) */}
+        {/* Resizable split: Summary (top) + Transcript+Notes (bottom) */}
         <div ref={splitRef} className="flex min-h-0 flex-1 flex-col">
           {/* ── Summary (fixed ratio only when content exists) ── */}
           <div
@@ -216,54 +238,74 @@ export function MeetingDetail({
             />
           )}
 
-          {/* ── Transcript (fills remaining space) ── */}
-          <div className="flex min-h-0 flex-1 flex-col">
-            <div className="flex items-center justify-between px-1 py-0.5">
-              <span className="text-xs font-medium uppercase tracking-wide text-zinc-400">
-                {t("meeting.transcript")}
-              </span>
-              {m.segments.length > 0 && (
-                <CopyButton getText={getTranscriptText} title={t("meeting.copyTranscript")} />
-              )}
-            </div>
+          {/* ── Transcript + Notes side-by-side ── */}
+          <div ref={hSplitRef} className="flex min-h-0 flex-1">
+            {/* Left: Transcript */}
             <div
-              ref={scrollRef}
-              className="min-h-0 flex-1 overflow-y-auto rounded-md border border-zinc-100 bg-zinc-50 p-3 text-sm leading-relaxed dark:border-zinc-900 dark:bg-zinc-900"
+              className="flex min-h-0 min-w-0 flex-col"
+              style={notes.length > 0 ? { flex: `0 0 ${(clampedHRatio * 100).toFixed(1)}%` } : { flex: "1 1 0%" }}
             >
-          {m.segments.length === 0 ? (
-            <p className="text-zinc-400">{t("meeting.noSegments")}</p>
-          ) : (
-            <ol
-              className="relative w-full"
-              style={{ height: `${virtualizer.getTotalSize()}px` }}
-            >
-              {virtualizer.getVirtualItems().map((vItem) => {
-                const seg = m.segments[vItem.index]!;
-                const speaker = seg.speakerId
-                  ? speakerIndex.get(seg.speakerId)
-                  : undefined;
-                return (
-                  <li
-                    key={seg.id}
-                    data-segment-id={seg.id}
-                    className="absolute left-0 top-0 flex w-full items-baseline gap-3 rounded-sm"
-                    style={{ transform: `translateY(${vItem.start}px)` }}
-                    data-index={vItem.index}
-                    ref={virtualizer.measureElement}
+              <div className="flex items-center justify-between px-1 py-0.5">
+                <span className="text-xs font-medium uppercase tracking-wide text-zinc-400">
+                  {t("meeting.transcript")}
+                </span>
+                {m.segments.length > 0 && (
+                  <CopyButton getText={getTranscriptText} title={t("meeting.copyTranscript")} />
+                )}
+              </div>
+              <div
+                ref={scrollRef}
+                className="min-h-0 flex-1 overflow-y-auto rounded-md border border-zinc-100 bg-zinc-50 p-3 text-sm leading-relaxed dark:border-zinc-900 dark:bg-zinc-900"
+              >
+                {m.segments.length === 0 ? (
+                  <p className="text-zinc-400">{t("meeting.noSegments")}</p>
+                ) : (
+                  <ol
+                    className="relative w-full"
+                    style={{ height: `${virtualizer.getTotalSize()}px` }}
                   >
-                    <SegmentRow
-                      startMs={seg.startMs}
-                      text={seg.text}
-                      speaker={speaker}
-                      noSpeechLabel={t("meeting.noSpeech")}
-                    />
-                  </li>
-                );
-              })}
-            </ol>
-          )}
-        </div>
-        </div>
+                    {virtualizer.getVirtualItems().map((vItem) => {
+                      const seg = m.segments[vItem.index]!;
+                      const speaker = seg.speakerId
+                        ? speakerIndex.get(seg.speakerId)
+                        : undefined;
+                      return (
+                        <li
+                          key={seg.id}
+                          data-segment-id={seg.id}
+                          className="absolute left-0 top-0 flex w-full items-baseline gap-3 rounded-sm"
+                          style={{ transform: `translateY(${vItem.start}px)` }}
+                          data-index={vItem.index}
+                          ref={virtualizer.measureElement}
+                        >
+                          <SegmentRow
+                            startMs={seg.startMs}
+                            text={seg.text}
+                            speaker={speaker}
+                            noSpeechLabel={t("meeting.noSpeech")}
+                          />
+                        </li>
+                      );
+                    })}
+                  </ol>
+                )}
+              </div>
+            </div>
+
+            {/* Vertical resize handle + Notes panel (only when notes exist) */}
+            {notes.length > 0 && (
+              <>
+                <ResizableHandleVertical
+                  containerRef={hSplitRef}
+                  ratio={clampedHRatio}
+                  onRatioChange={handleHRatioChange}
+                />
+                <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+                  <NotesPanel notes={notes} onDeleted={handleNoteDeleted} />
+                </div>
+              </>
+            )}
+          </div>
         {/* ── end split ── */}
         </div>
       </div>

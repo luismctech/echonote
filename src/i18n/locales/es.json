@@ -45,7 +45,10 @@
     "modelLoads": "el modelo se carga en el primer inicio",
     "silence": "silencio",
     "silenceRms": "silencio (rms={{rms}})",
-    "noSpeech": "[sin voz]"
+    "noSpeech": "[sin voz]",
+    "notePlaceholder": "Agrega una nota…",
+    "addNote": "Agregar",
+    "notes": "Notas"
   },
   "health": {
     "warmingUp": "calentando…",
@@ -60,9 +63,12 @@
     "segments": "segmentos",
     "noSegments": "No hay segmentos guardados para esta reunión.",
     "noSpeech": "[sin voz]",
+    "notes": "Notas",
+    "deleteNote": "Eliminar nota",
     "transcript": "Transcripción",
     "copySummary": "Copiar resumen",
     "copyTranscript": "Copiar transcripción",
+    "copyNotes": "Copiar notas",
     "editTitle": "Clic para renombrar"
   },
   "export": {

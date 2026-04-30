@@ -35,12 +35,27 @@ export type MeetingSummary = {
   segmentCount: number;
 };
 
-/** Full meeting aggregate (header + segments + speakers). */
+/** UUIDv7 string identifying a note. */
+export type NoteId = string;
+
+/** A user-created text annotation within a meeting. */
+export type Note = {
+  id: NoteId;
+  meetingId: MeetingId;
+  text: string;
+  /** Offset in ms from the meeting start (same timeline as segments). */
+  timestampMs: number;
+  createdAt: string;
+};
+
+/** Full meeting aggregate (header + segments + speakers + notes). */
 export type Meeting = MeetingSummary & {
   inputFormat: AudioFormat;
   segments: Segment[];
   /** Diarized speakers, ordered by `slot` ascending. May be empty. */
   speakers: Speaker[];
+  /** User-created notes, ordered by `timestampMs`. May be empty. */
+  notes: Note[];
 };
 
 /**

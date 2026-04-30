@@ -26,7 +26,7 @@ import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { useToast } from "../components/Toaster";
-import { startStreaming, stopStreaming, pauseStreaming, resumeStreaming } from "../ipc/client";
+import { startStreaming, stopStreaming, pauseStreaming, resumeStreaming, addNote as ipcAddNote, getMeetingId } from "../ipc/client";
 import { isIpcError } from "../types/ipc-error";
 import type { ErrorCode } from "../types/ipc-error";
 import {
@@ -38,6 +38,7 @@ import {
   recordingReducer,
 } from "../state/recording";
 import type { TranscriptEvent } from "../types/streaming";
+import type { Note } from "../types/meeting";
 import type { StreamLine } from "../types/view";
 
 export type RecordingStats = {
@@ -75,6 +76,9 @@ export function useRecordingSession({
   );
   const [lines, setLines] = useState<StreamLine[]>([]);
   const [stats, setStats] = useState<RecordingStats>(ZERO_STATS);
+  const [notes, setNotes] = useState<Note[]>([]);
+  const sessionStartedAtRef = useRef<number | null>(null);
+  const meetingIdRef = useRef<string | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
 
   // Capture the latest callback in a ref so we don't force callers to
@@ -154,6 +158,10 @@ export function useRecordingSession({
   const handleEvent = useCallback((evt: TranscriptEvent) => {
     switch (evt.type) {
       case "started":
+        sessionStartedAtRef.current = Date.now();
+        getMeetingId(evt.sessionId).then((id) => {
+          meetingIdRef.current = id;
+        }).catch(() => { /* will retry on addNote if needed */ });
         dispatch({
           type: "STREAMING_STARTED",
           sessionId: evt.sessionId,
@@ -243,6 +251,9 @@ export function useRecordingSession({
     async ({ language, diarize }: StartOptions) => {
       setLines([]);
       setStats(ZERO_STATS);
+      setNotes([]);
+      sessionStartedAtRef.current = null;
+      meetingIdRef.current = null;
       dispatch({ type: "START_REQUESTED" });
       try {
         const langHint = language.trim();
@@ -332,8 +343,41 @@ export function useRecordingSession({
       dispatch({ type: "ACKNOWLEDGE" });
       setLines([]);
       setStats(ZERO_STATS);
+      setNotes([]);
+      sessionStartedAtRef.current = null;
+      meetingIdRef.current = null;
     }
   }, [stream.kind]);
+
+  const addNote = useCallback(
+    async (text: string) => {
+      if (
+        (stream.kind !== "recording" && stream.kind !== "paused") ||
+        !sessionStartedAtRef.current
+      ) {
+        console.warn("[addNote] guard failed:", stream.kind, sessionStartedAtRef.current);
+        return;
+      }
+      const timestampMs = Math.floor(Date.now() - sessionStartedAtRef.current);
+      // Resolve the real database MeetingId (distinct from the streaming session id).
+      let meetingId = meetingIdRef.current;
+      if (!meetingId) {
+        meetingId = await getMeetingId(stream.sessionId).catch(() => null);
+        if (meetingId) meetingIdRef.current = meetingId;
+      }
+      if (!meetingId) {
+        console.warn("[addNote] meeting id not yet available");
+        return;
+      }
+      try {
+        const note = await ipcAddNote(meetingId, text, timestampMs);
+        setNotes((prev) => [...prev, note]);
+      } catch (err) {
+        console.error("[addNote] IPC failed:", err);
+      }
+    },
+    [stream],
+  );
 
   const canStart = backendReady && selectCanStart(stream);
   const canStop = selectCanStop(stream);
@@ -344,6 +388,7 @@ export function useRecordingSession({
     stream,
     lines,
     stats,
+    notes,
     listRef,
     canStart,
     canStop,
@@ -353,6 +398,7 @@ export function useRecordingSession({
     stop,
     pause,
     resume,
+    addNote,
     dismissError,
     reset,
   };
