@@ -59,6 +59,7 @@ dirs = "6"
 keepawake = "0.6"
 sha2 = "0.10"
 scopeguard = "1"
+sysinfo = { version = "0.33", default-features = false, features = ["system"] }
 tauri-plugin-dialog = "2.7.0"
 tauri-plugin-global-shortcut = "2.3.1"
 specta.workspace = true
@@ -67,6 +68,9 @@ tauri-specta.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+metal = "0.30"
 
 [features]
 # Default features are left empty; the shell opts in to platform backends

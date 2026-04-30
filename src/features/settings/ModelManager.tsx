@@ -10,6 +10,8 @@ import { useTranslation } from "react-i18next";
 
 import type { UseModelManager, DownloadProgress } from "../../hooks/useModelManager";
 import type { ModelInfo } from "../../types/models";
+import type { ModelRecommendation } from "../../types/hardware";
+import { useHardwareRecommendation } from "../../hooks/useHardwareRecommendation";
 
 function formatBytes(bytes: number): string {
   if (bytes < 1_000_000) return `${(bytes / 1_000).toFixed(0)} KB`;
@@ -26,6 +28,7 @@ export function ModelManager({
 }>) {
   const { models, loading, downloading, error, activeLlm, activeAsr } = state;
   const { t } = useTranslation();
+  const { data: recommendation } = useHardwareRecommendation();
 
   const grouped = groupByKind(models);
 
@@ -37,6 +40,12 @@ export function ModelManager({
     llm: state.selectLlm,
     asr: state.selectAsr,
   };
+
+  const recommendedIds = new Set<string>();
+  if (recommendation) {
+    recommendedIds.add(recommendation.asr.modelId);
+    if (recommendation.llm) recommendedIds.add(recommendation.llm.modelId);
+  }
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
@@ -51,6 +60,8 @@ export function ModelManager({
             {t("models.close")}
           </button>
         </header>
+
+        {recommendation && <HardwareChip recommendation={recommendation} />}
 
         {error && (
           <p className="rounded-md bg-red-50 px-3 py-2 text-xs text-red-700 dark:bg-red-950/40 dark:text-red-300">
@@ -69,6 +80,7 @@ export function ModelManager({
                 models={items}
                 downloading={downloading}
                 activeId={activeIds[kind] ?? null}
+                recommendedIds={recommendedIds}
                 onDownload={state.download}
                 onCancel={state.cancelDl}
                 onDelete={state.remove}
@@ -111,6 +123,7 @@ function ModelGroup({
   models,
   downloading,
   activeId,
+  recommendedIds,
   onDownload,
   onCancel,
   onDelete,
@@ -120,6 +133,7 @@ function ModelGroup({
   models: ModelInfo[];
   downloading: DownloadProgress | null;
   activeId: string | null;
+  recommendedIds: Set<string>;
   onDownload: (id: string) => void;
   onCancel: (id: string) => void;
   onDelete: (id: string) => void;
@@ -138,6 +152,8 @@ function ModelGroup({
           model={m}
           downloading={downloading}
           isActive={selectable && m.id === activeId}
+          isRecommended={recommendedIds.has(m.id)}
+          isRequired={kind === "vad" || kind === "embedder"}
           showUse={selectable}
           onDownload={onDownload}
           onCancel={onCancel}
@@ -153,6 +169,8 @@ function ModelRow({
   model,
   downloading,
   isActive,
+  isRecommended,
+  isRequired,
   showUse,
   onDownload,
   onCancel,
@@ -162,6 +180,8 @@ function ModelRow({
   model: ModelInfo;
   downloading: DownloadProgress | null;
   isActive: boolean;
+  isRecommended: boolean;
+  isRequired: boolean;
   showUse: boolean;
   onDownload: (id: string) => void;
   onCancel: (id: string) => void;
@@ -176,18 +196,35 @@ function ModelRow({
       ? (downloading.downloaded / downloading.total) * 100
       : 0;
 
+  let borderClass = "border-zinc-100 bg-zinc-50/50 dark:border-zinc-800/60 dark:bg-zinc-900/30";
+  if (isActive) {
+    borderClass = "border-blue-200 bg-blue-50/50 dark:border-blue-800/60 dark:bg-blue-950/20";
+  } else if (isRequired && !model.present) {
+    borderClass = "border-rose-200 bg-rose-50/30 dark:border-rose-800/40 dark:bg-rose-950/10";
+  } else if (isRecommended) {
+    borderClass = "border-amber-200 bg-amber-50/30 dark:border-amber-800/40 dark:bg-amber-950/10";
+  }
+
   return (
-    <div className={`flex items-center gap-3 rounded-lg border px-3 py-2.5 ${
-      isActive
-        ? "border-blue-200 bg-blue-50/50 dark:border-blue-800/60 dark:bg-blue-950/20"
-        : "border-zinc-100 bg-zinc-50/50 dark:border-zinc-800/60 dark:bg-zinc-900/30"
-    }`}>
+    <div className={`flex items-center gap-3 rounded-lg border px-3 py-2.5 ${borderClass}`}>
       <StatusDot present={model.present} active={isActive} />
 
       <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-        <span className="truncate text-sm font-medium text-zinc-800 dark:text-zinc-200">
-          {model.label}
-        </span>
+        <div className="flex items-center gap-1.5">
+          <span className="truncate text-sm font-medium text-zinc-800 dark:text-zinc-200">
+            {model.label}
+          </span>
+          {isRequired && (
+            <span className="shrink-0 rounded-md bg-rose-100 px-1.5 py-0.5 text-[9px] font-semibold uppercase text-rose-700 dark:bg-rose-900/40 dark:text-rose-300">
+              {t("models.required")}
+            </span>
+          )}
+          {isRecommended && !isRequired && (
+            <span className="shrink-0 rounded-md bg-amber-100 px-1.5 py-0.5 text-[9px] font-semibold uppercase text-amber-700 dark:bg-amber-900/40 dark:text-amber-300">
+              {t("models.recommended")}
+            </span>
+          )}
+        </div>
         {isDownloading && downloading.total > 0 && (
           <div className="flex items-center gap-2">
             <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-zinc-200 dark:bg-zinc-700">
@@ -265,4 +302,31 @@ function StatusDot({ present, active }: Readonly<{ present: boolean; active: boo
   if (active) color = "bg-blue-500";
   else if (present) color = "bg-emerald-500";
   return <span className={`h-2 w-2 shrink-0 rounded-full ${color}`} />;
+}
+
+function HardwareChip({ recommendation }: Readonly<{ recommendation: ModelRecommendation }>) {
+  const { t } = useTranslation();
+  const hw = recommendation.hardware;
+  const ramGb = (hw.totalRamBytes / 1_073_741_824).toFixed(0);
+
+  return (
+    <div className="flex flex-col gap-1.5 rounded-lg border border-indigo-100 bg-indigo-50/50 px-3 py-2 dark:border-indigo-900/40 dark:bg-indigo-950/20">
+      <div className="flex items-center gap-2 text-xs text-indigo-700 dark:text-indigo-300">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" className="h-3.5 w-3.5 shrink-0">
+          <path d="M1 8a7 7 0 1 1 14 0A7 7 0 0 1 1 8Zm7.75-4.25a.75.75 0 0 0-1.5 0V8c0 .414.336.75.75.75h3.25a.75.75 0 0 0 0-1.5h-2.5v-3.5Z" />
+        </svg>
+        <span className="font-medium">{t("models.hardwareDetected")}</span>
+      </div>
+      <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-[10px] text-indigo-600 dark:text-indigo-400">
+        <span>{hw.cpuBrand}</span>
+        <span>{ramGb} GB RAM</span>
+        <span>{hw.gpuName}</span>
+      </div>
+      {recommendation.warning && (
+        <p className="mt-0.5 text-[10px] text-amber-700 dark:text-amber-400">
+          ⚠ {recommendation.warning}
+        </p>
+      )}
+    </div>
+  );
 }

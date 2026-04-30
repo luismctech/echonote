@@ -59,6 +59,8 @@ pub fn run() {
             commands::templates::update_custom_template,
             commands::templates::delete_custom_template,
             commands::llm::summarize_with_custom_template,
+            commands::hardware::get_hardware_profile,
+            commands::recommendation::get_model_recommendation,
         ]);
 
     // In dev builds, export TypeScript bindings so the frontend can

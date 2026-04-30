@@ -1,7 +1,7 @@
 {
   "name": "echonote",
   "private": true,
-  "version": "0.3.3",
+  "version": "0.3.4",
   "description": "Private, local-first meeting transcription and AI summaries.",
   "type": "module",
   "packageManager": "pnpm@10.13.1",

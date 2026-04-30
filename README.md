@@ -46,11 +46,11 @@ Get the latest release for your platform from [**GitHub Releases**](https://gith
 
 | Platform | File | How to install |
 |----------|------|----------------|
-| macOS (Apple Silicon) | `EchoNote_x.x.x_aarch64.dmg` | Open `.dmg`, drag to Applications |
-| macOS (Intel) | `EchoNote_x.x.x_x64.dmg` | Open `.dmg`, drag to Applications |
-| Windows | `EchoNote_x.x.x_x64-setup.exe` | Run the installer |
-| Linux (Debian/Ubuntu) | `EchoNote_x.x.x_amd64.deb` | `sudo dpkg -i EchoNote_*.deb` |
-| Linux (other) | `EchoNote_x.x.x_amd64.AppImage` | Make executable and run |
+| macOS (Apple Silicon) | `EchoNote_x.x.x_macOS-AppleSilicon.dmg` | Open `.dmg`, drag to Applications |
+| macOS (Intel) | `EchoNote_x.x.x_macOS-Intel.dmg` | Open `.dmg`, drag to Applications |
+| Windows | `EchoNote_x.x.x_Windows-x64.exe` | Run the installer |
+| Linux | `EchoNote_x.x.x_Linux-x64.AppImage` | `chmod +x` and run (includes auto-update) |
+| Linux (Debian/Ubuntu) | `EchoNote_x.x.x_Linux-x64.deb` | `sudo dpkg -i EchoNote_*.deb` (manual update) |
 
 ### First launch notes
 
