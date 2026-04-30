@@ -37,7 +37,7 @@
   "bundle": {
     "active": true,
     "targets": ["dmg", "nsis", "deb", "appimage"],
-    "createUpdaterArtifacts": true,
+    "createUpdaterArtifacts": "v2",
     "category": "Productivity",
     "macOS": {
       "minimumSystemVersion": "11.0"

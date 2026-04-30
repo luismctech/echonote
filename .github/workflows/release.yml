@@ -199,15 +199,15 @@ jobs:
 
         RELEASE_ID=$(gh api "repos/$REPO/releases/tags/$TAG" --jq '.id')
 
-        # --- Rename map: old suffix → new name ---
-        # Includes both user-facing installers and updater artifacts (.tar.gz)
+        # --- Rename map: only user-facing installers ---
+        # Updater artifacts (.tar.gz, .nsis.zip) keep original names since
+        # latest.json references them directly.
         declare -A RENAMES=(
           ["EchoNote_${VERSION}_aarch64.dmg"]="EchoNote_${VERSION}_macOS-AppleSilicon.dmg"
           ["EchoNote_${VERSION}_x64.dmg"]="EchoNote_${VERSION}_macOS-Intel.dmg"
           ["EchoNote_${VERSION}_x64-setup.exe"]="EchoNote_${VERSION}_Windows-x64.exe"
           ["EchoNote_${VERSION}_amd64.deb"]="EchoNote_${VERSION}_Linux-x64.deb"
           ["EchoNote_${VERSION}_amd64.AppImage"]="EchoNote_${VERSION}_Linux-x64.AppImage"
-          ["EchoNote_${VERSION}_amd64.AppImage.tar.gz"]="EchoNote_${VERSION}_Linux-x64.AppImage.tar.gz"
         )
 
         # --- Process each asset ---
@@ -222,28 +222,19 @@ jobs:
             continue
           fi
 
-          # Delete standalone .sig files (signatures are embedded in latest.json)
+          # Delete standalone .sig files for user-facing installers only.
+          # Keep .sig for updater artifacts (.tar.gz.sig, .nsis.zip.sig) since
+          # they are required by the Tauri updater for signature verification.
           if [[ "$ASSET_NAME" == *.sig ]]; then
+            # Keep sig files for updater artifacts
+            if [[ "$ASSET_NAME" == *.tar.gz.sig ]] || [[ "$ASSET_NAME" == *.nsis.zip.sig ]]; then
+              echo "✅ Keeping updater sig: $ASSET_NAME"
+              continue
+            fi
             echo "🗑️  Deleting: $ASSET_NAME"
             gh api --method DELETE "repos/$REPO/releases/assets/$ASSET_ID" --silent
             continue
           fi
         done
-
-        # --- Update latest.json URLs to match renamed files ---
-        JSON_ASSET_ID=$(gh api "repos/$REPO/releases/$RELEASE_ID/assets" \
-          --jq '.[] | select(.name == "latest.json") | .id' || true)
-
-        if [[ -n "$JSON_ASSET_ID" ]]; then
-          echo "📝 Updating latest.json URLs..."
-          gh api "repos/$REPO/releases/assets/$JSON_ASSET_ID" \
-            -H "Accept: application/octet-stream" > latest.json
-
-          sed -i "s/_x64-setup.exe/_Windows-x64.exe/g" latest.json
-          sed -i "s/_amd64.AppImage/_Linux-x64.AppImage/g" latest.json
-
-          gh api --method DELETE "repos/$REPO/releases/assets/$JSON_ASSET_ID" --silent
-          gh release upload "$TAG" latest.json --repo "$REPO"
-        fi
 
         echo "✅ Release assets cleaned up"
