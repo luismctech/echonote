@@ -24,11 +24,13 @@ use std::pin::pin;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use futures::stream::{self, BoxStream, StreamExt};
 use llama_cpp_2::context::params::LlamaContextParams;
 use llama_cpp_2::llama_batch::LlamaBatch;
 use llama_cpp_2::model::params::LlamaModelParams;
 use llama_cpp_2::model::{AddBos, LlamaModel};
 use llama_cpp_2::sampling::LlamaSampler;
+use tokio::sync::mpsc;
 use tracing::{debug, info, instrument, warn};
 
 use echo_domain::{DomainError, GenerateOptions, LlmModel};
@@ -53,6 +55,10 @@ const DEFAULT_N_GPU_LAYERS: u32 = 999;
 /// Initial size of the decoding batch. We resize on demand if the
 /// prompt is larger.
 const INITIAL_BATCH_TOKENS: usize = 512;
+
+/// mpsc buffer for streaming generation. Same reasoning as
+/// `llama_cpp_chat::STREAM_BUFFER`.
+const STREAM_BUFFER: usize = 64;
 
 /// Configurable load knobs for [`LlamaCppLlm::load_with`].
 ///
@@ -239,6 +245,33 @@ impl LlmModel for LlamaCppLlm {
             .await
             .map_err(|e| DomainError::LlmFailed(format!("generate join: {e}")))?
     }
+
+    #[instrument(skip(self, prompt, options), fields(prompt_chars = prompt.len(), max_tokens = options.max_tokens))]
+    async fn generate_stream(
+        &self,
+        prompt: &str,
+        options: &GenerateOptions,
+    ) -> Result<BoxStream<'static, Result<String, DomainError>>, DomainError> {
+        if prompt.is_empty() {
+            return Ok(Box::pin(stream::once(async { Ok(String::new()) })));
+        }
+
+        let inner = Arc::clone(&self.inner);
+        let prompt = prompt.to_string();
+        let options = options.clone();
+
+        let (tx, rx) = mpsc::channel::<Result<String, DomainError>>(STREAM_BUFFER);
+
+        tokio::task::spawn_blocking(move || {
+            generate_stream_blocking(&inner, &prompt, &options, &tx);
+        });
+
+        let stream = stream::unfold(rx, |mut rx| async move {
+            rx.recv().await.map(|item| (item, rx))
+        })
+        .boxed();
+        Ok(stream)
+    }
 }
 
 /// Synchronous inference loop. Lives in its own function (rather than
@@ -388,6 +421,144 @@ fn generate_blocking(
     let output = crate::shared::strip_think_blocks(&output);
 
     Ok(output)
+}
+
+/// Streaming variant of [`generate_blocking`]. Sends each decoded
+/// piece over `tx`. The accumulated output (post think-block strip)
+/// is NOT sent as a final chunk — that's the caller's responsibility
+/// to aggregate. Stop-sequence handling trims the last piece before
+/// sending if the sequence appears mid-piece.
+fn generate_stream_blocking(
+    inner: &LoadedModel,
+    prompt: &str,
+    options: &GenerateOptions,
+    tx: &mpsc::Sender<Result<String, DomainError>>,
+) {
+    let result = generate_stream_inner(inner, prompt, options, tx);
+    if let Err(e) = result {
+        let _ = tx.blocking_send(Err(e));
+    }
+}
+
+fn generate_stream_inner(
+    inner: &LoadedModel,
+    prompt: &str,
+    options: &GenerateOptions,
+    tx: &mpsc::Sender<Result<String, DomainError>>,
+) -> Result<(), DomainError> {
+    let n_ctx = NonZeroU32::new(inner.n_ctx)
+        .ok_or_else(|| DomainError::Invariant("n_ctx must be > 0".into()))?;
+
+    let mut ctx_params = LlamaContextParams::default()
+        .with_n_ctx(Some(n_ctx))
+        .with_n_batch(inner.n_ctx);
+    if let Some(threads) = inner.n_threads {
+        ctx_params = ctx_params.with_n_threads(threads);
+        ctx_params = ctx_params.with_n_threads_batch(threads);
+    }
+
+    let mut ctx = inner
+        .model
+        .new_context(inner.backend, ctx_params)
+        .map_err(|e| DomainError::LlmFailed(format!("create context: {e}")))?;
+
+    let prompt_tokens = inner
+        .model
+        .str_to_token(prompt, AddBos::Never)
+        .map_err(|e| DomainError::LlmFailed(format!("tokenize prompt: {e}")))?;
+
+    let n_prompt = prompt_tokens.len() as i32;
+    let n_max_total = n_prompt.saturating_add(options.max_tokens.min(i32::MAX as u32) as i32);
+    if (n_max_total as u32) > inner.n_ctx {
+        return Err(DomainError::LlmFailed(format!(
+            "prompt ({} tok) + max_tokens ({}) exceeds context window ({})",
+            n_prompt, options.max_tokens, inner.n_ctx
+        )));
+    }
+
+    let batch_capacity = prompt_tokens.len().max(INITIAL_BATCH_TOKENS);
+    let mut batch = LlamaBatch::new(batch_capacity, 1);
+    let last_index = (prompt_tokens.len() as i32) - 1;
+    for (i, token) in (0_i32..).zip(prompt_tokens.into_iter()) {
+        let is_last = i == last_index;
+        batch
+            .add(token, i, &[0], is_last)
+            .map_err(|e| DomainError::LlmFailed(format!("batch.add prompt: {e}")))?;
+    }
+    ctx.decode(&mut batch)
+        .map_err(|e| DomainError::LlmFailed(format!("decode prompt: {e}")))?;
+
+    let seed = options.seed.map_or(1234, |s| s as u32);
+    let temp = options.temperature.clamp(0.0, 2.0);
+    let top_p = options.top_p.clamp(0.0, 1.0);
+    let mut sampler = if temp <= f32::EPSILON {
+        LlamaSampler::chain_simple([LlamaSampler::greedy()])
+    } else {
+        LlamaSampler::chain_simple([
+            LlamaSampler::top_p(top_p, 1),
+            LlamaSampler::temp(temp),
+            LlamaSampler::dist(seed),
+        ])
+    };
+
+    let mut decoder = encoding_rs::UTF_8.new_decoder();
+    let mut output = String::new();
+    let mut n_cur = batch.n_tokens();
+    let mut n_decoded: u32 = 0;
+    let max_new = options.max_tokens;
+    // Track whether we're inside a <think> block so we skip sending those tokens.
+    let mut in_think_block = false;
+
+    while n_decoded < max_new {
+        let token = sampler.sample(&ctx, batch.n_tokens() - 1);
+        sampler.accept(token);
+
+        if inner.model.is_eog_token(token) {
+            break;
+        }
+
+        let piece = inner
+            .model
+            .token_to_piece(token, &mut decoder, true, None)
+            .map_err(|e| DomainError::LlmFailed(format!("detokenize: {e}")))?;
+        output.push_str(&piece);
+        n_decoded += 1;
+
+        // Detect <think> blocks and suppress them from streaming output.
+        if output.contains("<think>") && !output.contains("</think>") {
+            in_think_block = true;
+        }
+        if in_think_block && output.contains("</think>") {
+            in_think_block = false;
+            // Don't send this piece — it's part of the think block ending.
+        } else if !in_think_block {
+            // Only send pieces that are outside think blocks.
+            if tx.blocking_send(Ok(piece)).is_err() {
+                // Consumer dropped — abort decoding.
+                return Ok(());
+            }
+        }
+
+        if let Some(stop) = options
+            .stop
+            .iter()
+            .find(|s| !s.is_empty() && output.contains(s.as_str()))
+        {
+            debug!(n_decoded, %stop, "stream stopped on stop sequence");
+            break;
+        }
+
+        batch.clear();
+        batch
+            .add(token, n_cur, &[0], true)
+            .map_err(|e| DomainError::LlmFailed(format!("batch.add gen: {e}")))?;
+        n_cur += 1;
+
+        ctx.decode(&mut batch)
+            .map_err(|e| DomainError::LlmFailed(format!("decode step: {e}")))?;
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]

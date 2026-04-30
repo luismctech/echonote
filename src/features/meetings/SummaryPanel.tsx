@@ -33,7 +33,7 @@ export function SummaryPanel({
 }: Readonly<{
   state: UseMeetingSummary;
 }>) {
-  const { summary, loading, generating, error, selectedTemplate, setSelectedTemplate, includeNotes, setIncludeNotes } = state;
+  const { summary, loading, generating, streamingText, error, selectedTemplate, setSelectedTemplate, includeNotes, setIncludeNotes } = state;
   const { t } = useTranslation();
   const [customTemplates, setCustomTemplates] = useState<CustomTemplate[]>([]);
   const [showTemplateManager, setShowTemplateManager] = useState(false);
@@ -119,8 +119,20 @@ export function SummaryPanel({
             <p className="text-xs text-zinc-500">{t("summary.loading")}</p>
           </div>
         )}
-        {!loading && summary && <SummaryBody summary={summary} />}
-        {!loading && !summary && (
+        {!loading && generating && streamingText && (
+          <div className="prose prose-sm dark:prose-invert max-w-none text-xs leading-relaxed">
+            <Markdown>{streamingText}</Markdown>
+            <span className="ml-0.5 inline-block h-3 w-1.5 animate-pulse rounded-sm bg-emerald-500" />
+          </div>
+        )}
+        {!loading && generating && !streamingText && (
+          <div className="flex items-center gap-2">
+            <LogoAnimated size={20} className="opacity-40" />
+            <p className="text-xs text-zinc-500">{t("summary.generating")}</p>
+          </div>
+        )}
+        {!loading && !generating && summary && <SummaryBody summary={summary} />}
+        {!loading && !generating && !summary && (
           <p className="text-xs text-zinc-500">
             {t("summary.empty")}
           </p>

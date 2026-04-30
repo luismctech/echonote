@@ -209,6 +209,24 @@ async summarizeMeeting(meetingId: MeetingId, template: string | null, includeNot
 }
 },
 /**
+ * Streaming variant of [`summarize_meeting`]. Sends tokens as they
+ * are decoded so the UI can render them incrementally — same UX as
+ * the chat feature.
+ * 
+ * The stream finishes with `SummarizeEvent::Completed` carrying the
+ * persisted [`Summary`], or `SummarizeEvent::Failed` on error. The
+ * IPC promise resolves `Ok(())` in both cases; the frontend reads
+ * the terminal event to decide success or failure.
+ */
+async summarizeMeetingStream(meetingId: MeetingId, template: string | null, includeNotes: boolean, onEvent: TAURI_CHANNEL<SummarizeEvent>) : Promise<Result<null, IpcError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("summarize_meeting_stream", { meetingId, template, includeNotes, onEvent }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Fetch the most recent summary for a meeting, or `null` when none
  * has been generated yet. The frontend uses this on `MeetingDetail`
  * mount so the panel can render either the existing summary or the
@@ -1193,6 +1211,29 @@ disableNeuralVad: boolean | null }
  */
 export type StreamingSessionId = string
 /**
+ * Events emitted by [`SummarizeMeeting::execute_stream`].
+ * 
+ * Mirrors the chat event pattern: `Started` → `Token`* → `Completed` | `Failed`.
+ */
+export type SummarizeEvent = 
+/**
+ * Generation started — carries the model id for provenance.
+ */
+{ kind: "started"; model: string } | 
+/**
+ * A decoded text piece (partial word or full token).
+ */
+{ kind: "token"; delta: string } | 
+/**
+ * Generation finished successfully. The summary has been parsed
+ * and persisted to the store.
+ */
+{ kind: "completed"; summary: Summary } | 
+/**
+ * An error occurred during generation or persistence.
+ */
+{ kind: "failed"; error: string }
+/**
  * A persisted LLM summary attached to a [`crate::Meeting`].
  * 
  * `serde(rename_all = "camelCase")` so the React layer can consume
@@ -1272,7 +1313,6 @@ createdAt: string }
  * other id in this crate uses.
  */
 export type SummaryId = string
-export type TAURI_CHANNEL<TSend> = null
 /**
  * One event emitted by the streaming pipeline.
  * 

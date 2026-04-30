@@ -5,7 +5,7 @@ use tauri::State;
 
 use crate::ipc_error::IpcError;
 
-use echo_app::{AskAboutMeeting, AskAboutMeetingEvent, SummarizeMeeting};
+use echo_app::{AskAboutMeeting, AskAboutMeetingEvent, SummarizeEvent, SummarizeMeeting};
 use echo_domain::{ChatMessage, CustomTemplateId, MeetingId, Summary};
 use futures::stream::StreamExt;
 
@@ -137,6 +137,45 @@ pub async fn ask_about_meeting(
                 error = %e,
                 %meeting_id,
                 "ask_about_meeting channel send failed; aborting drain",
+            );
+            break;
+        }
+    }
+    Ok(())
+}
+
+/// Streaming variant of [`summarize_meeting`]. Sends tokens as they
+/// are decoded so the UI can render them incrementally — same UX as
+/// the chat feature.
+///
+/// The stream finishes with `SummarizeEvent::Completed` carrying the
+/// persisted [`Summary`], or `SummarizeEvent::Failed` on error. The
+/// IPC promise resolves `Ok(())` in both cases; the frontend reads
+/// the terminal event to decide success or failure.
+#[tauri::command]
+#[specta::specta]
+pub async fn summarize_meeting_stream(
+    state: State<'_, AppState>,
+    meeting_id: MeetingId,
+    template: Option<String>,
+    include_notes: bool,
+    on_event: Channel<SummarizeEvent>,
+) -> Result<(), IpcError> {
+    let llm = state.ensure_llm().await?;
+    let use_case = SummarizeMeeting::new(llm, state.store.clone());
+    let tmpl = template.as_deref().unwrap_or("general");
+
+    let mut stream = use_case
+        .execute_stream(meeting_id, tmpl, include_notes)
+        .await
+        .map_err(IpcError::from)?;
+
+    while let Some(event) = stream.next().await {
+        if let Err(e) = on_event.send(event) {
+            tracing::warn!(
+                error = %e,
+                %meeting_id,
+                "summarize_meeting_stream channel send failed; aborting drain",
             );
             break;
         }

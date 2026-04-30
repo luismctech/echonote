@@ -20,6 +20,7 @@
 
 use std::sync::Arc;
 
+use futures::stream::{self, BoxStream, StreamExt};
 use thiserror::Error;
 use time::OffsetDateTime;
 use tracing::{info, instrument, warn};
@@ -70,6 +71,24 @@ pub enum SummarizeMeetingError {
     /// Storage layer failure (disk full, schema mismatch, …).
     #[error(transparent)]
     Storage(DomainError),
+}
+
+/// Events emitted by [`SummarizeMeeting::execute_stream`].
+///
+/// Mirrors the chat event pattern: `Started` → `Token`* → `Completed` | `Failed`.
+#[derive(Debug, Clone, serde::Serialize, specta::Type)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+#[allow(missing_docs)]
+pub enum SummarizeEvent {
+    /// Generation started — carries the model id for provenance.
+    Started { model: String },
+    /// A decoded text piece (partial word or full token).
+    Token { delta: String },
+    /// Generation finished successfully. The summary has been parsed
+    /// and persisted to the store.
+    Completed { summary: Box<Summary> },
+    /// An error occurred during generation or persistence.
+    Failed { error: String },
 }
 
 /// Use-case handler. Holding both ports as `Arc<dyn …>` keeps the
@@ -262,6 +281,127 @@ impl SummarizeMeeting {
             "custom summary persisted"
         );
         Ok(summary)
+    }
+
+    /// Streaming variant of [`Self::execute`]. Returns a stream of
+    /// [`SummarizeEvent`]s: `Started` → N × `Token` → `Completed`
+    /// (with the parsed and persisted [`Summary`]) or `Failed`.
+    ///
+    /// The stream accumulates all tokens, parses the full text at the
+    /// end (falling back to `FreeText` on failure), and persists the
+    /// result — same guarantee as the non-streaming path, just with
+    /// incremental UI feedback during generation.
+    #[instrument(skip(self), fields(meeting_id = %meeting_id, template = %template))]
+    pub async fn execute_stream(
+        &self,
+        meeting_id: MeetingId,
+        template: &str,
+        include_notes: bool,
+    ) -> Result<BoxStream<'static, SummarizeEvent>, SummarizeMeetingError> {
+        if !TEMPLATE_IDS.contains(&template) {
+            return Err(SummarizeMeetingError::InvalidTemplate(template.to_string()));
+        }
+
+        let meeting = self
+            .store
+            .get(meeting_id)
+            .await
+            .map_err(SummarizeMeetingError::Storage)?
+            .ok_or(SummarizeMeetingError::NotFound(meeting_id))?;
+
+        let transcript = render_transcript(&meeting);
+        if transcript.trim().is_empty() {
+            return Err(SummarizeMeetingError::EmptyTranscript(meeting_id));
+        }
+
+        let notes_context = if include_notes {
+            render_notes(&meeting)
+        } else {
+            None
+        };
+
+        let language = meeting.summary.language.clone();
+        let language_instruction = language_instruction(language.as_deref());
+
+        let prompt = build_prompt(
+            template,
+            &transcript,
+            &language_instruction,
+            notes_context.as_deref(),
+            None,
+        );
+
+        let model_id = self.llm.model_id().to_string();
+        let template_owned = template.to_string();
+        let llm = Arc::clone(&self.llm);
+        let store = Arc::clone(&self.store);
+
+        let token_stream = llm
+            .generate_stream(&prompt, &generate_opts())
+            .await
+            .map_err(SummarizeMeetingError::Llm)?;
+
+        let started = stream::once(async move {
+            SummarizeEvent::Started {
+                model: model_id.clone(),
+            }
+        });
+
+        // Wrap the token stream, accumulate tokens, and finalize.
+        let finalize_stream = {
+            let model_id_for_final = llm.model_id().to_string();
+            let accumulated = Arc::new(tokio::sync::Mutex::new(String::new()));
+            let acc_for_tokens = Arc::clone(&accumulated);
+
+            let tokens = token_stream.map(move |result| {
+                match result {
+                    Ok(delta) => {
+                        // Accumulate without await by using try_lock (blocking context).
+                        if let Ok(mut acc) = acc_for_tokens.try_lock() {
+                            acc.push_str(&delta);
+                        }
+                        SummarizeEvent::Token { delta }
+                    }
+                    Err(e) => SummarizeEvent::Failed {
+                        error: e.to_string(),
+                    },
+                }
+            });
+
+            let final_event = stream::once(async move {
+                let full_text = accumulated.lock().await.clone();
+
+                let content = match parse_payload(&template_owned, &full_text) {
+                    Ok(c) => c,
+                    Err(_) => SummaryContent::FreeText {
+                        text: full_text.to_string(),
+                    },
+                };
+
+                let summary = Summary {
+                    id: SummaryId::new(),
+                    meeting_id,
+                    model: model_id_for_final,
+                    language,
+                    created_at: OffsetDateTime::now_utc(),
+                    content,
+                };
+
+                if let Err(e) = store.upsert_summary(&summary).await {
+                    return SummarizeEvent::Failed {
+                        error: format!("persist summary: {e}"),
+                    };
+                }
+
+                SummarizeEvent::Completed {
+                    summary: Box::new(summary),
+                }
+            });
+
+            tokens.chain(final_event)
+        };
+
+        Ok(started.chain(finalize_stream).boxed())
     }
 }
 

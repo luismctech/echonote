@@ -216,7 +216,7 @@ export function MeetingDetail({
 
       <div className="flex min-h-0 flex-1 flex-col gap-3">
         {m.speakers.length > 0 && (
-          <SpeakersPanel speakers={m.speakers} onRename={onRenameSpeaker} />
+          <SpeakersPanel speakers={m.speakers} segments={m.segments} onRename={onRenameSpeaker} />
         )}
 
         {/* Resizable split: Summary (top) + Transcript+Notes (bottom) */}

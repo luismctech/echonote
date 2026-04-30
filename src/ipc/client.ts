@@ -32,7 +32,7 @@ import type {
   StreamingSessionId,
   TranscriptEvent,
 } from "../types/streaming";
-import type { Summary } from "../types/summary";
+import type { Summary, SummarizeEvent } from "../types/summary";
 import type { CustomTemplate, CustomTemplateId } from "../types/custom-template";
 
 // ---------------------------------------------------------------------------
@@ -234,6 +234,29 @@ export async function summarizeMeeting(
     meetingId,
     template: template ?? null,
     includeNotes: includeNotes ?? false,
+  });
+}
+
+/**
+ * Streaming variant of {@link summarizeMeeting}. Sends tokens as they
+ * are decoded so the UI can render them incrementally.
+ *
+ * The stream finishes with a `completed` event carrying the persisted
+ * {@link Summary}, or a `failed` event on error.
+ */
+export async function summarizeMeetingStream(
+  meetingId: MeetingId,
+  template: string | undefined,
+  includeNotes: boolean,
+  onEvent: (event: SummarizeEvent) => void,
+): Promise<void> {
+  const channel = new Channel<SummarizeEvent>();
+  channel.onmessage = onEvent;
+  return invoke<void>("summarize_meeting_stream", {
+    meetingId,
+    template: template ?? null,
+    includeNotes,
+    onEvent: channel,
   });
 }
 

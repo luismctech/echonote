@@ -1,5 +1,9 @@
-import { useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { useTranslation } from "react-i18next";
+
+const isMac =
+  typeof navigator !== "undefined" &&
+  /mac|iphone|ipad/i.test(navigator.userAgent);
 
 /** Format milliseconds as "MM:SS". */
 function formatTimestamp(ms: number): string {
@@ -23,6 +27,19 @@ export function NoteInput({
 }>) {
   const { t } = useTranslation();
   const [text, setText] = useState("");
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  // Cmd+N (macOS) / Ctrl+N (other) focuses the note input.
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if ((isMac ? e.metaKey : e.ctrlKey) && e.key === "n") {
+        e.preventDefault();
+        inputRef.current?.focus();
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, []);
 
   const handleSubmit = (e: FormEvent) => {
     e.preventDefault();
@@ -41,11 +58,12 @@ export function NoteInput({
         {formatTimestamp(elapsedMs)}
       </span>
       <input
+        ref={inputRef}
         type="text"
         value={text}
         onChange={(e) => setText(e.target.value)}
         disabled={disabled}
-        placeholder={t("live.notePlaceholder")}
+        placeholder={`${t("live.notePlaceholder")} (${isMac ? "⌘N" : "Ctrl+N"})`}
         className="min-w-0 flex-1 bg-transparent text-xs text-zinc-800 placeholder:text-zinc-400 focus:outline-none dark:text-zinc-200 dark:placeholder:text-zinc-500"
       />
       <button

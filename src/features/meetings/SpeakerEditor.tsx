@@ -14,9 +14,12 @@ import type { Speaker, SpeakerId } from "../../types/speaker";
  */
 export const SpeakerEditor = memo(function SpeakerEditor({
   speaker,
+  talkTimePct,
   onRename,
 }: {
   speaker: Speaker;
+  /** Percentage of total talk-time for this speaker (0–100). */
+  talkTimePct?: number;
   onRename: (speakerId: SpeakerId, label: string | null) => Promise<void>;
 }) {
   const { t } = useTranslation();
@@ -58,6 +61,9 @@ export const SpeakerEditor = memo(function SpeakerEditor({
         aria-label={t("speakers.rename", { name: displayName(speaker) })}
         className="w-28 bg-transparent outline-none placeholder:text-current placeholder:opacity-60"
       />
+      {talkTimePct != null && talkTimePct > 0 && (
+        <span className="ml-0.5 tabular-nums opacity-70">{talkTimePct}%</span>
+      )}
     </div>
   );
 });

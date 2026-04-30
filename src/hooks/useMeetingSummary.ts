@@ -26,7 +26,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
-import { getSummary, summarizeMeeting, summarizeWithCustomTemplate } from "../ipc/client";
+import { getSummary, summarizeMeetingStream, summarizeWithCustomTemplate } from "../ipc/client";
 import { useIpcAction } from "../ipc/useIpcAction";
 import type { MeetingId } from "../types/meeting";
 import type { Summary, TemplateId } from "../types/summary";
@@ -41,6 +41,8 @@ export type UseMeetingSummary = {
   summary: Summary | null;
   loading: boolean;
   generating: boolean;
+  /** Accumulated text during streaming; empty when not streaming. */
+  streamingText: string;
   error: string | null;
   selectedTemplate: SelectedTemplate;
   setSelectedTemplate: (t: SelectedTemplate) => void;
@@ -53,6 +55,7 @@ export function useMeetingSummary(meetingId: MeetingId | null): UseMeetingSummar
   const [summary, setSummary] = useState<Summary | null>(null);
   const [loading, setLoading] = useState(false);
   const [generating, setGenerating] = useState(false);
+  const [streamingText, setStreamingText] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [selectedTemplate, setSelectedTemplate] = useState<SelectedTemplate>({
     kind: "builtin",
@@ -108,11 +111,6 @@ export function useMeetingSummary(meetingId: MeetingId | null): UseMeetingSummar
 
   const { t } = useTranslation();
 
-  const generateBuiltinCall = useIpcAction(
-    t("errors.summaryFailed"),
-    summarizeMeeting,
-  );
-
   const generateCustomCall = useIpcAction(
     t("errors.summaryFailed"),
     summarizeWithCustomTemplate,
@@ -121,26 +119,54 @@ export function useMeetingSummary(meetingId: MeetingId | null): UseMeetingSummar
   const generate = useCallback(async (): Promise<Summary | undefined> => {
     if (!meetingId) return undefined;
     setGenerating(true);
+    setStreamingText("");
     try {
       let fresh: Summary | undefined;
       if (selectedTemplate.kind === "custom") {
+        // Custom templates use non-streaming path (no streaming command for custom yet).
         fresh = await generateCustomCall(meetingId, selectedTemplate.id, includeNotes);
       } else {
-        fresh = await generateBuiltinCall(meetingId, selectedTemplate.id, includeNotes);
+        // Built-in templates use streaming for progressive rendering.
+        fresh = await new Promise<Summary | undefined>((resolve, reject) => {
+          summarizeMeetingStream(
+            meetingId,
+            selectedTemplate.id,
+            includeNotes,
+            (event) => {
+              switch (event.kind) {
+                case "token":
+                  setStreamingText((prev) => prev + event.delta);
+                  break;
+                case "completed":
+                  resolve(event.summary);
+                  break;
+                case "failed":
+                  reject(new Error(event.error));
+                  break;
+              }
+            },
+          ).catch(reject);
+        });
       }
       if (fresh && requestedRef.current === meetingId) {
         setSummary(fresh);
       }
       return fresh;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      setError(message);
+      return undefined;
     } finally {
       setGenerating(false);
+      setStreamingText("");
     }
-  }, [meetingId, selectedTemplate, includeNotes, generateBuiltinCall, generateCustomCall]);
+  }, [meetingId, selectedTemplate, includeNotes, generateCustomCall]);
 
   return {
     summary,
     loading,
     generating,
+    streamingText,
     error,
     selectedTemplate,
     setSelectedTemplate,

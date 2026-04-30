@@ -46,6 +46,7 @@ pub fn run() {
             commands::meetings::list_notes,
             commands::meetings::delete_note,
             commands::llm::summarize_meeting,
+            commands::llm::summarize_meeting_stream,
             commands::llm::get_summary,
             commands::llm::ask_about_meeting,
             commands::export::export_meeting,

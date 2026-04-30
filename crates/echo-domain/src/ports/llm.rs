@@ -28,6 +28,7 @@
 //!   `tokio::task::spawn_blocking`).
 
 use async_trait::async_trait;
+use futures::stream::BoxStream;
 use serde::{Deserialize, Serialize};
 
 use crate::DomainError;
@@ -103,6 +104,21 @@ pub trait LlmModel: Send + Sync {
         prompt: &str,
         options: &GenerateOptions,
     ) -> Result<String, DomainError>;
+
+    /// Stream a completion token-by-token. Each item is a decoded text
+    /// piece (may be a partial word). The default implementation calls
+    /// [`Self::generate`] and yields the full text as a single chunk.
+    ///
+    /// Adapters SHOULD override this to provide real incremental
+    /// streaming so the UI can render tokens as they arrive.
+    async fn generate_stream(
+        &self,
+        prompt: &str,
+        options: &GenerateOptions,
+    ) -> Result<BoxStream<'static, Result<String, DomainError>>, DomainError> {
+        let text = self.generate(prompt, options).await?;
+        Ok(Box::pin(futures::stream::once(async move { Ok(text) })))
+    }
 }
 
 #[cfg(test)]
