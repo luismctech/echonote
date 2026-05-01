@@ -130,7 +130,7 @@ export function ChatPanel({
     >
       {/* ── Header bar (never scrolls) ── */}
       <div className="flex flex-shrink-0 items-center justify-between px-1 py-1">
-        <span className="type-section-header text-content-placeholder">
+        <span className="text-xs font-medium uppercase tracking-wide text-zinc-400">
           {t("chat.label")}
         </span>
         {chat.model && (
@@ -139,10 +139,10 @@ export function ChatPanel({
       </div>
 
       {/* ── Scrollable messages area ── */}
-      <div className="flex min-h-0 flex-1 flex-col rounded-md border border-subtle bg-surface-sunken">
+      <div className="flex min-h-0 flex-1 flex-col rounded-md border border-zinc-100 bg-zinc-50 dark:border-zinc-900 dark:bg-zinc-900/40">
         <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto p-3">
           {isEmpty && (
-            <p className="py-4 text-center text-ui-sm text-content-placeholder">
+            <p className="py-4 text-center text-xs text-zinc-400">
               {t("chat.description")}
             </p>
           )}
@@ -151,23 +151,19 @@ export function ChatPanel({
               key={i}
               message={msg}
               onCitationClick={onScrollToSegment ?? noop}
-              {...(segmentTimestamps != null && { segmentTimestamps })}
-              showRole={
-                i === 0 || chat.messages[i - 1]!.role !== msg.role
-              }
             />
           ))}
           {chat.streaming && chat.streamingText && (
-            <div className="flex flex-col items-start">
-              <div className="max-w-[85%] rounded-lg border border-subtle bg-surface-elevated px-3 py-2 text-ui-md text-content-primary shadow-sm">
+            <div className="flex justify-start">
+              <div className="max-w-[85%] rounded-lg bg-zinc-100 px-3 py-2 text-sm text-zinc-800 dark:bg-zinc-800 dark:text-zinc-200">
                 {chat.streamingText}
-                <span className="ml-0.5 inline-block h-4 w-[2px] animate-pulse bg-content-tertiary" />
+                <span className="ml-0.5 inline-block h-4 w-[2px] animate-pulse bg-zinc-500" />
               </div>
             </div>
           )}
           {chat.streaming && !chat.streamingText && (
-            <div className="flex flex-col items-start">
-              <div className="rounded-lg border border-subtle bg-surface-elevated px-3 py-2 text-ui-md text-content-tertiary shadow-sm">
+            <div className="flex justify-start">
+              <div className="rounded-lg bg-zinc-100 px-3 py-2 text-sm text-zinc-500 dark:bg-zinc-800">
                 <span className="inline-flex gap-1">
                   <span className="animate-bounce">·</span>
                   <span className="animate-bounce [animation-delay:150ms]">·</span>
@@ -177,7 +173,7 @@ export function ChatPanel({
             </div>
           )}
           {chat.error && (
-            <p className="text-ui-sm text-amber-700 dark:text-amber-400">
+            <p className="text-xs text-amber-700 dark:text-amber-400">
               {chat.error}
             </p>
           )}
@@ -185,7 +181,7 @@ export function ChatPanel({
         </div>
 
         {/* ── Input area (pinned to bottom) ── */}
-        <form onSubmit={handleSubmit} className="flex flex-shrink-0 gap-2 border-t border-subtle p-2">
+        <form onSubmit={handleSubmit} className="flex flex-shrink-0 gap-2 border-t border-zinc-100 p-2 dark:border-zinc-800">
           <textarea
             ref={inputRef}
             value={input}
@@ -194,12 +190,12 @@ export function ChatPanel({
             placeholder={t("chat.placeholder")}
             rows={1}
             disabled={chat.streaming}
-            className="min-h-[30px] flex-1 resize-none rounded-md border bg-surface-elevated px-2 py-1 text-ui-sm placeholder:text-content-placeholder focus:border-strong focus:outline-none disabled:opacity-60"
+            className="min-h-[36px] flex-1 resize-none rounded-md border border-zinc-200 bg-white px-2 py-1.5 text-sm placeholder:text-zinc-400 focus:border-zinc-400 focus:outline-none disabled:opacity-60 dark:border-zinc-700 dark:bg-zinc-900 dark:placeholder:text-zinc-600 dark:focus:border-zinc-500"
           />
           <button
             type="submit"
             disabled={chat.streaming || !input.trim()}
-            className="rounded-md border bg-surface-elevated px-3 py-1.5 text-ui-sm font-medium hover:bg-surface-sunken disabled:cursor-not-allowed disabled:opacity-60"
+            className="rounded-md border border-zinc-200 bg-white px-3 py-1.5 text-xs font-medium hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-60 dark:border-zinc-800 dark:bg-zinc-900 dark:hover:bg-zinc-800"
           >
             {t("chat.send")}
           </button>
@@ -294,7 +290,7 @@ function AssistantContent({
   const renderChildren = useCallback(
     (children: ReactNode): ReactNode => {
       if (typeof children === "string") {
-        return replacePlaceholders(children, chips, validCitations, onCitationClick, segmentTimestamps);
+        return replacePlaceholders(children, chips, validCitations, onCitationClick);
       }
       if (Array.isArray(children)) {
         return children.map((child, idx) => (
@@ -304,7 +300,7 @@ function AssistantContent({
       }
       return children;
     },
-    [chips, validCitations, onCitationClick, segmentTimestamps],
+    [chips, validCitations, onCitationClick],
   );
 
   const mdComponents = useMemo(
@@ -318,7 +314,7 @@ function AssistantContent({
   );
 
   return (
-    <div className="prose prose-sm max-w-none [&_p]:my-1 [&_ul]:my-1 [&_ol]:my-1 [&_li]:my-0 [&_h1]:text-ui-md [&_h2]:text-ui-md [&_h3]:text-ui-sm [&_h4]:text-ui-sm [&_pre]:text-ui-sm">
+    <div className="prose prose-sm prose-zinc dark:prose-invert max-w-none [&_p]:my-1 [&_ul]:my-1 [&_ol]:my-1 [&_li]:my-0 [&_h1]:text-sm [&_h2]:text-sm [&_h3]:text-xs [&_h4]:text-xs [&_pre]:text-xs">
       <Markdown components={mdComponents}>
         {cleaned}
       </Markdown>

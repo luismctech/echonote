@@ -296,8 +296,8 @@ fn build_messages(
 
     let mut out = Vec::with_capacity(history.len().min(MAX_HISTORY_TURNS) + 2);
     out.push(ChatMessage::system(build_system_prompt(
-        &safe_transcript,
-        &safe_notes,
+        transcript_block,
+        notes_block,
         language_instruction,
     )));
 
@@ -336,11 +336,7 @@ fn build_messages(
 ///    start of every line so the model can copy them when citing.
 /// 3. The citation contract, restated in both English and Spanish so
 ///    multilingual instructs do not "translate it away".
-fn build_system_prompt(
-    transcript_block: &str,
-    notes_block: &str,
-    language_instruction: &str,
-) -> String {
+fn build_system_prompt(transcript_block: &str, notes_block: &str, language_instruction: &str) -> String {
     let notes_section = if notes_block.is_empty() {
         String::new()
     } else {
