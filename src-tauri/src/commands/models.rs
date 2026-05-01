@@ -329,7 +329,8 @@ pub async fn download_model(
 
         // ── SHA-256 verification (when hash is known) ────────────
         if let Some(expected) = &expected_sha {
-            let actual = format!("{:x}", hasher.finalize());
+            let hash = hasher.finalize();
+            let actual = hash.iter().map(|b| format!("{b:02x}")).collect::<String>();
             if actual != *expected {
                 let _ = tokio::fs::remove_file(&tmp).await;
                 return Err(IpcError::new(
