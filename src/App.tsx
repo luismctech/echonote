@@ -265,7 +265,9 @@ export function App() {
               onPause={recording.pause}
               onResume={recording.resume}
               onAddNote={recording.addNote}
-              onDismissError={dismissError}
+              focusMode={focusMode}
+              onToggleFocusMode={() => setFocusMode((prev) => !prev)}
+              refineStage={recording.refineStage}
             />
           ) : (
             <MeetingDetail view={view} onRenameSpeaker={renameSpeaker} onRenameMeeting={renameMeeting} />

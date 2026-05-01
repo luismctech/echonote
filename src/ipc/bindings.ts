@@ -145,7 +145,7 @@ async renameSpeaker(meetingId: MeetingId, speakerId: SpeakerId, label: string | 
  * ordered by FTS5 BM25 rank (best match first). Empty / whitespace-
  * only queries return an empty vec — the frontend wires this to
  * `onChange` debounced, so the initial empty state never errors.
- * 
+ *
  * `limit` defaults to 20 (a comfortable sidebar page); `0` means no
  * cap. The query is sanitised inside the storage layer, so the
  * frontend can pass raw user input without worrying about FTS5
@@ -195,15 +195,15 @@ async deleteNote(noteId: NoteId) : Promise<Result<boolean, IpcError>> {
 },
 /**
  * Generate (or regenerate) the local-LLM summary for a meeting.
- * 
+ *
  * `template` selects the prompt template: `"general"` (default),
  * `"oneOnOne"`, `"sprintReview"`, `"interview"`, `"salesCall"`, or
  * `"lecture"`. Passing `null` or omitting the field defaults to
  * `"general"`.
  */
-async summarizeMeeting(meetingId: MeetingId, template: string | null, includeNotes: boolean) : Promise<Result<Summary, IpcError>> {
+async summarizeMeeting(meetingId: MeetingId, template: string | null, includeNotes: boolean, language: string | null) : Promise<Result<Summary, IpcError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("summarize_meeting", { meetingId, template, includeNotes }) };
+    return { status: "ok", data: await TAURI_INVOKE("summarize_meeting", { meetingId, template, includeNotes, language }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -213,15 +213,15 @@ async summarizeMeeting(meetingId: MeetingId, template: string | null, includeNot
  * Streaming variant of [`summarize_meeting`]. Sends tokens as they
  * are decoded so the UI can render them incrementally — same UX as
  * the chat feature.
- * 
+ *
  * The stream finishes with `SummarizeEvent::Completed` carrying the
  * persisted [`Summary`], or `SummarizeEvent::Failed` on error. The
  * IPC promise resolves `Ok(())` in both cases; the frontend reads
  * the terminal event to decide success or failure.
  */
-async summarizeMeetingStream(meetingId: MeetingId, template: string | null, includeNotes: boolean, onEvent: TAURI_CHANNEL<SummarizeEvent>) : Promise<Result<null, IpcError>> {
+async summarizeMeetingStream(meetingId: MeetingId, template: string | null, includeNotes: boolean, language: string | null, onEvent: TAURI_CHANNEL<SummarizeEvent>) : Promise<Result<null, IpcError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("summarize_meeting_stream", { meetingId, template, includeNotes, onEvent }) };
+    return { status: "ok", data: await TAURI_INVOKE("summarize_meeting_stream", { meetingId, template, includeNotes, language, onEvent }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -243,14 +243,14 @@ async getSummary(meetingId: MeetingId) : Promise<Result<Summary | null, IpcError
 },
 /**
  * Run one chat turn against a meeting's transcript.
- * 
+ *
  * Each invocation streams the assistant's reply token-by-token through
  * `on_event` and resolves the IPC promise once the stream terminates
  * (with [`AskAboutMeetingEvent::Finished`] on success or
  * [`AskAboutMeetingEvent::Failed`] on a mid-decode error).
- * 
+ *
  * ## Lifecycle
- * 
+ *
  * 1. Pre-stream errors (meeting not found, empty question, model
  * not loaded) come back as `Err(String)` so the UI can show a
  * toast without parsing event variants.
@@ -268,9 +268,9 @@ async getSummary(meetingId: MeetingId) : Promise<Result<Summary | null, IpcError
  * is needed — symmetric with `start_streaming` was deliberately
  * not chosen because chat is bounded (one Q&A turn ≤ ~10s on
  * Qwen 14B, vs streaming sessions that can run hours).
- * 
+ *
  * ## Why we don't spawn a background task
- * 
+ *
  * Unlike `start_streaming`, which returns a session id and runs
  * indefinitely until `stop_streaming`, a chat turn is a single
  * bounded interaction. Draining the stream inline keeps the IPC
@@ -288,11 +288,11 @@ async askAboutMeeting(meetingId: MeetingId, history: ChatMessage[] | null, quest
 },
 /**
  * Export a meeting (with optional summary) to a file at `dest_path`.
- * 
+ *
  * The frontend is responsible for showing the save-file dialog (via
  * `@tauri-apps/plugin-dialog`) and passing the chosen path here. This
  * command generates the formatted content and writes it atomically.
- * 
+ *
  * **Security:** `dest_path` is validated to be inside the user's home
  * directory and must not contain path-traversal components (`..`).
  */
@@ -312,7 +312,7 @@ async getModelStatus() : Promise<ModelInfo[]> {
 },
 /**
  * Download a model by id, streaming progress events to the frontend.
- * 
+ *
  * When the catalog entry includes a SHA-256 digest the downloaded file
  * is verified before being promoted from `*.part` to its final path.
  * Concurrent downloads of the same model are rejected.
@@ -340,7 +340,7 @@ async unloadModel(kind: string) : Promise<Result<boolean, IpcError>> {
 },
 /**
  * Cancel an in-flight model download.
- * 
+ *
  * Sets the cancel flag for the download loop, which will clean up the
  * `.part` file and send a `Cancelled` event.
  */
@@ -354,7 +354,7 @@ async cancelDownload(modelId: string) : Promise<Result<boolean, IpcError>> {
 },
 /**
  * Delete a downloaded model from disk.
- * 
+ *
  * If the model is currently loaded in memory, it is unloaded first.
  */
 async deleteModel(modelId: string) : Promise<Result<null, IpcError>> {
@@ -369,7 +369,7 @@ async deleteModel(modelId: string) : Promise<Result<null, IpcError>> {
  * Set the active LLM model. Unloads the currently loaded model (if
  * any) and switches the path so the next `ensure_llm()` call loads
  * the selected model.
- * 
+ *
  * `model_id` must be an `"llm-*"` id from the catalog whose model
  * file is already downloaded.
  */
@@ -392,7 +392,7 @@ async getActiveLlm() : Promise<string | null> {
  * Set the active ASR (speech recognition) model. Unloads the currently
  * loaded transcriber (if any) and switches the path so the next
  * `ensure_transcriber()` call loads the selected model.
- * 
+ *
  * `model_id` must be an `"asr-*"` id from the catalog whose model
  * file is already downloaded.
  */
@@ -414,7 +414,7 @@ async getActiveAsr() : Promise<string | null> {
 /**
  * Set the active speaker embedder model. The next diarization session
  * will load the chosen model (ERes2Net or CAM++).
- * 
+ *
  * `model_id` must be an `"embedder-*"` id from the catalog whose
  * model file is already downloaded.
  */
@@ -446,7 +446,7 @@ async listCustomTemplates() : Promise<Result<CustomTemplate[], IpcError>> {
 },
 /**
  * Create a new custom template.
- * 
+ *
  * The `name` and `prompt` fields are required and must be non-empty.
  * Returns the newly created template with its generated id.
  */
@@ -482,14 +482,14 @@ async deleteCustomTemplate(id: CustomTemplateId) : Promise<Result<null, IpcError
 },
 /**
  * Generate a summary using a user-defined custom template.
- * 
+ *
  * Loads the custom template by `template_id`, then runs the LLM with
  * the user's prompt. The result is stored as
  * [`echo_domain::SummaryContent::Custom`].
  */
-async summarizeWithCustomTemplate(meetingId: MeetingId, templateId: CustomTemplateId, includeNotes: boolean) : Promise<Result<Summary, IpcError>> {
+async summarizeWithCustomTemplate(meetingId: MeetingId, templateId: CustomTemplateId, includeNotes: boolean, language: string | null) : Promise<Result<Summary, IpcError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("summarize_with_custom_template", { meetingId, templateId, includeNotes }) };
+    return { status: "ok", data: await TAURI_INVOKE("summarize_with_custom_template", { meetingId, templateId, includeNotes, language }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -521,22 +521,22 @@ async getModelRecommendation() : Promise<ModelRecommendation> {
 
 /**
  * One actionable item extracted by the summarizer.
- * 
+ *
  * `owner` and `due` are best-effort; the LLM may leave either as
  * `None` when the transcript doesn't pin them down. The UI renders
  * them with sensible placeholders ("unassigned", "no due date") so
  * the summary remains useful even when partial.
  */
-export type ActionItem = { 
+export type ActionItem = {
 /**
  * What needs to be done. Required — an action item without a
  * task is meaningless.
  */
-task: string; 
+task: string;
 /**
  * Who is on the hook. `None` when the transcript doesn't say.
  */
-owner?: string | null; 
+owner?: string | null;
 /**
  * Free-form deadline as the LLM extracted it ("Friday", "next
  * sprint", "2026-05-01"). Kept as a string on purpose — parsing
@@ -548,9 +548,9 @@ due?: string | null }
  * Events the use case streams back to the caller. The discriminator
  * is on `kind` (camelCase for the IPC wire format) so the React layer
  * can `switch (event.kind)` directly.
- * 
+ *
  * Variant order:
- * 
+ *
  * 1. Exactly one [`Started`](Self::Started) at the top of the
  * stream, carrying the model id for provenance.
  * 2. Zero or more [`Token`](Self::Token) deltas — one per logical
@@ -560,24 +560,24 @@ due?: string | null }
  * [`Failed`](Self::Failed) if the adapter raised an error
  * mid-stream.
  */
-export type AskAboutMeetingEvent = 
+export type AskAboutMeetingEvent =
 /**
  * Stream is open; the model is about to start emitting tokens.
  * Carries the model id so the UI can show "powered by …" and so
  * chat-history persistence can stamp the right provenance.
  */
-{ kind: "started"; model: string } | 
+{ kind: "started"; model: string } |
 /**
  * One incremental piece of the model's reply. Forwarded verbatim
  * from [`echo_domain::ChatToken::delta`].
  */
-{ kind: "token"; delta: string } | 
+{ kind: "token"; delta: string } |
 /**
  * Stream completed normally. Carries the full assembled reply and
  * the citations parsed from it (deduplicated, validated against
  * the meeting's real segment ids).
  */
-{ kind: "finished"; text: string; citations: SegmentId[]; hadCitations: boolean } | 
+{ kind: "finished"; text: string; citations: SegmentId[]; hadCitations: boolean } |
 /**
  * The adapter raised an error after the stream had already
  * started. The IPC layer SHOULD treat this as a final event and
@@ -586,34 +586,34 @@ export type AskAboutMeetingEvent =
 { kind: "failed"; error: string }
 /**
  * Sample-rate / channel configuration of a stream.
- * 
+ *
  * Wire format uses `camelCase` so the JSON that crosses the Tauri /
  * CLI boundary matches the TypeScript `AudioFormat` (`sampleRateHz`,
  * `channels`). SQLite persistence uses dedicated columns and does
  * not go through serde, so this rename is purely an IPC concern.
  */
-export type AudioFormat = { 
+export type AudioFormat = {
 /**
  * Sampling frequency in hertz.
  */
-sampleRateHz: number; 
+sampleRateHz: number;
 /**
  * Number of interleaved channels (1 = mono, 2 = stereo, ...).
  */
 channels: number }
 /**
  * A single message inside a [`ChatRequest`].
- * 
+ *
  * `content` is plain UTF-8 text — adapters that need a different chat
  * template format (Qwen's `<|im_start|>system\n…<|im_end|>`, Llama's
  * `[INST] … [/INST]`, …) wrap each `ChatMessage` accordingly. The
  * domain layer stays template-agnostic.
  */
-export type ChatMessage = { 
+export type ChatMessage = {
 /**
  * Who authored this message.
  */
-role: ChatRole; 
+role: ChatRole;
 /**
  * Plain-text content. Empty strings are tolerated (the use case
  * occasionally sends empty assistant messages to "prime" the
@@ -622,23 +622,23 @@ role: ChatRole;
 content: string }
 /**
  * Author of a single message in a chat exchange.
- * 
+ *
  * The three roles mirror the OpenAI / llama.cpp chat-template
  * vocabulary exactly so the adapter can fold them into `<|im_start|>`,
  * `<s>[INST]` or any other model-specific framing without translation
  * tables.
  */
-export type ChatRole = 
+export type ChatRole =
 /**
  * Top-of-conversation instructions — typically the transcript
  * excerpt and the "you are a helpful assistant…" preamble.
  * At most one per request, conventionally the first message.
  */
-"system" | 
+"system" |
 /**
  * A turn authored by the human user.
  */
-"user" | 
+"user" |
 /**
  * A turn authored by the model in a previous round of the same
  * conversation. Re-fed verbatim so the model can stay coherent
@@ -648,16 +648,16 @@ export type ChatRole =
 /**
  * A user-created summary prompt template.
  */
-export type CustomTemplate = { 
+export type CustomTemplate = {
 /**
  * Stable identifier.
  */
-id: CustomTemplateId; 
+id: CustomTemplateId;
 /**
  * Short display name shown in the template selector (e.g.
  * "Product Standup", "Board Meeting").
  */
-name: string; 
+name: string;
 /**
  * The system-prompt text sent to the LLM. Should describe the
  * role, desired output format, and any constraints.
@@ -672,11 +672,11 @@ export type CustomTemplateId = string
 /**
  * A term/definition pair extracted from a lecture or class
  */
-export type Definition = { 
+export type Definition = {
 /**
  * The term being defined.
  */
-term: string; 
+term: string;
 /**
  * The definition provided.
  */
@@ -684,75 +684,75 @@ definition: string }
 /**
  * Progress events streamed to the frontend during a download.
  */
-export type DownloadEvent = 
+export type DownloadEvent =
 /**
  * Periodic progress update.
  */
-{ kind: "progress"; downloaded: number; total: number } | 
+{ kind: "progress"; downloaded: number; total: number } |
 /**
  * Download finished successfully.
  */
-{ kind: "finished" } | 
+{ kind: "finished" } |
 /**
  * Download failed.
  */
-{ kind: "failed"; error: string } | 
+{ kind: "failed"; error: string } |
 /**
  * Download was cancelled by the user.
  */
 { kind: "cancelled" }
 /**
  * Machine-readable error codes the frontend can match on.
- * 
+ *
  * Kept intentionally coarse — add variants when the frontend needs
  * to distinguish a new failure mode, not for every conceivable
  * backend error.
  */
-export type ErrorCode = 
+export type ErrorCode =
 /**
  * A required record (meeting, speaker, segment, …) was not found.
  */
-"notFound" | 
+"notFound" |
 /**
  * Persistent storage failed (SQLite I/O, migration, …).
  */
-"storage" | 
+"storage" |
 /**
  * The local LLM could not load or inference failed.
  */
-"llm" | 
+"llm" |
 /**
  * The ASR engine could not load or transcription failed.
  */
-"asr" | 
+"asr" |
 /**
  * Input validation failed (empty question, bad template, …).
  */
-"invalidInput" | 
+"invalidInput" |
 /**
  * A streaming session conflict (poisoned map, duplicate id, …).
  */
-"sessionConflict" | 
+"sessionConflict" |
 /**
  * A required model is not downloaded yet.
  */
-"modelNotReady" | 
+"modelNotReady" |
 /**
  * Audio capture or device error.
  */
-"audio" | 
+"audio" |
 /**
  * Voice activity detection failed.
  */
-"vad" | 
+"vad" |
 /**
  * Speaker diarization failed.
  */
-"diarization" | 
+"diarization" |
 /**
  * An HTTP / network operation failed (model download, …).
  */
-"network" | 
+"network" |
 /**
  * Catch-all for unexpected / unclassified errors.
  */
@@ -764,32 +764,32 @@ export type ExportFormat = "markdown" | "txt"
 /**
  * Hardware profile detected at runtime.
  */
-export type HardwareProfile = { 
+export type HardwareProfile = {
 /**
  * Total physical RAM in bytes.
  */
-totalRamBytes: number; 
+totalRamBytes: number;
 /**
  * Currently available (free) RAM in bytes.
  */
-availableRamBytes: number; 
+availableRamBytes: number;
 /**
  * Number of logical CPU cores (threads).
  */
-cpuCores: number; 
+cpuCores: number;
 /**
  * CPU brand string (e.g. "Apple M2 Pro").
  */
-cpuBrand: string; 
+cpuBrand: string;
 /**
  * GPU name (Metal device name on macOS, "Unknown" elsewhere).
  */
-gpuName: string; 
+gpuName: string;
 /**
  * Recommended max GPU working set in bytes (Metal on macOS).
  * On other platforms this is 0.
  */
-gpuMaxWorkingSet: number; 
+gpuMaxWorkingSet: number;
 /**
  * Whether the device has unified memory (CPU + GPU share RAM).
  */
@@ -797,19 +797,19 @@ unifiedMemory: boolean }
 /**
  * Result returned by [`health_check`]. Mirrors `HealthStatus` on the TS side.
  */
-export type HealthStatus = { 
+export type HealthStatus = {
 /**
  * RFC 3339 timestamp of the probe.
  */
-timestamp: string; 
+timestamp: string;
 /**
  * Backend semver, from Cargo at compile time.
  */
-version: string; 
+version: string;
 /**
  * Target triple the backend was compiled for.
  */
-target: string; 
+target: string;
 /**
  * Short git hash, `unknown` when `.git` is missing at build time.
  */
@@ -818,15 +818,15 @@ commit: string }
  * A notable quote attributed to a speaker, used by the Interview
  * template.
  */
-export type InterviewQuote = { 
+export type InterviewQuote = {
 /**
  * Who said it.
  */
-speaker: string; 
+speaker: string;
 /**
  * Verbatim or near-verbatim quote.
  */
-quote: string; 
+quote: string;
 /**
  * Situational context around the quote.
  */
@@ -836,18 +836,18 @@ context?: string | null }
  * so the frontend stays stylistically consistent (the domain enum
  * uses snake_case for storage / CLI compatibility).
  */
-export type IpcAudioSource = 
+export type IpcAudioSource =
 /**
  * Default microphone via cpal.
  */
-"microphone" | 
+"microphone" |
 /**
  * System audio loopback (macOS 13+ via ScreenCaptureKit).
  */
 "systemOutput"
 /**
  * Structured error returned by every Tauri command.
- * 
+ *
  * Serializes to `{ "code": "notFound", "message": "…", "retriable": false }`
  * on the IPC wire, which the frontend's `useIpcAction` hook can
  * destructure for precise UX.
@@ -857,58 +857,58 @@ export type IpcError = { code: ErrorCode; message: string; retriable: boolean }
  * Full meeting aggregate. Returned by point lookups and includes the
  * segment list and any diarized speakers.
  */
-export type Meeting = 
+export type Meeting =
 /**
  * Summary projection.
  */
-({ 
+({
 /**
  * Stable identifier.
  */
-id: MeetingId; 
+id: MeetingId;
 /**
  * Human-readable title. Defaults to `"Meeting <date>"` when the
  * caller does not supply one.
  */
-title: string; 
+title: string;
 /**
  * RFC 3339 instant the recording started.
  */
-startedAt: string; 
+startedAt: string;
 /**
  * RFC 3339 instant the recording stopped. `None` while the
  * session is still running.
  */
-endedAt: string | null; 
+endedAt: string | null;
 /**
  * Total audio captured, in milliseconds.
  */
-durationMs: number; 
+durationMs: number;
 /**
  * Dominant language reported by the ASR backend (mode of
  * per-chunk languages). `None` until the first chunk lands.
  */
-language: string | null; 
+language: string | null;
 /**
  * Number of segments persisted.
  */
-segmentCount: number }) & { 
+segmentCount: number }) & {
 /**
  * Audio format negotiated with the device.
  */
-inputFormat: AudioFormat; 
+inputFormat: AudioFormat;
 /**
  * Decoded segments, ordered by `start_ms`. Each segment may
  * reference a `speaker_id` from `speakers`.
  */
-segments: Segment[]; 
+segments: Segment[];
 /**
  * Diarized speakers persisted for this meeting, ordered by
  * `slot`. Empty when no diarizer was wired into the pipeline.
  * `serde(default)` keeps older payloads (pre-Sprint 1 day 7)
  * loadable without speakers.
  */
-speakers?: Speaker[]; 
+speakers?: Speaker[];
 /**
  * User-created notes, ordered by `timestamp_ms`. Empty when
  * no notes have been added.
@@ -927,19 +927,19 @@ export type MeetingId = string
  * boundaries are decided by SQLite's `snippet()` function and use
  * the markers chosen by the storage adapter — typically `<mark>` /
  * `</mark>` so the UI can render them as highlights.
- * 
+ *
  * `serde(rename_all = "camelCase")` keeps the wire format aligned
  * with the rest of the IPC surface.
  */
-export type MeetingSearchHit = { 
+export type MeetingSearchHit = {
 /**
  * Meeting matched by the query.
  */
-meeting: MeetingSummary; 
+meeting: MeetingSummary;
 /**
  * Highlighted excerpt of the segment that matched.
  */
-snippet: string; 
+snippet: string;
 /**
  * FTS5 BM25 rank — *smaller is better* (negative numbers are
  * strongest matches). The UI should sort ascending; tests assert
@@ -951,34 +951,34 @@ rank: number }
  * Lightweight projection used by listing endpoints. Holds only what
  * the UI needs to render a row in the sidebar — *not* the segments.
  */
-export type MeetingSummary = { 
+export type MeetingSummary = {
 /**
  * Stable identifier.
  */
-id: MeetingId; 
+id: MeetingId;
 /**
  * Human-readable title. Defaults to `"Meeting <date>"` when the
  * caller does not supply one.
  */
-title: string; 
+title: string;
 /**
  * RFC 3339 instant the recording started.
  */
-startedAt: string; 
+startedAt: string;
 /**
  * RFC 3339 instant the recording stopped. `None` while the
  * session is still running.
  */
-endedAt: string | null; 
+endedAt: string | null;
 /**
  * Total audio captured, in milliseconds.
  */
-durationMs: number; 
+durationMs: number;
 /**
  * Dominant language reported by the ASR backend (mode of
  * per-chunk languages). `None` until the first chunk lands.
  */
-language: string | null; 
+language: string | null;
 /**
  * Number of segments persisted.
  */
@@ -986,23 +986,27 @@ segmentCount: number }
 /**
  * A downloadable model known to the app.
  */
-export type ModelInfo = { 
+export type ModelInfo = {
 /**
  * Machine-readable id (e.g. `"asr-large-v3-turbo"`).
  */
-id: string; 
+id: string;
 /**
  * Short, user-friendly name shown as the primary label.
  */
-label: string; 
+label: string;
 /**
  * One-line description with key traits (language, speed, etc.).
  */
-kind: string; 
+description: string;
+/**
+ * Category: `"asr"`, `"llm"`, `"vad"`, `"embedder"`, or `"segmenter"`.
+ */
+kind: string;
 /**
  * Whether the file exists on disk right now.
  */
-present: boolean; 
+present: boolean;
 /**
  * Approximate download size in bytes (for progress UI).
  */
@@ -1010,15 +1014,15 @@ sizeBytes: number }
 /**
  * A single model recommendation.
  */
-export type ModelPick = { 
+export type ModelPick = {
 /**
  * Catalog model id (e.g. `"asr-large-v3-turbo"`).
  */
-modelId: string; 
+modelId: string;
 /**
  * Short reason explaining the pick.
  */
-reason: string; 
+reason: string;
 /**
  * Confidence level: "high", "medium", "low".
  */
@@ -1026,49 +1030,49 @@ confidence: string }
 /**
  * Full recommendation result.
  */
-export type ModelRecommendation = { 
+export type ModelRecommendation = {
 /**
  * Recommended ASR model.
  */
-asr: ModelPick; 
+asr: ModelPick;
 /**
  * Recommended LLM model (None if RAM is too low for any LLM).
  */
-llm: ModelPick | null; 
+llm: ModelPick | null;
 /**
  * Optional warning for the user (e.g. "RAM is below minimum").
  */
-warning: string | null; 
+warning: string | null;
 /**
  * The hardware profile used to produce this recommendation.
  */
 hardware: HardwareProfile }
 /**
  * A user-created text annotation within a meeting.
- * 
+ *
  * `timestamp_ms` is relative to the meeting start (not wall-clock),
  * matching the same timeline as [`Segment::start_ms`]. This allows
  * notes and transcript segments to be displayed together on a unified
  * timeline.
  */
-export type Note = { 
+export type Note = {
 /**
  * Stable identifier.
  */
-id: NoteId; 
+id: NoteId;
 /**
  * The meeting this note belongs to.
  */
-meetingId: MeetingId; 
+meetingId: MeetingId;
 /**
  * User-written text content.
  */
-text: string; 
+text: string;
 /**
  * Offset in milliseconds from the meeting start at which the
  * note was created.
  */
-timestampMs: number; 
+timestampMs: number;
 /**
  * RFC 3339 instant the note was persisted (wall-clock, for
  * auditing only — the functional timestamp is `timestamp_ms`).
@@ -1081,36 +1085,36 @@ createdAt: string }
 export type NoteId = string
 /**
  * One contiguous transcription span.
- * 
+ *
  * `serde(rename_all = "camelCase")` keeps the wire format aligned
  * with the TypeScript `Segment` type in `src/types/segment.ts`, so
  * the `Meeting` aggregate returned by `get_meeting` exposes
  * `startMs` (not `start_ms`) — the same convention the streaming
  * `Chunk` event already uses for the segments it carries.
  */
-export type Segment = { 
+export type Segment = {
 /**
  * Stable identifier.
  */
-id: SegmentId; 
+id: SegmentId;
 /**
  * Inclusive start offset, in milliseconds, relative to the
  * containing recording.
  */
-startMs: number; 
+startMs: number;
 /**
  * Exclusive end offset, in milliseconds. Always `>= start_ms`.
  */
-endMs: number; 
+endMs: number;
 /**
  * Decoded text. May be empty when the segment is silence or pure
  * non-speech but the ASR backend still emitted it.
  */
-text: string; 
+text: string;
 /**
  * Diarized speaker. `None` until diarization runs (Sprint 2).
  */
-speakerId: SpeakerId | null; 
+speakerId: SpeakerId | null;
 /**
  * Confidence in `[0.0, 1.0]`. `None` when the backend does not
  * report it (e.g. whisper.cpp without `temperature_inc`).
@@ -1124,23 +1128,23 @@ confidence: number | null }
 export type SegmentId = string
 /**
  * One clustered voice within a meeting.
- * 
+ *
  * `slot` is the 0-based index of the speaker within the meeting,
  * assigned in arrival order. It drives the UI palette and the
  * default display name; it is **not** the database primary key
  * (that's [`SpeakerId`]).
  */
-export type Speaker = { 
+export type Speaker = {
 /**
  * Stable identifier.
  */
-id: SpeakerId; 
+id: SpeakerId;
 /**
  * 0-based arrival order within the meeting. Drives the default
  * display name (`Speaker 1` for slot 0, etc.) and the color
  * palette index in the UI.
  */
-slot: number; 
+slot: number;
 /**
  * User-assigned label, if any. `None` ⇒ render as
  * "Speaker {slot+1}". Limited to 80 characters at the storage
@@ -1156,31 +1160,31 @@ export type SpeakerId = string
  * Options the frontend may pass when starting a streaming session.
  * All fields optional; defaults match `StreamingOptions::default()`.
  */
-export type StartStreamingOptions = { 
+export type StartStreamingOptions = {
 /**
  * Capture source. `None` ⇒ microphone, preserving Sprint 0
  * behavior. `systemOutput` requires macOS 13+ with Screen
  * Recording permission (Sprint 1 day 2/3).
  */
-source: IpcAudioSource | null; 
+source: IpcAudioSource | null;
 /**
  * ISO-639-1 language hint. `None` ⇒ auto-detect.
  */
-language: string | null; 
+language: string | null;
 /**
  * Capture device id. `None` ⇒ system default microphone. Ignored
  * when `source = systemOutput`.
  */
-deviceId: string | null; 
+deviceId: string | null;
 /**
  * Audio chunk size in milliseconds. `None` ⇒ 5000.
  */
-chunkMs: number | null; 
+chunkMs: number | null;
 /**
  * RMS threshold below which a chunk is reported as `Skipped`
  * instead of being sent to the ASR. `None` ⇒ 0.02.
  */
-silenceRmsThreshold: number | null; 
+silenceRmsThreshold: number | null;
 /**
  * Enable speaker diarization for this session. `None`/`false` ⇒
  * disabled (keeps Sprint 0 behaviour). When enabled the backend
@@ -1189,13 +1193,13 @@ silenceRmsThreshold: number | null;
  * so every emitted `Chunk` event carries `speakerId` +
  * `speakerSlot` and the meeting persists its speakers.
  */
-diarize: boolean | null; 
+diarize: boolean | null;
 /**
  * Override path to the speaker-embedder ONNX. `None` ⇒ use the
  * path resolved at app start. Mostly useful for tests / power
  * users; the UI does not surface it.
  */
-embedModelPath: string | null; 
+embedModelPath: string | null;
 /**
  * Disable the neural (Silero) VAD for this session and fall back
  * to the energy-based RMS gate. `None`/`false` ⇒ neural VAD is
@@ -1213,37 +1217,37 @@ disableNeuralVad: boolean | null }
 export type StreamingSessionId = string
 /**
  * Events emitted by [`SummarizeMeeting::execute_stream`].
- * 
+ *
  * Mirrors the chat event pattern: `Started` → `Token`* → `Completed` | `Failed`.
  */
-export type SummarizeEvent = 
+export type SummarizeEvent =
 /**
  * Generation started — carries the model id for provenance.
  */
-{ kind: "started"; model: string } | 
+{ kind: "started"; model: string } |
 /**
  * A decoded text piece (partial word or full token).
  */
-{ kind: "token"; delta: string } | 
+{ kind: "token"; delta: string } |
 /**
  * Generation finished successfully. The summary has been parsed
  * and persisted to the store.
  */
-{ kind: "completed"; summary: Summary } | 
+{ kind: "completed"; summary: Summary } |
 /**
  * An error occurred during generation or persistence.
  */
 { kind: "failed"; error: string }
 /**
  * A persisted LLM summary attached to a [`crate::Meeting`].
- * 
+ *
  * `serde(rename_all = "camelCase")` so the React layer can consume
  * `meetingId` / `createdAt` directly. The `content` field flattens
  * the [`SummaryContent`] enum so JSON readers see one combined
  * document instead of `{ "content": { … } }`, matching how the LLM
  * itself emits the structured output.
  */
-export type Summary = 
+export type Summary =
 /**
  * Structured payload — discriminated on `template`.
  */
@@ -1251,59 +1255,59 @@ export type Summary =
 /**
  * Default template — works for any meeting type (§3.2.1).
  */
-{ template: "general"; summary: string; key_points?: string[]; decisions?: string[]; action_items?: ActionItem[]; open_questions?: string[] } | 
+{ template: "general"; summary: string; key_points?: string[]; decisions?: string[]; action_items?: ActionItem[]; open_questions?: string[] } |
 /**
  * 1:1 meetings between manager and report (§3.2.2).
  */
-{ template: "oneOnOne"; summary: string; wins?: string[]; blockers?: string[]; growth_feedback?: string[]; next_steps?: ActionItem[]; follow_up_topics?: string[] } | 
+{ template: "oneOnOne"; summary: string; wins?: string[]; blockers?: string[]; growth_feedback?: string[]; next_steps?: ActionItem[]; follow_up_topics?: string[] } |
 /**
  * Sprint review / retrospective (§3.2.3).
  */
-{ template: "sprintReview"; summary: string; completed_items?: string[]; carry_over?: string[]; risks?: string[]; next_sprint_priorities?: string[] } | 
+{ template: "sprintReview"; summary: string; completed_items?: string[]; carry_over?: string[]; risks?: string[]; next_sprint_priorities?: string[] } |
 /**
  * User research or hiring interview (§3.2.4).
  */
-{ template: "interview"; summary: string; quotes?: InterviewQuote[]; themes?: string[]; pain_points?: string[]; opportunities?: string[] } | 
+{ template: "interview"; summary: string; quotes?: InterviewQuote[]; themes?: string[]; pain_points?: string[]; opportunities?: string[] } |
 /**
  * Sales / discovery call (§3.2.5).
  */
-{ template: "salesCall"; summary: string; customer_context?: string | null; pain_points?: string[]; interest_signals?: string[]; objections?: string[]; next_steps?: ActionItem[]; deal_stage_indicator?: string | null } | 
+{ template: "salesCall"; summary: string; customer_context?: string | null; pain_points?: string[]; interest_signals?: string[]; objections?: string[]; next_steps?: ActionItem[]; deal_stage_indicator?: string | null } |
 /**
  * Lecture, class, or workshop (§3.2.6).
  */
-{ template: "lecture"; summary: string; concepts_covered?: string[]; definitions?: Definition[]; examples?: string[]; homework_or_next?: string[] } | 
+{ template: "lecture"; summary: string; concepts_covered?: string[]; definitions?: Definition[]; examples?: string[]; homework_or_next?: string[] } |
 /**
  * Graceful degradation when JSON parsing fails twice.
  */
-{ template: "freeText"; text: string } | 
+{ template: "freeText"; text: string } |
 /**
  * User-defined custom template. The `template_name` identifies
  * which [`crate::CustomTemplate`] produced this summary.
  */
-{ template: "custom"; template_name: string; text: string }) & { 
+{ template: "custom"; template_name: string; text: string }) & {
 /**
  * Stable identifier.
  */
-id: SummaryId; 
+id: SummaryId;
 /**
  * Owning meeting. Each meeting may carry at most one summary
  * per template at a time — re-running the summarizer
  * overwrites the previous one (the SQLite adapter enforces
  * this with a unique index).
  */
-meetingId: MeetingId; 
+meetingId: MeetingId;
 /**
  * LLM model identifier (e.g. `"qwen2.5-7b-instruct-q4_k_m"`).
  * Stored alongside the content so a future "regenerate with
  * model X" flow can compare provenance.
  */
-model: string; 
+model: string;
 /**
  * ISO-639-1 language the summary was produced in. Echoes the
  * transcript's dominant language; the LLM is instructed to
  * answer in that language.
  */
-language: string | null; 
+language: string | null;
 /**
  * RFC 3339 instant the summary finished generating.
  */
@@ -1314,43 +1318,44 @@ createdAt: string }
  * other id in this crate uses.
  */
 export type SummaryId = string
+export type TAURI_CHANNEL<TSend> = null
 /**
  * One event emitted by the streaming pipeline.
- * 
+ *
  * The variant order on the wire intentionally matches the lifecycle:
  * `Started` → 0..N × `Chunk` → optional `Skipped` mixed in →
  * `Stopped` | `Failed`.
- * 
+ *
  * Wire format: tagged with `type` (lowercase) and field names in
  * `camelCase` for ergonomic consumption from TypeScript.
  */
-export type TranscriptEvent = 
+export type TranscriptEvent =
 /**
  * Capture has begun. Reports the negotiated input format.
  */
-{ type: "started"; sessionId: StreamingSessionId; inputFormat: AudioFormat } | 
+{ type: "started"; sessionId: StreamingSessionId; inputFormat: AudioFormat } |
 /**
  * One transcribed chunk. Segments inside are timestamped relative
  * to the start of the session (not the chunk).
  */
-{ type: "chunk"; sessionId: StreamingSessionId; chunkIndex: number; offsetMs: number; segments: Segment[]; language: string | null; rtf: number; speakerId?: SpeakerId | null; speakerSlot?: number | null } | 
+{ type: "chunk"; sessionId: StreamingSessionId; chunkIndex: number; offsetMs: number; segments: Segment[]; language: string | null; rtf: number; speakerId?: SpeakerId | null; speakerSlot?: number | null } |
 /**
  * A chunk was discarded by the silence gate before being sent to
  * the ASR backend. Useful for UI / metrics.
  */
-{ type: "skipped"; sessionId: StreamingSessionId; chunkIndex: number; offsetMs: number; durationMs: number; rms: number } | 
+{ type: "skipped"; sessionId: StreamingSessionId; chunkIndex: number; offsetMs: number; durationMs: number; rms: number } |
 /**
  * The pipeline finished cleanly (caller stopped or stream EOF).
  */
-{ type: "stopped"; sessionId: StreamingSessionId; totalSegments: number; totalAudioMs: number } | 
+{ type: "stopped"; sessionId: StreamingSessionId; totalSegments: number; totalAudioMs: number } |
 /**
  * The pipeline aborted with an error. No further events follow.
  */
-{ type: "failed"; sessionId: StreamingSessionId; message: string } | 
+{ type: "failed"; sessionId: StreamingSessionId; message: string } |
 /**
  * The pipeline was paused. Audio frames are discarded until resumed.
  */
-{ type: "paused"; sessionId: StreamingSessionId } | 
+{ type: "paused"; sessionId: StreamingSessionId } |
 /**
  * The pipeline was resumed after a pause.
  */
@@ -1381,8 +1386,6 @@ export type Result<T, E> =
 	| { status: "ok"; data: T }
 	| { status: "error"; error: E };
 
-// @ts-ignore tauri-specta boilerplate — function is part of the generated event scaffold
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
 function __makeEvents__<T extends Record<string, any>>(
 	mappings: Record<keyof T, string>,
 ) {

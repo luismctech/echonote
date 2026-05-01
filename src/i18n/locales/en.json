@@ -50,7 +50,10 @@
     "noSpeech": "[no speech]",
     "notePlaceholder": "Add a note…",
     "addNote": "Add",
-    "notes": "Notes"
+    "notes": "Notes",
+    "refineTranscript": "Refining transcript…",
+    "refineSpeakers": "Detecting speakers…",
+    "refineSummary": "Generating summary…"
   },
   "health": {
     "warmingUp": "warming up…",

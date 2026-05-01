@@ -1,11 +1,10 @@
-import { type RefObject, useCallback, useRef, useState } from "react";
+import { type RefObject, useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useVirtualizer } from "@tanstack/react-virtual";
 
 import { LogoAnimated } from "../../components/Logo";
 import { ResizableHandleVertical } from "../../components/ResizableHandleVertical";
-import { StatsBar } from "../../components/StatsBar";
-import { statusLabel, type RecordingState } from "../../state/recording";
+import type { RecordingState } from "../../state/recording";
 import type { Note } from "../../types/meeting";
 import type { StreamLine } from "../../types/view";
 import { NoteInput } from "./NoteInput";
@@ -80,7 +79,9 @@ export function LivePane({
   onPause,
   onResume,
   onAddNote,
-  onDismissError,
+  focusMode,
+  onToggleFocusMode,
+  refineStage,
 }: Readonly<{
   stream: RecordingState;
   stats: { chunks: number; skipped: number; audioMs: number };
@@ -100,7 +101,10 @@ export function LivePane({
   onPause: () => void;
   onResume: () => void;
   onAddNote: (text: string) => void;
-  onDismissError: () => void;
+  focusMode: boolean;
+  onToggleFocusMode: () => void;
+  /** Current refining stage index (0-2) when stream is stopping/persisted. -1 if not refining. */
+  refineStage?: number;
 }>) {
   const { t } = useTranslation();
 
@@ -132,6 +136,16 @@ export function LivePane({
     estimateSize: () => 28,
     overscan: 5,
   });
+
+  // Track which lines are "new" for streaming fade-in
+  const prevLineCountRef = useRef(lines.length);
+  useEffect(() => {
+    // Update after render so next frame knows the new baseline
+    const handle = requestAnimationFrame(() => {
+      prevLineCountRef.current = lines.length;
+    });
+    return () => cancelAnimationFrame(handle);
+  }, [lines.length]);
 
   const splitRef = useRef<HTMLDivElement>(null);
   const [splitRatio, setSplitRatio] = useState(0.5);
@@ -253,7 +267,6 @@ export function LivePane({
             </svg>
           </button>
         </div>
-      </header>
 
       {/* ── Post-stop refining progress ── */}
       {stream.kind === "stopping" && refineStage != null && refineStage >= 0 && (
@@ -426,75 +439,7 @@ export function LivePane({
             </span>
           )}
         </div>
-      )}
-
-      <StatsBar status={statusLabel(stream)} stats={stats} />
-
-      <div ref={splitRef} className="flex min-h-0 flex-1 flex-row">
-        {/* ── Transcript (left panel) ── */}
-        <div
-          className="flex min-w-0 flex-col overflow-hidden"
-          style={{ width: `${clampedRatio * 100}%` }}
-        >
-          <div
-            ref={listRef}
-            className="min-h-0 flex-1 overflow-y-auto rounded-md border border-zinc-100 bg-zinc-50 p-3 font-mono text-xs leading-relaxed dark:border-zinc-900 dark:bg-zinc-900/60"
-          >
-            {lines.length === 0 ? (
-              <div className="flex flex-col items-center justify-center gap-3 py-8">
-                <LogoAnimated size={48} className="opacity-40" />
-                <p className="text-zinc-400">
-                  {emptyHint(stream, t)}
-                </p>
-              </div>
-            ) : (
-              <ul
-                className="relative w-full"
-                style={{ height: `${virtualizer.getTotalSize()}px` }}
-              >
-                {virtualizer.getVirtualItems().map((vItem) => {
-                  const line = lines[vItem.index]!;
-                  return (
-                    <li
-                      key={line.key}
-                      className={`absolute left-0 top-0 flex w-full items-baseline gap-3${
-                        line.kind === "skipped" ? " text-zinc-400" : ""
-                      }`}
-                      style={{ transform: `translateY(${vItem.start}px)` }}
-                      data-index={vItem.index}
-                      ref={virtualizer.measureElement}
-                    >
-                      <TranscriptRow line={line} />
-                    </li>
-                  );
-                })}
-              </ul>
-            )}
-          </div>
-        </div>
-
-        {/* ── Vertical resize handle ── */}
-        <ResizableHandleVertical
-          containerRef={splitRef}
-          ratio={clampedRatio}
-          onRatioChange={handleRatioChange}
-        />
-
-        {/* ── Notes (right panel) ── */}
-        <div
-          className="flex min-w-0 flex-col gap-2 overflow-hidden"
-          style={{ width: `${(1 - clampedRatio) * 100}%` }}
-        >
-          <NoteInput
-            elapsedMs={stats.audioMs}
-            onSubmit={onAddNote}
-            disabled={stream.kind !== "recording" && stream.kind !== "paused"}
-          />
-          <div className="min-h-0 flex-1 overflow-y-auto rounded-md border border-zinc-100 bg-zinc-50 p-3 dark:border-zinc-900 dark:bg-zinc-900/60">
-            <NoteList notes={notes} />
-          </div>
-        </div>
-      </div>
+      </footer>
     </>
   );
 }

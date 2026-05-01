@@ -58,7 +58,7 @@ export function SummaryPanel({
     >
       {/* ── Header bar (never scrolls) ── */}
       <div className="flex flex-shrink-0 items-center justify-between px-1 py-1">
-        <span className="text-xs font-medium uppercase tracking-wide text-zinc-400">
+        <span className="type-section-header text-content-placeholder">
           {t("summary.label")}
         </span>
         <div className="flex items-center gap-1.5">
@@ -78,13 +78,13 @@ export function SummaryPanel({
               <path fillRule="evenodd" d="M6.455 1.45A.5.5 0 0 1 6.952 1h2.096a.5.5 0 0 1 .497.45l.186 1.858a4.996 4.996 0 0 1 1.466.848l1.703-.769a.5.5 0 0 1 .63.207l1.048 1.814a.5.5 0 0 1-.133.656l-1.517 1.09a5.026 5.026 0 0 1 0 1.694l1.517 1.09a.5.5 0 0 1 .133.656l-1.048 1.814a.5.5 0 0 1-.63.207l-1.703-.769a4.996 4.996 0 0 1-1.466.848l-.186 1.858a.5.5 0 0 1-.497.45H6.952a.5.5 0 0 1-.497-.45l-.186-1.858a4.993 4.993 0 0 1-1.466-.848l-1.703.769a.5.5 0 0 1-.63-.207L1.422 12.4a.5.5 0 0 1 .133-.656l1.517-1.09a5.026 5.026 0 0 1 0-1.694l-1.517-1.09a.5.5 0 0 1-.133-.656l1.048-1.814a.5.5 0 0 1 .63-.207l1.703.769a4.993 4.993 0 0 1 1.466-.848l.186-1.858ZM8 10.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5Z" clipRule="evenodd" />
             </svg>
           </button>
-          <label className="flex cursor-pointer items-center gap-1 text-[11px] text-zinc-500 dark:text-zinc-400">
+          <label className="flex cursor-pointer items-center gap-1 text-ui-xs text-content-tertiary">
             <input
               type="checkbox"
               checked={includeNotes}
               onChange={(e) => setIncludeNotes(e.target.checked)}
               disabled={loading || generating}
-              className="h-3 w-3 rounded border-zinc-300 accent-emerald-600 dark:border-zinc-600"
+              className=""
             />
             {t("summary.includeNotes")}
           </label>
@@ -120,7 +120,7 @@ export function SummaryPanel({
           </div>
         )}
         {!loading && generating && streamingText && (
-          <div className="prose prose-sm dark:prose-invert max-w-none text-xs leading-relaxed">
+          <div className="prose prose-sm max-w-none text-ui-md leading-relaxed">
             <Markdown>{streamingText}</Markdown>
             <span className="ml-0.5 inline-block h-3 w-1.5 animate-pulse rounded-sm bg-emerald-500" />
           </div>
@@ -128,14 +128,21 @@ export function SummaryPanel({
         {!loading && generating && !streamingText && (
           <div className="flex items-center gap-2">
             <LogoAnimated size={20} className="opacity-40" />
-            <p className="text-xs text-zinc-500">{t("summary.generating")}</p>
+            <p className="text-ui-sm text-content-tertiary">{t("summary.generating")}</p>
           </div>
         )}
         {!loading && !generating && summary && <SummaryBody summary={summary} />}
         {!loading && !generating && !summary && (
-          <p className="text-xs text-zinc-500">
-            {t("summary.empty")}
-          </p>
+          <div className="flex flex-col items-center justify-center gap-3 py-12 text-center">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" className="h-10 w-10 text-content-placeholder opacity-40">
+              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+              <polyline points="14 2 14 8 20 8" />
+              <line x1="16" y1="13" x2="8" y2="13" />
+              <line x1="16" y1="17" x2="8" y2="17" />
+              <polyline points="10 9 9 9 8 9" />
+            </svg>
+            <p className="text-ui-sm text-content-placeholder">{t("summary.empty")}</p>
+          </div>
         )}
       </div>
     </section>

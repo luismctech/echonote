@@ -229,11 +229,13 @@ export async function summarizeMeeting(
   meetingId: MeetingId,
   template?: string,
   includeNotes?: boolean,
+  language?: string,
 ): Promise<Summary> {
   return invoke<Summary>("summarize_meeting", {
     meetingId,
     template: template ?? null,
     includeNotes: includeNotes ?? false,
+    language: language ?? null,
   });
 }
 
@@ -249,6 +251,7 @@ export async function summarizeMeetingStream(
   template: string | undefined,
   includeNotes: boolean,
   onEvent: (event: SummarizeEvent) => void,
+  language?: string,
 ): Promise<void> {
   const channel = new Channel<SummarizeEvent>();
   channel.onmessage = onEvent;
@@ -256,6 +259,7 @@ export async function summarizeMeetingStream(
     meetingId,
     template: template ?? null,
     includeNotes,
+    language: language ?? null,
     onEvent: channel,
   });
 }
@@ -393,11 +397,13 @@ export async function summarizeWithCustomTemplate(
   meetingId: MeetingId,
   templateId: CustomTemplateId,
   includeNotes?: boolean,
+  language?: string,
 ): Promise<Summary> {
   return invoke<Summary>("summarize_with_custom_template", {
     meetingId,
     templateId,
     includeNotes: includeNotes ?? false,
+    language: language ?? null,
   });
 }
 

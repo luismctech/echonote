@@ -1,8 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { ResizableHandle } from "../../components/ResizableHandle";
-import { ResizableHandleVertical } from "../../components/ResizableHandleVertical";
 import { CopyButton } from "../../components/CopyButton";
 import { ResizableHandleVertical } from "../../components/ResizableHandleVertical";
 
@@ -12,6 +10,7 @@ import { LogoAnimated } from "../../components/Logo";
 import { formatDate, formatDurationMs, formatTimestamp } from "../../lib/format";
 import { displayName, indexSpeakers } from "../../lib/speakers";
 import type { Note, NoteId } from "../../types/meeting";
+import type { SegmentId } from "../../types/chat";
 import type { SpeakerId } from "../../types/speaker";
 import type { MainView } from "../../types/view";
 import { ChatPanel } from "./ChatPanel";
@@ -112,43 +111,8 @@ export function MeetingDetail({
   const { t } = useTranslation();
   const scrollRef = useRef<HTMLDivElement>(null);
   const splitRef = useRef<HTMLDivElement>(null);
-  const summaryRef = useRef<HTMLDivElement>(null);
-  const hSplitRef = useRef<HTMLDivElement>(null);
-  const summaryChatSplitRef = useRef<HTMLDivElement>(null);
 
-  /** Fraction of the split container given to the summary (top panel). */
-  const MIN_RATIO = 1 / 3;
-  const MAX_RATIO = 2 / 3;
-  const [summaryRatio, setSummaryRatio] = useState(0.5);
-
-  /** Horizontal split: transcript (left) vs notes (right). */
-  const H_MIN = 0.4;
-  const H_MAX = 0.85;
-  const [hRatio, setHRatio] = useState(0.55);
-  const clampedHRatio = Math.min(H_MAX, Math.max(H_MIN, hRatio));
-  const handleHRatioChange = useCallback((r: number) => {
-    setHRatio(Math.min(H_MAX, Math.max(H_MIN, r)));
-  }, []);
-
-  /** Horizontal split: summary (left) vs chat (right). */
-  const SC_MIN = 0.35;
-  const SC_MAX = 0.75;
-  const [scRatio, setScRatio] = useState(0.55);
-  const clampedScRatio = Math.min(SC_MAX, Math.max(SC_MIN, scRatio));
-  const handleScRatioChange = useCallback((r: number) => {
-    setScRatio(Math.min(SC_MAX, Math.max(SC_MIN, r)));
-  }, []);
-  /** Track whether the user has manually dragged the handle. */
-  const [userResized, setUserResized] = useState(false);
-  const clampedRatio = Math.min(MAX_RATIO, Math.max(MIN_RATIO, summaryRatio));
-  const handleRatioChange = useCallback(
-    (r: number) => {
-      const clamped = Math.min(MAX_RATIO, Math.max(MIN_RATIO, r));
-      setUserResized(true);
-      setSummaryRatio(clamped);
-    },
-    [],
-  );
+  const [activeTab, setActiveTab] = useState<DetailTab>("transcript");
 
   // Resizable split ratio for notes | transcript
   const SPLIT_MIN = 0.25;
@@ -219,19 +183,11 @@ export function MeetingDetail({
     );
   }
 
-  // Compute summary panel sizing: auto-fit by default, fixed ratio
-  // after the user drags the resize handle. Always constrained so the
-  // chat panel doesn't push the transcript off-screen.
-  let summaryPanelStyle: React.CSSProperties;
-  if (summaryState.summary && userResized) {
-    summaryPanelStyle = { flex: `0 0 ${(clampedRatio * 100).toFixed(1)}%` };
-  } else if (summaryState.summary) {
-    summaryPanelStyle = { flex: `0 0 ${(clampedRatio * 100).toFixed(1)}%` };
-  } else {
-    // No summary yet — give the chat a modest fixed portion so the
-    // transcript keeps the majority of the vertical space.
-    summaryPanelStyle = { flex: `0 0 ${(MIN_RATIO * 100).toFixed(1)}%` };
-  }
+  const tabs: { id: DetailTab; label: string; count?: number }[] = [
+    { id: "transcript", label: t("meeting.transcript"), count: m.segments.length },
+    { id: "summary", label: t("summary.label") },
+    { id: "chat", label: t("chat.label") },
+  ];
 
   return (
     <>
@@ -252,59 +208,69 @@ export function MeetingDetail({
         <ExportButton meetingId={m.id} title={m.title} />
       </header>
 
-      <div className="flex min-h-0 flex-1 flex-col gap-3">
-        {m.speakers.length > 0 && (
-          <SpeakersPanel speakers={m.speakers} segments={m.segments} onRename={onRenameSpeaker} />
+      {/* ── Speakers (inline, compact) ── */}
+      {m.speakers.length > 0 && (
+        <SpeakersPanel speakers={m.speakers} segments={m.segments} onRename={onRenameSpeaker} />
+      )}
+
+      {/* ── Tab bar ── */}
+      <nav className="flex gap-1 border-b border-subtle" aria-label="Meeting sections">
+        {tabs.map((tab) => (
+          <button
+            key={tab.id}
+            type="button"
+            onClick={() => setActiveTab(tab.id)}
+            className={`relative px-3 py-2 text-ui-sm font-medium transition-colors ${
+              activeTab === tab.id
+                ? "text-content-primary"
+                : "text-content-tertiary hover:text-content-secondary"
+            }`}
+          >
+            {tab.label}
+            {tab.count != null && tab.count > 0 && (
+              <span className="ml-1.5 inline-flex min-w-[18px] items-center justify-center rounded-full bg-surface-sunken px-1 text-micro font-medium tabular-nums text-content-tertiary">
+                {tab.count}
+              </span>
+            )}
+            {activeTab === tab.id && (
+              <span className="absolute inset-x-0 -bottom-px h-0.5 rounded-full bg-content-primary" />
+            )}
+          </button>
+        ))}
+      </nav>
+
+      {/* ── Tab content ── */}
+      <div className="flex min-h-0 flex-1 flex-col">
+        {activeTab === "summary" && (
+          <SummaryPanel state={summaryState} />
         )}
 
-        {/* Resizable split: Summary (top) + Transcript+Notes (bottom) */}
-        <div ref={splitRef} className="flex min-h-0 flex-1 flex-col">
-          {/* ── Summary + Chat side-by-side (top row) ── */}
-          <div
-            ref={summaryRef}
-            className="flex min-h-0 flex-col"
-            style={summaryPanelStyle}
-          >
-            <div ref={summaryChatSplitRef} className="flex min-h-0 flex-1">
-              {/* Left: Summary */}
-              <div
-                className="flex min-h-0 min-w-0 flex-col"
-                style={{ flex: `0 0 ${(clampedScRatio * 100).toFixed(1)}%` }}
-              >
-                <SummaryPanel state={summaryState} />
-              </div>
+        {activeTab === "transcript" && (
+          <div ref={splitRef} className="flex min-h-0 flex-1 flex-row">
+            {/* Notes panel (left) — only when notes exist */}
+            {notes.length > 0 && (
+              <>
+                <div
+                  className="flex min-h-0 min-w-0 flex-col overflow-y-auto"
+                  style={{ width: `${clampedSplit * 100}%` }}
+                >
+                  <NotesPanel notes={notes} onDeleted={handleNoteDeleted} />
+                </div>
+                <ResizableHandleVertical
+                  containerRef={splitRef}
+                  ratio={clampedSplit}
+                  onRatioChange={handleSplitChange}
+                />
+              </>
+            )}
 
-              {/* Vertical resize handle */}
-              <ResizableHandleVertical
-                containerRef={summaryChatSplitRef}
-                ratio={clampedScRatio}
-                onRatioChange={handleScRatioChange}
-              />
-
-              {/* Right: Chat */}
-              <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-                <ChatPanel chat={chat} />
-              </div>
-            </div>
-          </div>
-
-          {summaryState.summary && (
-            <ResizableHandle
-              containerRef={splitRef}
-              ratio={clampedRatio}
-              onRatioChange={handleRatioChange}
-            />
-          )}
-
-          {/* ── Transcript + Notes side-by-side ── */}
-          <div ref={hSplitRef} className="flex min-h-0 flex-1">
-            {/* Left: Transcript */}
+            {/* Transcript panel (right, or full-width if no notes) */}
             <div
-              className="flex min-h-0 min-w-0 flex-col"
-              style={notes.length > 0 ? { flex: `0 0 ${(clampedHRatio * 100).toFixed(1)}%` } : { flex: "1 1 0%" }}
+              className="flex min-h-0 min-w-0 flex-1 flex-col gap-1"
+              style={notes.length > 0 ? { width: `${(1 - clampedSplit) * 100}%` } : undefined}
             >
               <div className="flex items-center justify-between px-1 py-1">
-                <span className="text-xs font-medium uppercase tracking-wide text-zinc-400">
+                <span className="text-ui-xs font-medium uppercase tracking-wide text-content-placeholder">
                   {t("meeting.transcript")}
                 </span>
                 {m.segments.length > 0 && (
@@ -313,10 +279,10 @@ export function MeetingDetail({
               </div>
               <div
                 ref={scrollRef}
-                className="min-h-0 flex-1 overflow-y-auto rounded-md border border-zinc-100 bg-zinc-50 p-3 text-sm leading-relaxed dark:border-zinc-900 dark:bg-zinc-900"
+                className="min-h-0 flex-1 overflow-y-auto rounded-md border border-subtle bg-surface-sunken p-3 text-ui-md leading-relaxed"
               >
                 {m.segments.length === 0 ? (
-                  <p className="text-zinc-400">{t("meeting.noSegments")}</p>
+                  <p className="text-content-placeholder">{t("meeting.noSegments")}</p>
                 ) : (
                   <ol
                     className="relative w-full"
@@ -349,23 +315,21 @@ export function MeetingDetail({
                 )}
               </div>
             </div>
-
-            {/* Vertical resize handle + Notes panel (only when notes exist) */}
-            {notes.length > 0 && (
-              <>
-                <ResizableHandleVertical
-                  containerRef={hSplitRef}
-                  ratio={clampedHRatio}
-                  onRatioChange={handleHRatioChange}
-                />
-                <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-                  <NotesPanel notes={notes} onDeleted={handleNoteDeleted} />
-                </div>
-              </>
-            )}
           </div>
-        {/* ── end split ── */}
-        </div>
+        )}
+
+        {activeTab === "chat" && (
+          <div className="flex min-h-0 flex-1 flex-col">
+            <ChatPanel
+              chat={chat}
+              onScrollToSegment={handleScrollToSegment}
+              segmentTimestamps={m.segments.reduce<Record<string, number>>((acc, seg) => {
+                acc[seg.id] = seg.startMs;
+                return acc;
+              }, {})}
+            />
+          </div>
+        )}
       </div>
     </>
   );

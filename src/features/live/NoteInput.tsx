@@ -52,9 +52,9 @@ export function NoteInput({
   return (
     <form
       onSubmit={handleSubmit}
-      className="flex items-center gap-2 rounded-md border border-zinc-200 bg-white px-3 py-2 dark:border-zinc-700 dark:bg-zinc-800"
+      className="flex items-center gap-2 rounded-md border bg-surface-elevated px-3 py-2"
     >
-      <span className="shrink-0 rounded bg-zinc-100 px-1.5 py-0.5 font-mono text-[10px] text-zinc-500 dark:bg-zinc-700 dark:text-zinc-400">
+      <span className="shrink-0 rounded bg-surface-inset px-1.5 py-0.5 font-mono text-micro text-content-tertiary">
         {formatTimestamp(elapsedMs)}
       </span>
       <input
@@ -64,12 +64,12 @@ export function NoteInput({
         onChange={(e) => setText(e.target.value)}
         disabled={disabled}
         placeholder={`${t("live.notePlaceholder")} (${isMac ? "⌘N" : "Ctrl+N"})`}
-        className="min-w-0 flex-1 bg-transparent text-xs text-zinc-800 placeholder:text-zinc-400 focus:outline-none dark:text-zinc-200 dark:placeholder:text-zinc-500"
+        className="min-w-0 flex-1 bg-transparent text-ui-sm text-content-primary placeholder:text-content-placeholder focus:outline-none"
       />
       <button
         type="submit"
         disabled={disabled || !text.trim()}
-        className="shrink-0 rounded bg-emerald-600 px-2 py-1 text-[10px] font-medium text-white hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-40"
+        className="shrink-0 rounded bg-emerald-600 px-2 py-1 text-micro font-medium text-white hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-40"
       >
         {t("live.addNote")}
       </button>

@@ -296,8 +296,8 @@ fn build_messages(
 
     let mut out = Vec::with_capacity(history.len().min(MAX_HISTORY_TURNS) + 2);
     out.push(ChatMessage::system(build_system_prompt(
-        transcript_block,
-        notes_block,
+        &safe_transcript,
+        &safe_notes,
         language_instruction,
     )));
 

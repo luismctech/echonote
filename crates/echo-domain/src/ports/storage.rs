@@ -188,6 +188,15 @@ pub trait MeetingStore: Send + Sync {
         note_id: crate::entities::note::NoteId,
     ) -> Result<bool, DomainError>;
 
+    /// Flush WAL frames to the main database file. Called before
+    /// shutdown so data written since the last automatic checkpoint is
+    /// not lost when the process exits.
+    ///
+    /// Default impl is a no-op — only the SQLite adapter does real work.
+    async fn checkpoint(&self) -> Result<(), DomainError> {
+        Ok(())
+    }
+
     /// Release any expensive resources (database pool, file handles)
     /// the adapter holds. Called once on app shutdown so the underlying
     /// storage layer can checkpoint cleanly.
