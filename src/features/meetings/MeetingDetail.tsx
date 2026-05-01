@@ -5,6 +5,7 @@ import { ResizableHandle } from "../../components/ResizableHandle";
 import { ResizableHandleVertical } from "../../components/ResizableHandleVertical";
 import { CopyButton } from "../../components/CopyButton";
 
+import { useChat } from "../../hooks/useChat";
 import { useMeetingSummary } from "../../hooks/useMeetingSummary";
 import { LogoAnimated } from "../../components/Logo";
 import { formatDate, formatDurationMs, formatTimestamp } from "../../lib/format";
@@ -12,6 +13,7 @@ import { displayName, indexSpeakers } from "../../lib/speakers";
 import type { Note, NoteId } from "../../types/meeting";
 import type { SpeakerId } from "../../types/speaker";
 import type { MainView } from "../../types/view";
+import { ChatPanel } from "./ChatPanel";
 import { ExportButton } from "./ExportButton";
 import { NotesPanel } from "./NotesPanel";
 import { SegmentRow } from "./SegmentRow";
@@ -103,11 +105,13 @@ export function MeetingDetail({
 }) {
   const meetingId = view.kind === "meeting" ? view.id : null;
   const summaryState = useMeetingSummary(meetingId);
+  const chat = useChat(meetingId);
   const { t } = useTranslation();
   const scrollRef = useRef<HTMLDivElement>(null);
   const splitRef = useRef<HTMLDivElement>(null);
   const summaryRef = useRef<HTMLDivElement>(null);
   const hSplitRef = useRef<HTMLDivElement>(null);
+  const summaryChatSplitRef = useRef<HTMLDivElement>(null);
 
   /** Fraction of the split container given to the summary (top panel). */
   const MIN_RATIO = 1 / 3;
@@ -117,10 +121,19 @@ export function MeetingDetail({
   /** Horizontal split: transcript (left) vs notes (right). */
   const H_MIN = 0.4;
   const H_MAX = 0.85;
-  const [hRatio, setHRatio] = useState(0.65);
+  const [hRatio, setHRatio] = useState(0.55);
   const clampedHRatio = Math.min(H_MAX, Math.max(H_MIN, hRatio));
   const handleHRatioChange = useCallback((r: number) => {
     setHRatio(Math.min(H_MAX, Math.max(H_MIN, r)));
+  }, []);
+
+  /** Horizontal split: summary (left) vs chat (right). */
+  const SC_MIN = 0.35;
+  const SC_MAX = 0.75;
+  const [scRatio, setScRatio] = useState(0.55);
+  const clampedScRatio = Math.min(SC_MAX, Math.max(SC_MIN, scRatio));
+  const handleScRatioChange = useCallback((r: number) => {
+    setScRatio(Math.min(SC_MAX, Math.max(SC_MIN, r)));
   }, []);
   /** Track whether the user has manually dragged the handle. */
   const [userResized, setUserResized] = useState(false);
@@ -192,12 +205,17 @@ export function MeetingDetail({
   }
 
   // Compute summary panel sizing: auto-fit by default, fixed ratio
-  // after the user drags the resize handle.
-  let summaryPanelStyle: React.CSSProperties | undefined;
+  // after the user drags the resize handle. Always constrained so the
+  // chat panel doesn't push the transcript off-screen.
+  let summaryPanelStyle: React.CSSProperties;
   if (summaryState.summary && userResized) {
     summaryPanelStyle = { flex: `0 0 ${(clampedRatio * 100).toFixed(1)}%` };
   } else if (summaryState.summary) {
-    summaryPanelStyle = { flex: "0 1 auto", maxHeight: `${(MAX_RATIO * 100).toFixed(0)}%` };
+    summaryPanelStyle = { flex: `0 0 ${(clampedRatio * 100).toFixed(1)}%` };
+  } else {
+    // No summary yet — give the chat a modest fixed portion so the
+    // transcript keeps the majority of the vertical space.
+    summaryPanelStyle = { flex: `0 0 ${(MIN_RATIO * 100).toFixed(1)}%` };
   }
 
   return (
@@ -221,13 +239,33 @@ export function MeetingDetail({
 
         {/* Resizable split: Summary (top) + Transcript+Notes (bottom) */}
         <div ref={splitRef} className="flex min-h-0 flex-1 flex-col">
-          {/* ── Summary (fixed ratio only when content exists) ── */}
+          {/* ── Summary + Chat side-by-side (top row) ── */}
           <div
             ref={summaryRef}
             className="flex min-h-0 flex-col"
             style={summaryPanelStyle}
           >
-            <SummaryPanel state={summaryState} />
+            <div ref={summaryChatSplitRef} className="flex min-h-0 flex-1">
+              {/* Left: Summary */}
+              <div
+                className="flex min-h-0 min-w-0 flex-col"
+                style={{ flex: `0 0 ${(clampedScRatio * 100).toFixed(1)}%` }}
+              >
+                <SummaryPanel state={summaryState} />
+              </div>
+
+              {/* Vertical resize handle */}
+              <ResizableHandleVertical
+                containerRef={summaryChatSplitRef}
+                ratio={clampedScRatio}
+                onRatioChange={handleScRatioChange}
+              />
+
+              {/* Right: Chat */}
+              <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+                <ChatPanel chat={chat} />
+              </div>
+            </div>
           </div>
 
           {summaryState.summary && (
