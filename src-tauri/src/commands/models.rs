@@ -137,8 +137,7 @@ fn model_catalog(root: &std::path::Path) -> Vec<(ModelInfo, &'static str, Option
         (
             ModelInfo {
                 id: "llm-qwen3-4b".into(),
-                label: "Qwen 3 Lite".into(),
-                description: "For devices with less than 8 GB RAM".into(),
+                label: "Qwen 3 4B Q4_K_M (2.5 GB) — for <8 GB RAM".into(),
                 kind: "llm".into(),
                 present: present("models/llm/Qwen3-4B-Q4_K_M.gguf"),
                 size_bytes: 2_600_000_000,
