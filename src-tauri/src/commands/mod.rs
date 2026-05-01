@@ -601,6 +601,7 @@ fn preferred_llm_model(root: &Path) -> &'static str {
         "models/llm/Qwen3-30B-A3B-Q4_K_M.gguf",
         "models/llm/Qwen3-14B-Q4_K_M.gguf",
         "models/llm/Qwen3-8B-Q4_K_M.gguf",
+        "models/llm/Qwen3-4B-Q4_K_M.gguf",
         "models/llm/qwen2.5-7b-instruct-q4_k_m.gguf",
         "models/llm/qwen2.5-3b-instruct-q4_k_m.gguf",
     ];

@@ -25,6 +25,7 @@
 #   scripts/download-models.sh segmenter      # pyannote-segmentation-3.0 (~17 MB)
 #   scripts/download-models.sh llm            # Qwen 3 14B Instruct Q4_K_M (~9 GB)
 #   scripts/download-models.sh llm-small      # Qwen 3 8B Instruct Q4_K_M (~5 GB)
+#   scripts/download-models.sh llm-lite       # Qwen 3 4B Q4_K_M (~2.5 GB, <8 GB RAM)
 #   scripts/download-models.sh llm-moe        # Qwen 3 30B-A3B Instruct Q4_K_M (~18 GB)
 #   scripts/download-models.sh llm-legacy-7b  # Qwen 2.5 7B (back-compat, ~4.4 GB)
 #   scripts/download-models.sh llm-legacy-3b  # Qwen 2.5 3B (back-compat, ~1.9 GB)
@@ -113,6 +114,12 @@ QWEN3_14B_NAME="Qwen3-14B-Q4_K_M.gguf"
 # at almost the same footprint (~5 GB Q4_K_M).
 QWEN3_8B_URL="https://huggingface.co/Qwen/Qwen3-8B-GGUF/resolve/main/Qwen3-8B-Q4_K_M.gguf"
 QWEN3_8B_NAME="Qwen3-8B-Q4_K_M.gguf"
+# Lite variant for machines with < 8 GB RAM. Qwen 3 4B offers excellent
+# multilingual coverage (100+ languages), thinking mode for structured
+# summaries, and fits comfortably in ~3.5 GB RAM including KV cache.
+# Same chat template as all Qwen 3 models — zero code changes needed.
+QWEN3_4B_URL="https://huggingface.co/Qwen/Qwen3-4B-GGUF/resolve/main/Qwen3-4B-Q4_K_M.gguf"
+QWEN3_4B_NAME="Qwen3-4B-Q4_K_M.gguf"
 # MoE variant for Macs ≥32 GB. 30 B total / 3 B active per token —
 # higher quality than the dense 32 B at a fraction of the inference
 # cost. Recommended when the user runs the Quality profile.
@@ -470,6 +477,13 @@ main() {
       # Lighter alternative for 8-16 GB RAM hosts and dev iteration.
       download_llm "$QWEN3_8B_URL" "$QWEN3_8B_NAME" 5000
       info "LLM in ${LLM_DIR}. Set ECHO_LLM_MODEL=${LLM_DIR}/${QWEN3_8B_NAME} if you move it."
+      return
+      ;;
+    llm-lite|llm-4b|qwen3-4b)
+      # Smallest Qwen 3 variant for machines with < 8 GB RAM.
+      # ~2.5 GB on disk, ~3.5 GB RAM with KV cache.
+      download_llm "$QWEN3_4B_URL" "$QWEN3_4B_NAME" 2500
+      info "LLM in ${LLM_DIR}. Set ECHO_LLM_MODEL=${LLM_DIR}/${QWEN3_4B_NAME} if you move it."
       return
       ;;
     llm-moe|llm-30b|qwen3-30b|qwen3-30b-a3b)

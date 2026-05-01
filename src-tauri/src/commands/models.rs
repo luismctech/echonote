@@ -126,6 +126,17 @@ fn model_catalog(root: &std::path::Path) -> Vec<(ModelInfo, &'static str, Option
         ),
         (
             ModelInfo {
+                id: "llm-qwen3-4b".into(),
+                label: "Qwen 3 4B Q4_K_M (2.5 GB) — for <8 GB RAM".into(),
+                kind: "llm".into(),
+                present: present("models/llm/Qwen3-4B-Q4_K_M.gguf"),
+                size_bytes: 2_600_000_000,
+            },
+            "https://huggingface.co/Qwen/Qwen3-4B-GGUF/resolve/main/Qwen3-4B-Q4_K_M.gguf",
+            None, // TODO: populate sha256
+        ),
+        (
+            ModelInfo {
                 id: "vad-silero".into(),
                 label: "Silero VAD v5 (1.2 MB, simplified for tract)".into(),
                 kind: "vad".into(),
@@ -184,6 +195,7 @@ fn model_dest_path(id: &str) -> Option<&'static str> {
         "asr-base" => Some("models/asr/ggml-base.bin"),
         "llm-qwen3-14b" => Some("models/llm/Qwen3-14B-Q4_K_M.gguf"),
         "llm-qwen3-8b" => Some("models/llm/Qwen3-8B-Q4_K_M.gguf"),
+        "llm-qwen3-4b" => Some("models/llm/Qwen3-4B-Q4_K_M.gguf"),
         "vad-silero" => Some("models/vad/silero_vad.onnx"),
         "embedder-eres2net" => Some("models/embedder/eres2net_en_voxceleb.onnx"),
         "embedder-camplusplus" => Some("models/embedder/campplus_en_voxceleb.onnx"),
