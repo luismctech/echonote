@@ -31,7 +31,7 @@ export const SegmentRow = memo(function SegmentRow({
           compact
         />
       )}
-      <span className="flex-1">{text.trim() || noSpeechLabel}</span>
+      <span className="flex-1 min-w-0 break-all">{text.trim() || noSpeechLabel}</span>
     </>
   );
 });

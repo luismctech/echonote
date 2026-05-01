@@ -350,6 +350,14 @@ pub async fn download_model(
                     format!("SHA-256 mismatch for {model_id}: expected {expected}, got {actual}"),
                 ));
             }
+            tracing::info!(%model_id, "SHA-256 verified");
+        } else {
+            tracing::warn!(
+                %model_id,
+                "model downloaded WITHOUT SHA-256 verification — \
+                 integrity not guaranteed. Populate the hash in \
+                 model_catalog() before release."
+            );
         }
 
         tokio::fs::rename(&tmp, &dest)

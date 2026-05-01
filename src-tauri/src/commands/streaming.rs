@@ -80,6 +80,11 @@ pub struct StartStreamingOptions {
     pub disable_neural_vad: Option<bool>,
 }
 
+/// Maximum number of concurrent streaming sessions allowed. A single
+/// session already binds a mic + ASR model + optionally a diarizer +
+/// VAD, so permitting many at once would exhaust GPU/CPU/memory.
+const MAX_ACTIVE_SESSIONS: usize = 2;
+
 /// Start a streaming transcription session. Events are pushed through
 /// the supplied `Channel<TranscriptEvent>` until [`stop_streaming`] is
 /// invoked or the capture stream ends. Persists to SQLite incrementally
@@ -91,6 +96,20 @@ pub async fn start_streaming(
     options: Option<StartStreamingOptions>,
     on_event: Channel<TranscriptEvent>,
 ) -> Result<StreamingSessionId, IpcError> {
+    // ── Guard: cap concurrent sessions to prevent resource exhaustion ──
+    {
+        let guard = state.sessions.lock().unwrap_or_else(|p| p.into_inner());
+        if guard.len() >= MAX_ACTIVE_SESSIONS {
+            return Err(IpcError::new(
+                ErrorCode::SessionConflict,
+                format!(
+                    "maximum concurrent sessions ({MAX_ACTIVE_SESSIONS}) reached; \
+                     stop an existing session first"
+                ),
+            ));
+        }
+    }
+
     let opts = options.unwrap_or_default();
     let streaming_options = StreamingOptions {
         language: opts.language,

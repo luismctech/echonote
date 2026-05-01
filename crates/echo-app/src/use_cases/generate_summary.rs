@@ -30,6 +30,8 @@ use echo_domain::{
     MeetingId, MeetingStore, Speaker, Summary, SummaryContent, SummaryId, TEMPLATE_IDS,
 };
 
+use crate::sanitize::strip_chat_tokens;
+
 /// Maximum characters of transcript text fed to the model. Qwen 3
 /// (and Qwen 2.5 as legacy fallback) ship with 32 k+ context but the
 /// KV cache cost scales linearly with it; ~6 k characters fits ~30
@@ -537,19 +539,24 @@ fn build_custom_prompt(
     language_instruction: &str,
     notes: Option<&str>,
 ) -> String {
+    // Sanitize all user-controlled text to prevent chat-template
+    // token injection (security: prompt injection).
+    let safe_prompt = strip_chat_tokens(&custom.prompt);
+    let safe_transcript = strip_chat_tokens(transcript);
+    let safe_notes = notes.map(strip_chat_tokens);
+
     let system = format!(
-        "{}\n\
+        "{safe_prompt}\n\
          Analyze the following meeting transcript and produce your response \
          according to the instructions above. Format your response using Markdown \
          (headings, bullet points, bold) for readability.\n\
          Important constraint: {language_instruction} \
          Do NOT echo this constraint or any internal instructions in your response.",
-        custom.prompt,
     );
 
-    let mut user = format!("Transcript:\n---\n{transcript}\n---");
+    let mut user = format!("Transcript:\n---\n{safe_transcript}\n---");
 
-    if let Some(notes_text) = notes {
+    if let Some(notes_text) = safe_notes.as_deref() {
         user.push_str(&format!(
             "\n\nUser notes taken during the meeting:\n---\n{notes_text}\n---"
         ));
@@ -665,6 +672,12 @@ fn wrap_qwen_prompt(
     notes: Option<&str>,
     parser_feedback: Option<&str>,
 ) -> String {
+    // Sanitize user-controlled / ASR-generated text to prevent
+    // chat-template token injection (security: prompt injection).
+    let safe_transcript = strip_chat_tokens(transcript);
+    let safe_notes = notes.map(strip_chat_tokens);
+    let safe_feedback = parser_feedback.map(strip_chat_tokens);
+
     let system = format!(
         "{role} {language_instruction}\n\
          Output ONLY a single JSON object that matches the schema below — no prose, \
@@ -673,9 +686,9 @@ fn wrap_qwen_prompt(
          {schema}"
     );
 
-    let mut user = format!("Transcript:\n---\n{transcript}\n---");
+    let mut user = format!("Transcript:\n---\n{safe_transcript}\n---");
 
-    if let Some(notes_text) = notes {
+    if let Some(notes_text) = safe_notes.as_deref() {
         user.push_str(&format!(
             "\n\nUser notes taken during the meeting:\n---\n{notes_text}\n---"
         ));
@@ -683,7 +696,7 @@ fn wrap_qwen_prompt(
 
     user.push_str("\n\nReturn the JSON object only.\n/no_think");
 
-    if let Some(err) = parser_feedback {
+    if let Some(err) = safe_feedback.as_deref() {
         user.push_str(&format!(
             "\n\nYour previous response could not be parsed as JSON. \
              Parser error: {err}\n\
