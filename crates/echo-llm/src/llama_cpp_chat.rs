@@ -269,6 +269,10 @@ fn stream_chat_impl(
         LlamaSampler::chain_simple([LlamaSampler::greedy()])
     } else {
         LlamaSampler::chain_simple([
+            // Penalise recently-generated tokens to avoid degenerate
+            // repetition loops (look back 64 tokens, repeat penalty
+            // 1.1, no frequency/presence penalty).
+            LlamaSampler::penalties(64, 1.1, 0.0, 0.0),
             LlamaSampler::top_p(top_p, 1),
             LlamaSampler::temp(temp),
             LlamaSampler::dist(seed),
@@ -406,6 +410,9 @@ struct StreamState {
     /// accumulated in `total` (for stop-sequence checking) but NOT
     /// forwarded to the consumer.
     in_think: bool,
+    /// `true` once a `</think>` has been consumed. Prevents
+    /// re-matching the old `<think>` tag on subsequent tokens.
+    think_done: bool,
 }
 
 struct PieceOutcome {
@@ -424,6 +431,7 @@ impl StreamState {
             total: String::new(),
             stops: stops.into_iter().filter(|s| !s.is_empty()).collect(),
             in_think: false,
+            think_done: false,
         }
     }
 
@@ -435,7 +443,7 @@ impl StreamState {
         // Qwen 3 may emit <think>…</think> at the start of the
         // reply.  We suppress these blocks entirely so the consumer
         // never sees chain-of-thought reasoning.
-        if !self.in_think {
+        if !self.in_think && !self.think_done {
             if let Some(idx) = self.total.find("<think>") {
                 // Emit whatever was before <think>, then enter
                 // suppression mode.
@@ -449,6 +457,7 @@ impl StreamState {
                 if let Some(end) = self.total.find("</think>") {
                     let resume = end + "</think>".len();
                     self.in_think = false;
+                    self.think_done = true;
                     let after = if resume < self.total.len() {
                         self.total[resume..].to_string()
                     } else {
@@ -462,11 +471,12 @@ impl StreamState {
                     stop_hit: false,
                 };
             }
-        } else {
+        } else if self.in_think {
             // Still inside <think> — check for </think>
             if let Some(end) = self.total.find("</think>") {
                 let resume = end + "</think>".len();
                 self.in_think = false;
+                self.think_done = true;
                 let delta = if resume < self.total.len() {
                     self.total[resume..].trim_start().to_string()
                 } else {
@@ -675,5 +685,21 @@ What's 2+2?<|im_end|>
         let o = s.push_piece("answer<|im_end|>junk");
         assert!(o.stop_hit);
         assert_eq!(o.delta, "answer");
+    }
+
+    #[test]
+    fn stream_state_tokens_after_think_block_are_incremental() {
+        // Regression: after a think block ended, subsequent tokens
+        // would re-match the old <think> tag in `total` and emit
+        // cumulative text instead of incremental deltas.
+        let mut s = StreamState::new(vec!["<|im_end|>".into()]);
+        let _ = s.push_piece("<think>internal reasoning</think>");
+        let o1 = s.push_piece("En");
+        assert_eq!(o1.delta, "En");
+        let o2 = s.push_piece(" el");
+        assert_eq!(o2.delta, " el");
+        let o3 = s.push_piece(" momento");
+        assert_eq!(o3.delta, " momento");
+        assert!(!o3.stop_hit);
     }
 }

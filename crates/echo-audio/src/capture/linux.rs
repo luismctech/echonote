@@ -100,7 +100,10 @@ fn enumerate_monitor_devices() -> Result<Vec<DeviceInfo>, DomainError> {
 
     let mut monitors = Vec::new();
     for dev in devices {
-        let name = dev.name().unwrap_or_else(|_| "<unnamed>".to_string());
+        let name = dev
+            .description()
+            .map(|d| d.name().to_string())
+            .unwrap_or_else(|_| "<unnamed>".to_string());
         if is_monitor_device(&name) {
             monitors.push(DeviceInfo {
                 id: name.clone(),
@@ -128,7 +131,10 @@ fn pick_monitor_device(host: &cpal::Host, device_id: Option<&str>) -> Result<Dev
 
     let mut fallback: Option<Device> = None;
     for dev in devices {
-        let name = dev.name().unwrap_or_default();
+        let name = dev
+            .description()
+            .map(|d| d.name().to_string())
+            .unwrap_or_default();
         if !is_monitor_device(&name) {
             continue;
         }
@@ -200,10 +206,13 @@ fn start_capture(spec: &CaptureSpec) -> Result<StartedStream, DomainError> {
     let host = cpal::default_host();
 
     let device = pick_monitor_device(&host, spec.device_id.as_deref())?;
-    let device_name = device.name().unwrap_or_else(|_| "<unnamed>".to_string());
+    let device_name = device
+        .description()
+        .map(|d| d.name().to_string())
+        .unwrap_or_else(|_| "<unnamed>".to_string());
     let supported = pick_config(&device, spec.preferred_format)?;
     let format = AudioFormat {
-        sample_rate_hz: supported.sample_rate().0,
+        sample_rate_hz: supported.sample_rate(),
         channels: supported.channels(),
     };
     let sample_format = supported.sample_format();
@@ -286,10 +295,10 @@ fn pick_config(
         ))
     })?;
 
-    let min = cfg.min_sample_rate().0;
-    let max = cfg.max_sample_rate().0;
+    let min = cfg.min_sample_rate();
+    let max = cfg.max_sample_rate();
     let target = preferred.sample_rate_hz.clamp(min, max);
-    Ok(cfg.with_sample_rate(cpal::SampleRate(target)))
+    Ok(cfg.with_sample_rate(target))
 }
 
 fn run_audio_thread(

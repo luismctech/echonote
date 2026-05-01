@@ -40,6 +40,7 @@
 //! once we have real-world adherence metrics.
 
 use std::collections::HashSet;
+use std::fmt::Write;
 use std::sync::Arc;
 
 use futures::stream::{self, BoxStream, StreamExt};
@@ -50,8 +51,10 @@ use uuid::Uuid;
 
 use echo_domain::{
     ChatAssistant, ChatMessage, ChatOptions, ChatRequest, ChatRole, DomainError, Meeting,
-    MeetingId, MeetingStore, Segment, SegmentId, Speaker,
+    MeetingId, MeetingStore, Note, Segment, SegmentId, Speaker,
 };
+
+use crate::sanitize::strip_chat_tokens;
 
 /// Maximum characters of transcript text fed to the model. Same budget
 /// as [`crate::SummarizeMeeting`] — a 32 k context Qwen tolerates ~6 k
@@ -233,9 +236,11 @@ impl AskAboutMeeting {
             return Err(AskAboutMeetingError::EmptyTranscript(meeting_id));
         }
 
+        let notes_block = render_notes(&meeting.notes);
         let language_instruction = language_instruction(meeting.summary.language.as_deref());
         let messages = build_messages(
             &transcript_block,
+            &notes_block,
             &language_instruction,
             &history,
             &question,
@@ -278,13 +283,21 @@ fn chat_options() -> ChatOptions {
 /// 3. `user`: the new question, untouched.
 fn build_messages(
     transcript_block: &str,
+    notes_block: &str,
     language_instruction: &str,
     history: &[ChatMessage],
     question: &str,
 ) -> Vec<ChatMessage> {
+    // Sanitize all user-controlled / ASR-generated text to prevent
+    // chat-template token injection (security: prompt injection).
+    let safe_transcript = strip_chat_tokens(transcript_block);
+    let safe_notes = strip_chat_tokens(notes_block);
+    let safe_question = strip_chat_tokens(question);
+
     let mut out = Vec::with_capacity(history.len().min(MAX_HISTORY_TURNS) + 2);
     out.push(ChatMessage::system(build_system_prompt(
-        transcript_block,
+        &safe_transcript,
+        &safe_notes,
         language_instruction,
     )));
 
@@ -301,14 +314,18 @@ fn build_messages(
     };
     // We drop any prior `system` message in the history defensively —
     // the use case owns the system prompt and re-injects it on every
-    // turn so transcript edits propagate.
+    // turn so transcript edits propagate. Also strip chat-template
+    // tokens from history content to prevent injection via prior turns.
     out.extend(
         trimmed_history
             .iter()
             .filter(|m| m.role != ChatRole::System)
-            .cloned(),
+            .map(|m| ChatMessage {
+                role: m.role,
+                content: strip_chat_tokens(&m.content),
+            }),
     );
-    out.push(ChatMessage::user(question.to_string()));
+    out.push(ChatMessage::user(safe_question));
     out
 }
 
@@ -319,13 +336,38 @@ fn build_messages(
 ///    start of every line so the model can copy them when citing.
 /// 3. The citation contract, restated in both English and Spanish so
 ///    multilingual instructs do not "translate it away".
-fn build_system_prompt(transcript_block: &str, language_instruction: &str) -> String {
+fn build_system_prompt(
+    transcript_block: &str,
+    notes_block: &str,
+    language_instruction: &str,
+) -> String {
+    let notes_section = if notes_block.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\n\n\
+             The user also took the following notes during the meeting. \
+             Each note has a timestamp indicating when it was written. \
+             You can reference these notes when answering questions.\n\
+             \n\
+             Notes:\n\
+             ---\n\
+             {notes_block}\n\
+             ---"
+        )
+    };
+
     format!(
         "You are EchoNote's meeting assistant. {language_instruction}\n\
          \n\
          You will answer questions about the meeting transcript shown \
-         below. Every line is prefixed with `[seg:UUID]` — that UUID is \
-         the stable identifier of the corresponding transcript segment.\n\
+         below. Every line is prefixed with `[seg:UUID]` followed by a \
+         timestamp in `(mm:ss)` format — that UUID is the stable \
+         identifier of the corresponding transcript segment, and the \
+         timestamp is the moment it was spoken.\n\
+         \
+         When the user asks WHEN something was said, include the \
+         timestamp in your answer (e.g. 'at 2:35').\n\
          \n\
          CITATION CONTRACT (mandatory):\n\
          - For every factual claim you make, cite the segment(s) it \
@@ -348,7 +390,7 @@ fn build_system_prompt(transcript_block: &str, language_instruction: &str) -> St
          Transcript:\n\
          ---\n\
          {transcript_block}\n\
-         ---"
+         ---{notes_section}"
     )
 }
 
@@ -402,10 +444,42 @@ fn render_transcript_with_citations(meeting: &Meeting) -> String {
     format!("{head}\n[… (transcript truncated for length) …]\n{tail}")
 }
 
+/// Render the user's notes as a block of timestamped lines.
+///
+/// Format per note:
+/// ```text
+/// (mm:ss) note text
+/// ```
+fn render_notes(notes: &[Note]) -> String {
+    if notes.is_empty() {
+        return String::new();
+    }
+    let mut buf = String::new();
+    for note in notes {
+        let text = note.text.trim();
+        if text.is_empty() {
+            continue;
+        }
+        if !buf.is_empty() {
+            buf.push('\n');
+        }
+        let secs = note.timestamp_ms / 1000;
+        let mm = secs / 60;
+        let ss = secs % 60;
+        write!(buf, "({mm}:{ss:02}) {text}").expect("write to String");
+    }
+    buf
+}
+
 fn push_segment_line(buf: &mut String, seg: &Segment, label: &str, text: &str) {
     buf.push_str(CITE_OPEN);
     buf.push_str(&seg.id.0.to_string());
     buf.push_str("] ");
+    // Timestamp in mm:ss so the model can reference when things were said.
+    let secs = seg.start_ms / 1000;
+    let mm = secs / 60;
+    let ss = secs % 60;
+    write!(buf, "({mm}:{ss:02}) ").expect("write to String");
     buf.push_str(label);
     buf.push_str(": ");
     buf.push_str(text);
@@ -600,6 +674,20 @@ mod tests {
         async fn rename_meeting(&self, _: MeetingId, _: &str) -> Result<bool, DomainError> {
             unreachable!()
         }
+        async fn add_note(
+            &self,
+            _: MeetingId,
+            _: &str,
+            _: u32,
+        ) -> Result<echo_domain::Note, DomainError> {
+            unreachable!()
+        }
+        async fn list_notes(&self, _: MeetingId) -> Result<Vec<echo_domain::Note>, DomainError> {
+            Ok(Vec::new())
+        }
+        async fn delete_note(&self, _: echo_domain::NoteId) -> Result<bool, DomainError> {
+            unreachable!()
+        }
     }
 
     /// Scripted chat. Produces a fixed token list (or an early
@@ -713,6 +801,7 @@ mod tests {
             input_format: AudioFormat::WHISPER,
             segments: segs,
             speakers: vec![],
+            notes: vec![],
         });
         (id, ids)
     }

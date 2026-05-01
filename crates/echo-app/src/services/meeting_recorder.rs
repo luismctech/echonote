@@ -79,6 +79,20 @@ impl MeetingRecorder {
         Self::new(store, "Meeting {date}")
     }
 
+    /// Look up the `MeetingId` assigned to a streaming session.
+    /// Returns `None` when the session is unknown (not yet started or
+    /// already cleaned up).
+    pub async fn meeting_id_for_session(
+        &self,
+        session_id: StreamingSessionId,
+    ) -> Option<MeetingId> {
+        self.sessions
+            .lock()
+            .await
+            .get(&session_id)
+            .map(|s| s.meeting_id)
+    }
+
     /// Feed one event. Returns the `MeetingId` associated with this
     /// session once it is known (i.e. after the first `Started`).
     pub async fn record(&self, event: &TranscriptEvent) -> Result<Option<MeetingId>, DomainError> {
@@ -299,6 +313,7 @@ mod tests {
                 input_format: params.input_format,
                 segments: vec![],
                 speakers: vec![],
+                notes: vec![],
             });
             Ok(summary)
         }
@@ -447,6 +462,20 @@ mod tests {
             unreachable!()
         }
         async fn rename_meeting(&self, _: MeetingId, _: &str) -> Result<bool, DomainError> {
+            unreachable!()
+        }
+        async fn add_note(
+            &self,
+            _: MeetingId,
+            _: &str,
+            _: u32,
+        ) -> Result<echo_domain::Note, DomainError> {
+            unreachable!()
+        }
+        async fn list_notes(&self, _: MeetingId) -> Result<Vec<echo_domain::Note>, DomainError> {
+            Ok(Vec::new())
+        }
+        async fn delete_note(&self, _: echo_domain::NoteId) -> Result<bool, DomainError> {
             unreachable!()
         }
     }

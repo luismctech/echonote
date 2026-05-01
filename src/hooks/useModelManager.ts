@@ -36,8 +36,8 @@ export function useModelManager(): UseModelManager {
   const [activeEmbedder, setActiveEmbedderState] = useState<string | null>(null);
   const mountedRef = useRef(true);
 
-  const fetchStatus = useCallback(() => {
-    setLoading(true);
+  const fetchStatus = useCallback((silent = false) => {
+    if (!silent) setLoading(true);
     setError(null);
     Promise.all([getModelStatus(), getActiveLlm(), getActiveAsr(), getActiveEmbedder()])
       .then(([result, activeLlmId, activeAsrId, activeEmbedderId]) => {
@@ -84,7 +84,7 @@ export function useModelManager(): UseModelManager {
             break;
           case "finished":
             setDownloading(null);
-            fetchStatus();
+            fetchStatus(true);
             break;
           case "failed":
             setDownloading(null);
@@ -122,7 +122,7 @@ export function useModelManager(): UseModelManager {
       setError(null);
       deleteModel(modelId)
         .then(() => {
-          if (mountedRef.current) fetchStatus();
+          if (mountedRef.current) fetchStatus(true);
         })
         .catch((err) => {
           if (mountedRef.current) {

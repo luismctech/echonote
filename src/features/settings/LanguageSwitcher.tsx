@@ -23,7 +23,7 @@ export function LanguageSwitcher() {
     <button
       type="button"
       onClick={cycle}
-      className="rounded-md border border-zinc-200 px-2 py-1 font-mono text-[11px] leading-none text-zinc-600 hover:bg-zinc-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+      className="rounded-md border px-2 py-1 font-mono text-ui-xs leading-none text-content-secondary hover:bg-surface-sunken"
       title={t("settings.switchLanguage")}
     >
       {i18n.language.toUpperCase()}

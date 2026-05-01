@@ -35,6 +35,7 @@ pub use ports::vad::{Vad, VoiceState};
 
 pub use entities::custom_template::{CustomTemplate, CustomTemplateId};
 pub use entities::meeting::{Meeting, MeetingId, MeetingSearchHit, MeetingSummary};
+pub use entities::note::{Note, NoteId};
 pub use entities::segment::{Segment, SegmentId};
 pub use entities::speaker::{Speaker, SpeakerId};
 pub use entities::streaming::{StreamingOptions, StreamingSessionId, TranscriptEvent};

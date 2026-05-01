@@ -13,6 +13,16 @@ use echo_domain::{CustomTemplate, CustomTemplateId};
 
 use super::AppState;
 
+/// Hard ceiling on the number of custom templates a user can create.
+/// Prevents unbounded growth of the JSON file on disk.
+const MAX_TEMPLATES: usize = 50;
+
+/// Maximum length (in chars) for a template name.
+const MAX_NAME_LEN: usize = 200;
+
+/// Maximum length (in chars) for a template prompt.
+const MAX_PROMPT_LEN: usize = 10_000;
+
 /// Path to the custom templates JSON file.
 fn templates_path(state: &AppState) -> std::path::PathBuf {
     state.data_root.join("custom_templates.json")
@@ -83,6 +93,18 @@ pub fn create_custom_template(
             "template prompt cannot be empty".to_string(),
         ));
     }
+    if name.len() > MAX_NAME_LEN {
+        return Err(IpcError::new(
+            ErrorCode::InvalidInput,
+            format!("template name exceeds {MAX_NAME_LEN} characters"),
+        ));
+    }
+    if prompt.len() > MAX_PROMPT_LEN {
+        return Err(IpcError::new(
+            ErrorCode::InvalidInput,
+            format!("template prompt exceeds {MAX_PROMPT_LEN} characters"),
+        ));
+    }
 
     let template = CustomTemplate {
         id: CustomTemplateId::new(),
@@ -91,6 +113,12 @@ pub fn create_custom_template(
     };
 
     let mut templates = read_templates(&state)?;
+    if templates.len() >= MAX_TEMPLATES {
+        return Err(IpcError::new(
+            ErrorCode::InvalidInput,
+            format!("maximum number of custom templates ({MAX_TEMPLATES}) reached"),
+        ));
+    }
     templates.push(template.clone());
     write_templates(&state, &templates)?;
 
@@ -118,6 +146,18 @@ pub fn update_custom_template(
         return Err(IpcError::new(
             ErrorCode::InvalidInput,
             "template prompt cannot be empty".to_string(),
+        ));
+    }
+    if name.len() > MAX_NAME_LEN {
+        return Err(IpcError::new(
+            ErrorCode::InvalidInput,
+            format!("template name exceeds {MAX_NAME_LEN} characters"),
+        ));
+    }
+    if prompt.len() > MAX_PROMPT_LEN {
+        return Err(IpcError::new(
+            ErrorCode::InvalidInput,
+            format!("template prompt exceeds {MAX_PROMPT_LEN} characters"),
         ));
     }
 

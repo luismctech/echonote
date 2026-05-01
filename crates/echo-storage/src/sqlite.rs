@@ -13,8 +13,8 @@ use uuid::Uuid;
 
 use echo_domain::{
     AudioFormat, CreateMeeting, DomainError, FinalizeMeeting, Meeting, MeetingId, MeetingSearchHit,
-    MeetingStore, MeetingSummary, Segment, SegmentId, Speaker, SpeakerId, Summary, SummaryContent,
-    SummaryId,
+    MeetingStore, MeetingSummary, Note, NoteId, Segment, SegmentId, Speaker, SpeakerId, Summary,
+    SummaryContent, SummaryId,
 };
 
 /// Embedded migrations (`crates/echo-storage/migrations/`).
@@ -90,6 +90,17 @@ impl SqliteMeetingStore {
     /// can be unlinked on Windows.
     pub async fn close(&self) {
         self.pool.close().await;
+    }
+
+    /// Force a WAL checkpoint so all data is flushed to the main database
+    /// file. Must be called before any hard-exit (`_exit`, `process::exit`)
+    /// to prevent data loss.
+    pub async fn checkpoint(&self) -> Result<(), DomainError> {
+        sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
+            .execute(&self.pool)
+            .await
+            .map_err(|e| db_err(format!("WAL checkpoint failed: {e}")))?;
+        Ok(())
     }
 }
 
@@ -366,12 +377,14 @@ impl MeetingStore for SqliteMeetingStore {
         }
 
         let speakers = self.list_speakers(meeting_id).await?;
+        let notes = self.list_notes(meeting_id).await?;
 
         Ok(Some(Meeting {
             summary,
             input_format,
             segments,
             speakers,
+            notes,
         }))
     }
 
@@ -465,6 +478,10 @@ impl MeetingStore for SqliteMeetingStore {
             }
         }
         Ok(hits)
+    }
+
+    async fn checkpoint(&self) -> Result<(), DomainError> {
+        SqliteMeetingStore::checkpoint(self).await
     }
 
     async fn close(&self) {
@@ -577,6 +594,77 @@ impl MeetingStore for SqliteMeetingStore {
             content,
         }))
     }
+
+    async fn add_note(
+        &self,
+        meeting_id: MeetingId,
+        text: &str,
+        timestamp_ms: u32,
+    ) -> Result<Note, DomainError> {
+        let id = NoteId::new();
+        let created_at = OffsetDateTime::now_utc()
+            .format(&Rfc3339)
+            .map_err(|e| db_err(format!("format note created_at: {e}")))?;
+
+        sqlx::query(
+            r#"INSERT INTO notes (id, meeting_id, text, timestamp_ms, created_at)
+               VALUES (?, ?, ?, ?, ?)"#,
+        )
+        .bind(id.0.to_string())
+        .bind(meeting_id.to_string())
+        .bind(text)
+        .bind(i64::from(timestamp_ms))
+        .bind(&created_at)
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx("add note"))?;
+
+        debug!(meeting.id = %meeting_id, note.id = %id, "note added");
+
+        Ok(Note {
+            id,
+            meeting_id,
+            text: text.to_owned(),
+            timestamp_ms,
+            created_at,
+        })
+    }
+
+    async fn list_notes(&self, meeting_id: MeetingId) -> Result<Vec<Note>, DomainError> {
+        let rows = sqlx::query(
+            r#"SELECT id, text, timestamp_ms, created_at
+                 FROM notes
+                WHERE meeting_id = ?
+             ORDER BY timestamp_ms ASC"#,
+        )
+        .bind(meeting_id.to_string())
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sqlx("list notes"))?;
+
+        let mut notes = Vec::with_capacity(rows.len());
+        for row in rows {
+            let id_text: String = row.get(0);
+            notes.push(Note {
+                id: NoteId(parse_uuid(&id_text, "note")?),
+                meeting_id,
+                text: row.get(1),
+                timestamp_ms: u32::try_from(row.get::<i64, _>(2))
+                    .map_err(|e| db_err(format!("note timestamp_ms overflow: {e}")))?,
+                created_at: row.get(3),
+            });
+        }
+        Ok(notes)
+    }
+
+    async fn delete_note(&self, note_id: NoteId) -> Result<bool, DomainError> {
+        let result = sqlx::query("DELETE FROM notes WHERE id = ?")
+            .bind(note_id.0.to_string())
+            .execute(&self.pool)
+            .await
+            .map_err(map_sqlx("delete note"))?;
+        Ok(result.rows_affected() > 0)
+    }
 }
 
 impl SqliteMeetingStore {
@@ -637,21 +725,37 @@ fn row_to_summary(row: &sqlx::sqlite::SqliteRow) -> Result<MeetingSummary, Domai
 /// then wrap the survivor in double quotes, turning the input into
 /// the safe shape `"tok1" "tok2" "tok3"` (an implicit AND).
 ///
-/// HTML-escape a snippet from FTS5, preserving only `<mark>` and
-/// `</mark>` tags that we control. This prevents any stored text from
-/// being rendered as raw HTML when the frontend uses
-/// `dangerouslySetInnerHTML`.
+/// HTML-escape a snippet from FTS5, preserving only the `<mark>` /
+/// `</mark>` tags that **FTS5 itself** injected as highlight markers.
+///
+/// Problem with the naïve escape-then-restore approach: if the
+/// user-stored text literally contains the string `<mark>`, the old
+/// code would restore it as a real HTML tag — a stored-XSS vector.
+///
+/// Fix: replace the FTS5-injected markers with unique placeholders
+/// **before** HTML-escaping, then swap the placeholders with the real
+/// `<mark>` tags afterwards. The placeholders cannot appear in the
+/// original text because they contain NUL bytes.
 fn sanitize_fts_snippet(raw: &str) -> String {
-    // Step 1: escape all HTML-significant characters.
-    let escaped = raw
+    const OPEN_PH: &str = "\x00MARK_OPEN\x00";
+    const CLOSE_PH: &str = "\x00MARK_CLOSE\x00";
+
+    // Step 1: replace the real FTS5 markers with placeholders.
+    let with_placeholders = raw.replace("<mark>", OPEN_PH).replace("</mark>", CLOSE_PH);
+
+    // Step 2: HTML-escape everything (including any literal "<mark>"
+    // that was NOT an FTS5 marker — those were already consumed in
+    // step 1, so only user-authored `<mark>` survives to be escaped).
+    let escaped = with_placeholders
         .replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;");
-    // Step 2: restore only the FTS5 marker tags.
+
+    // Step 3: restore placeholders → real HTML.
     escaped
-        .replace("&lt;mark&gt;", "<mark>")
-        .replace("&lt;/mark&gt;", "</mark>")
+        .replace(OPEN_PH, "<mark>")
+        .replace(CLOSE_PH, "</mark>")
 }
 
 /// Returns `None` for empty / whitespace-only / all-stripped inputs

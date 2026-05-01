@@ -12,21 +12,21 @@ import type { Probe } from "../../types/view";
 export function HealthProbe({ probe, onClickVersion }: Readonly<{ probe: Probe; onClickVersion?: () => void }>) {
   const { t } = useTranslation();
   const base =
-    "flex items-center gap-1.5 rounded-md border px-2 py-1 font-mono text-[11px] leading-none whitespace-nowrap";
+    "flex items-center gap-1.5 rounded-md border px-2 py-1 font-mono text-ui-xs leading-none whitespace-nowrap";
   switch (probe.kind) {
     case "idle":
       return (
         <span
-          className={`${base} border-zinc-200 bg-zinc-50 text-zinc-500 dark:border-zinc-800 dark:bg-zinc-900`}
+          className={`${base} border bg-surface-sunken text-content-tertiary`}
         >
-          <span className="h-1.5 w-1.5 rounded-full bg-zinc-400" />
+          <span className="h-1.5 w-1.5 rounded-full bg-content-placeholder" />
           {t("health.warmingUp")}
         </span>
       );
     case "loading":
       return (
         <span
-          className={`${base} border-zinc-200 bg-zinc-50 text-zinc-500 dark:border-zinc-800 dark:bg-zinc-900`}
+          className={`${base} border bg-surface-sunken text-content-tertiary`}
         >
           <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-amber-400" />
           {t("health.probing")}

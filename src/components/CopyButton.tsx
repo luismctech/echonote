@@ -21,7 +21,7 @@ export function CopyButton({
     <button
       type="button"
       onClick={handleClick}
-      className="rounded-md p-1 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-700 dark:hover:bg-zinc-800 dark:hover:text-zinc-200"
+      className="rounded-md p-1 text-content-tertiary hover:bg-surface-inset hover:text-content-primary"
       title={title}
     >
       {copied ? (

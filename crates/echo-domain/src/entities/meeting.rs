@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
+use crate::entities::note::Note;
 use crate::entities::segment::Segment;
 use crate::entities::speaker::Speaker;
 use crate::ports::audio::AudioFormat;
@@ -113,6 +114,10 @@ pub struct Meeting {
     /// loadable without speakers.
     #[serde(default)]
     pub speakers: Vec<Speaker>,
+    /// User-created notes, ordered by `timestamp_ms`. Empty when
+    /// no notes have been added.
+    #[serde(default)]
+    pub notes: Vec<Note>,
 }
 
 #[cfg(test)]

@@ -73,11 +73,11 @@ fn recommend(ram_gb: u64, hw: &HardwareProfile) -> (ModelPick, Option<ModelPick>
                 confidence: "high".into(),
             },
             Some(ModelPick {
-                model_id: "llm-qwen3-8b".into(),
-                reason: "Fits within available memory with quantization".into(),
-                confidence: "medium".into(),
+                model_id: "llm-qwen3-4b".into(),
+                reason: "Only 2.5 GB on disk (~3.5 GB RAM) — leaves headroom for ASR and OS".into(),
+                confidence: "high".into(),
             }),
-            Some("With 8 GB RAM, avoid running ASR and LLM simultaneously.".into()),
+            Some("With 8 GB RAM, the 4B model is recommended to avoid memory pressure.".into()),
         ),
         10..=19 => {
             let asr = if hw.unified_memory && hw.cpu_cores >= 8 {

@@ -26,7 +26,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
-import { getSummary, summarizeMeeting, summarizeWithCustomTemplate } from "../ipc/client";
+import { getSummary, summarizeMeetingStream, summarizeWithCustomTemplate } from "../ipc/client";
 import { useIpcAction } from "../ipc/useIpcAction";
 import type { MeetingId } from "../types/meeting";
 import type { Summary, TemplateId } from "../types/summary";
@@ -41,9 +41,13 @@ export type UseMeetingSummary = {
   summary: Summary | null;
   loading: boolean;
   generating: boolean;
+  /** Accumulated text during streaming; empty when not streaming. */
+  streamingText: string;
   error: string | null;
   selectedTemplate: SelectedTemplate;
   setSelectedTemplate: (t: SelectedTemplate) => void;
+  includeNotes: boolean;
+  setIncludeNotes: (v: boolean) => void;
   generate: () => Promise<Summary | undefined>;
 };
 
@@ -51,11 +55,13 @@ export function useMeetingSummary(meetingId: MeetingId | null): UseMeetingSummar
   const [summary, setSummary] = useState<Summary | null>(null);
   const [loading, setLoading] = useState(false);
   const [generating, setGenerating] = useState(false);
+  const [streamingText, setStreamingText] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [selectedTemplate, setSelectedTemplate] = useState<SelectedTemplate>({
     kind: "builtin",
     id: "general",
   });
+  const [includeNotes, setIncludeNotes] = useState(true);
 
   const requestedRef = useRef<MeetingId | null>(null);
 
@@ -103,12 +109,7 @@ export function useMeetingSummary(meetingId: MeetingId | null): UseMeetingSummar
     };
   }, [meetingId]);
 
-  const { t } = useTranslation();
-
-  const generateBuiltinCall = useIpcAction(
-    t("errors.summaryFailed"),
-    summarizeMeeting,
-  );
+  const { t, i18n } = useTranslation();
 
   const generateCustomCall = useIpcAction(
     t("errors.summaryFailed"),
@@ -118,29 +119,61 @@ export function useMeetingSummary(meetingId: MeetingId | null): UseMeetingSummar
   const generate = useCallback(async (): Promise<Summary | undefined> => {
     if (!meetingId) return undefined;
     setGenerating(true);
+    setStreamingText("");
+    const lang = i18n.language;
     try {
       let fresh: Summary | undefined;
       if (selectedTemplate.kind === "custom") {
-        fresh = await generateCustomCall(meetingId, selectedTemplate.id);
+        // Custom templates use non-streaming path (no streaming command for custom yet).
+        fresh = await generateCustomCall(meetingId, selectedTemplate.id, includeNotes, lang);
       } else {
-        fresh = await generateBuiltinCall(meetingId, selectedTemplate.id);
+        // Built-in templates use streaming for progressive rendering.
+        fresh = await new Promise<Summary | undefined>((resolve, reject) => {
+          summarizeMeetingStream(
+            meetingId,
+            selectedTemplate.id,
+            includeNotes,
+            (event) => {
+              switch (event.kind) {
+                case "token":
+                  setStreamingText((prev) => prev + event.delta);
+                  break;
+                case "completed":
+                  resolve(event.summary);
+                  break;
+                case "failed":
+                  reject(new Error(event.error));
+                  break;
+              }
+            },
+            lang,
+          ).catch(reject);
+        });
       }
       if (fresh && requestedRef.current === meetingId) {
         setSummary(fresh);
       }
       return fresh;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      setError(message);
+      return undefined;
     } finally {
       setGenerating(false);
+      setStreamingText("");
     }
-  }, [meetingId, selectedTemplate, generateBuiltinCall, generateCustomCall]);
+  }, [meetingId, selectedTemplate, includeNotes, generateCustomCall, i18n.language]);
 
   return {
     summary,
     loading,
     generating,
+    streamingText,
     error,
     selectedTemplate,
     setSelectedTemplate,
+    includeNotes,
+    setIncludeNotes,
     generate,
   };
 }

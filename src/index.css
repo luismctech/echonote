@@ -2,12 +2,88 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ─── Design tokens from docs/DESIGN.md §4 ──────────────────────
+ * Colours are stored as space-separated R G B channels so Tailwind
+ * can inject <alpha-value> for opacity modifiers (bg-surface-base/60).
+ * Borders and shadows carry their own alpha and are used verbatim. */
+
+:root {
+  /* Surfaces */
+  --bg-base: 248 245 240;
+  --bg-elevated: 255 255 255;
+  --bg-sunken: 234 228 218;
+  --bg-inset: 222 214 200;
+
+  /* Content */
+  --text-primary: 22 20 16;
+  --text-secondary: 58 54 48;
+  --text-tertiary: 92 86 78;
+  --text-placeholder: 148 140 130;
+
+  /* Borders */
+  --border-subtle: rgba(22, 20, 16, 0.08);
+  --border-default: rgba(22, 20, 16, 0.18);
+  --border-strong: rgba(22, 20, 16, 0.32);
+
+  /* Accent — amber burnt */
+  --accent-50: 253 247 237;
+  --accent-100: 250 232 199;
+  --accent-400: 232 153 56;
+  --accent-600: 194 65 12;
+  --accent-700: 154 51 10;
+  --accent-900: 90 31 6;
+
+  /* Semantic */
+  --color-success: 79 122 60;
+  --color-warning: 184 134 11;
+  --color-danger: 156 42 40;
+  --color-info: 58 92 122;
+
+  /* Shadows — warm, lifted feel */
+  --shadow-sm:
+    0 1px 2px rgba(26, 24, 20, 0.04), 0 1px 3px rgba(26, 24, 20, 0.06);
+  --shadow-md:
+    0 2px 4px rgba(26, 24, 20, 0.04), 0 4px 12px rgba(26, 24, 20, 0.08);
+  --shadow-lg:
+    0 4px 8px rgba(26, 24, 20, 0.06), 0 12px 32px rgba(26, 24, 20, 0.12);
+  --shadow-xl:
+    0 8px 16px rgba(26, 24, 20, 0.08), 0 24px 48px rgba(26, 24, 20, 0.16);
+}
+
+.dark {
+  --bg-base: 16 18 27;
+  --bg-elevated: 24 26 38;
+  --bg-sunken: 10 12 20;
+  --bg-inset: 6 7 14;
+
+  --text-primary: 232 236 244;
+  --text-secondary: 168 176 196;
+  --text-tertiary: 118 126 150;
+  --text-placeholder: 68 76 100;
+
+  --border-subtle: rgba(200, 210, 235, 0.07);
+  --border-default: rgba(200, 210, 235, 0.14);
+  --border-strong: rgba(200, 210, 235, 0.26);
+
+  --accent-50: 40 32 22;
+  --accent-100: 68 48 28;
+  --accent-400: 232 153 56;
+  --accent-600: 242 165 82;
+  --accent-700: 247 186 124;
+  --accent-900: 250 216 172;
+
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.25), 0 1px 3px rgba(0, 0, 0, 0.35);
+  --shadow-md: 0 2px 4px rgba(0, 0, 0, 0.25), 0 4px 12px rgba(0, 0, 0, 0.4);
+  --shadow-lg: 0 4px 8px rgba(0, 0, 0, 0.3), 0 12px 32px rgba(0, 0, 0, 0.45);
+  --shadow-xl: 0 8px 16px rgba(0, 0, 0, 0.35), 0 24px 48px rgba(0, 0, 0, 0.55);
+}
+
+/* ─── Global resets ──────────────────────────────────────────── */
+
 /* Tauri runs in a single fixed window, so the app should fit the
  * viewport rather than scroll the body. We pin html/body/#root to
  * 100% height and disable overflow; the inner panes own their own
- * scroll regions instead. Without this, a too-tall right pane forces
- * the whole window to scroll vertically *and* the toaster (fixed to
- * the bottom-right) to drift out of view. */
+ * scroll regions instead. */
 html,
 body,
 #root {
@@ -15,13 +91,74 @@ body,
   overflow: hidden;
 }
 
-/* Selection: editorial, subtle. Final palette lands in Sprint 1. */
+/* Selection: editorial, warm. */
 ::selection {
-  background-color: rgb(24 24 27 / 0.1);
+  background-color: rgb(var(--accent-400) / 0.2);
 }
 
-@media (prefers-color-scheme: dark) {
-  ::selection {
-    background-color: rgb(244 244 245 / 0.15);
+/* ─── Checkbox: themed border ────────────────────────────────── */
+input[type="checkbox"] {
+  appearance: none;
+  width: 0.875rem;
+  height: 0.875rem;
+  border: 1.5px solid var(--border-strong);
+  border-radius: 3px;
+  background: transparent;
+  cursor: pointer;
+  flex-shrink: 0;
+  display: inline-grid;
+  place-content: center;
+}
+input[type="checkbox"]::before {
+  content: "";
+  width: 0.55rem;
+  height: 0.55rem;
+  transform: scale(0);
+  transition: transform 100ms ease-in-out;
+  clip-path: polygon(14% 44%, 0% 65%, 50% 100%, 100% 16%, 80% 0%, 43% 62%);
+  background: white;
+}
+input[type="checkbox"]:checked {
+  background: rgb(var(--accent-600));
+  border-color: rgb(var(--accent-600));
+}
+input[type="checkbox"]:checked::before {
+  transform: scale(1);
+}
+input[type="checkbox"]:focus-visible {
+  outline: 2px solid rgb(var(--accent-500) / 0.5);
+  outline-offset: 1px;
+}
+
+/* ─── Motion: reduced-motion override ────────────────────────── */
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-rec-breathe,
+  .animate-rec-ring,
+  .animate-text-appear,
+  .animate-progress-glow,
+  .animate-overlay-in,
+  .animate-overlay-out,
+  .animate-modal-in,
+  .animate-modal-out,
+  .animate-slide-in,
+  .animate-ctx-in {
+    animation: none !important;
+  }
+  .animate-text-appear {
+    opacity: 1 !important;
+  }
+}
+
+/* ─── Typography utilities ───────────────────────────────────── */
+
+@layer components {
+  /* Section header — reusable across panels */
+  .type-section-header {
+    @apply text-ui-xs font-semibold uppercase tracking-wide text-content-secondary;
+  }
+  /* Label — form fields, metadata captions */
+  .type-label {
+    @apply text-ui-xs font-medium text-content-tertiary;
   }
 }

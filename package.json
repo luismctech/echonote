@@ -1,7 +1,7 @@
 {
   "name": "echonote",
   "private": true,
-  "version": "0.3.8",
+  "version": "0.4.0",
   "description": "Private, local-first meeting transcription and AI summaries.",
   "type": "module",
   "packageManager": "pnpm@10.13.1",
@@ -17,8 +17,10 @@
     "tauri:build": "tauri build"
   },
   "dependencies": {
+    "@fontsource/inter": "^5.2.8",
+    "@fontsource/jetbrains-mono": "^5.2.8",
     "@tanstack/react-virtual": "^3.13.24",
-    "@tauri-apps/api": "^2.1.1",
+    "@tauri-apps/api": "^2.11.0",
     "@tauri-apps/plugin-dialog": "^2.7.0",
     "@tauri-apps/plugin-global-shortcut": "^2.3.1",
     "@tauri-apps/plugin-process": "^2.3.1",
@@ -35,13 +37,13 @@
     "@types/node": "^25.6.0",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
-    "@vitejs/plugin-react": "^4.3.3",
+    "@vitejs/plugin-react": "^5.2.0",
     "autoprefixer": "^10.4.20",
     "postcss": "^8.4.49",
     "tailwindcss": "^3.4.15",
-    "typescript": "^5.6.3",
-    "vite": "^6.4.2",
-    "vitest": "^3.2.4"
+    "typescript": "^6.0.3",
+    "vite": "^8.0.10",
+    "vitest": "^4.1.5"
   },
   "engines": {
     "node": ">=20.0.0",

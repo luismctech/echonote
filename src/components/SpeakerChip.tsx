@@ -21,7 +21,7 @@ export function SpeakerChip({
 }) {
   const { t } = useTranslation();
   const palette = paletteFor(slot);
-  const sizing = compact ? "px-1.5 py-0 text-[10px]" : "px-2 py-0.5 text-xs";
+  const sizing = compact ? "px-1.5 py-0 text-micro" : "px-2 py-0.5 text-ui-sm";
   return (
     <span
       className={`inline-flex shrink-0 items-center rounded-full font-medium tabular-nums ring-1 ring-inset ${palette.bg} ${palette.text} ${palette.ring} ${sizing}`}

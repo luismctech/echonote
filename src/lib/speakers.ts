@@ -10,7 +10,7 @@
  * future electron viewer, …) can reuse it.
  *
  * Colours are picked from the Tailwind palette so they read well
- * against both the light (`bg-zinc-50`) and dark (`bg-zinc-900/60`)
+ * against both the light (`bg-surface-sunken`) and dark transcript
  * transcript backgrounds without per-theme overrides.
  */
 

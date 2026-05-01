@@ -12,6 +12,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs, rust_2018_idioms, clippy::all)]
 
+pub mod sanitize;
 pub mod services;
 pub mod use_cases;
 
@@ -20,7 +21,7 @@ pub use services::wer::{compute as compute_wer, normalize as normalize_for_wer, 
 pub use use_cases::chat_with_transcript::{
     AskAboutMeeting, AskAboutMeetingError, AskAboutMeetingEvent,
 };
-pub use use_cases::generate_summary::{SummarizeMeeting, SummarizeMeetingError};
+pub use use_cases::generate_summary::{SummarizeEvent, SummarizeMeeting, SummarizeMeetingError};
 pub use use_cases::rename_speaker::{RenameSpeaker, RenameSpeakerError, MAX_LABEL_CHARS};
 pub use use_cases::start_recording::{FrameSink, RecordToSink, RecordingReport};
 pub use use_cases::streaming::{StreamingError, StreamingHandle, StreamingPipeline};

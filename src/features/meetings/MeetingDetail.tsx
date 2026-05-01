@@ -1,19 +1,26 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { ResizableHandle } from "../../components/ResizableHandle";
 import { CopyButton } from "../../components/CopyButton";
+import { ResizableHandleVertical } from "../../components/ResizableHandleVertical";
 
+import { useChat } from "../../hooks/useChat";
 import { useMeetingSummary } from "../../hooks/useMeetingSummary";
 import { LogoAnimated } from "../../components/Logo";
 import { formatDate, formatDurationMs, formatTimestamp } from "../../lib/format";
 import { displayName, indexSpeakers } from "../../lib/speakers";
+import type { Note, NoteId } from "../../types/meeting";
+import type { SegmentId } from "../../types/chat";
 import type { SpeakerId } from "../../types/speaker";
 import type { MainView } from "../../types/view";
+import { ChatPanel } from "./ChatPanel";
 import { ExportButton } from "./ExportButton";
+import { NotesPanel } from "./NotesPanel";
 import { SegmentRow } from "./SegmentRow";
 import { SpeakersPanel } from "./SpeakersPanel";
 import { SummaryPanel } from "./SummaryPanel";
+
+type DetailTab = "summary" | "transcript" | "chat";
 
 /** Inline-editable meeting title. Click to edit, Enter/blur to save. */
 function EditableTitle({
@@ -51,13 +58,13 @@ function EditableTitle({
     return (
       <button
         type="button"
-        className="group flex items-center gap-1.5 text-left text-base font-medium sm:text-lg"
+        className="group flex items-center gap-1.5 text-left text-[22px] font-semibold leading-tight tracking-tight"
         onClick={() => setEditing(true)}
         title={t("meeting.editTitle")}
       >
         <span>{value}</span>
         <svg
-          className="h-3.5 w-3.5 shrink-0 text-zinc-400 opacity-0 transition-opacity group-hover:opacity-100"
+          className="h-3.5 w-3.5 shrink-0 text-content-placeholder opacity-0 transition-opacity group-hover:opacity-100"
           viewBox="0 0 16 16"
           fill="currentColor"
         >
@@ -70,7 +77,7 @@ function EditableTitle({
   return (
     <input
       ref={inputRef}
-      className="w-full rounded border border-blue-400 bg-transparent px-1 text-base font-medium outline-none ring-1 ring-blue-400 sm:text-lg"
+      className="w-full rounded border border-blue-400 bg-transparent px-1 text-[22px] font-semibold leading-tight tracking-tight outline-none ring-1 ring-blue-400"
       value={draft}
       onChange={(e) => setDraft(e.target.value)}
       onBlur={commit}
@@ -90,49 +97,46 @@ export function MeetingDetail({
   view,
   onRenameSpeaker,
   onRenameMeeting,
-}: {
+}: Readonly<{
   view: Extract<MainView, { kind: "meeting" }>;
   onRenameSpeaker: (
     speakerId: SpeakerId,
     label: string | null,
   ) => Promise<void>;
   onRenameMeeting: (title: string) => Promise<void>;
-}) {
+}>) {
   const meetingId = view.kind === "meeting" ? view.id : null;
   const summaryState = useMeetingSummary(meetingId);
+  const chat = useChat(meetingId);
   const { t } = useTranslation();
   const scrollRef = useRef<HTMLDivElement>(null);
   const splitRef = useRef<HTMLDivElement>(null);
-  const summaryRef = useRef<HTMLDivElement>(null);
 
-  /** Fraction of the split container given to the summary (top panel). */
-  const MIN_RATIO = 1 / 3;
-  const MAX_RATIO = 2 / 3;
-  const [summaryRatio, setSummaryRatio] = useState(0.5);
-  /** Track whether the user has manually dragged the handle. */
-  const [userResized, setUserResized] = useState(false);
-  const clampedRatio = Math.min(MAX_RATIO, Math.max(MIN_RATIO, summaryRatio));
-  const handleRatioChange = useCallback(
-    (r: number) => {
-      const clamped = Math.min(MAX_RATIO, Math.max(MIN_RATIO, r));
-      setUserResized(true);
-      setSummaryRatio(clamped);
-    },
-    [],
-  );
+  const [activeTab, setActiveTab] = useState<DetailTab>("transcript");
 
-  // Reset to auto-fit when the summary is regenerated.
-  const summaryId = summaryState.summary?.id;
-  useEffect(() => {
-    setUserResized(false);
-    setSummaryRatio(0.5);
-  }, [summaryId]);
+  // Resizable split ratio for notes | transcript
+  const SPLIT_MIN = 0.25;
+  const SPLIT_MAX = 0.65;
+  const [splitRatio, setSplitRatio] = useState(0.5);
+  const clampedSplit = Math.min(SPLIT_MAX, Math.max(SPLIT_MIN, splitRatio));
+  const handleSplitChange = useCallback((r: number) => {
+    setSplitRatio(Math.min(SPLIT_MAX, Math.max(SPLIT_MIN, r)));
+  }, []);
 
   const m = view.meeting;
   const speakerIndex = useMemo(
     () => (m ? indexSpeakers(m.speakers) : new Map()),
     [m?.speakers],
   );
+
+  // Local notes state allows optimistic deletes without refetching.
+  const [notes, setNotes] = useState<Note[]>(m?.notes ?? []);
+  useEffect(() => {
+    setNotes(m?.notes ?? []);
+  }, [m?.notes]);
+  const handleNoteDeleted = useCallback((noteId: NoteId) => {
+    setNotes((prev) => prev.filter((n) => n.id !== noteId));
+  }, []);
 
   const getTranscriptText = useCallback(() => {
     if (!m) return "";
@@ -153,119 +157,179 @@ export function MeetingDetail({
     overscan: 8,
   });
 
+  const handleScrollToSegment = useCallback((segmentId: SegmentId) => {
+    if (!m) return;
+    const idx = m.segments.findIndex((s) => s.id === segmentId);
+    if (idx >= 0) {
+      setActiveTab("transcript");
+      // Small delay so the tab renders the virtualizer first
+      requestAnimationFrame(() => virtualizer.scrollToIndex(idx, { align: "center" }));
+    }
+  }, [m, virtualizer]);
+
   if (view.loading) {
     return (
       <div className="flex flex-col items-center justify-center gap-3 py-12">
         <LogoAnimated size={40} className="opacity-40" />
-        <p className="text-sm text-zinc-500">{t("meeting.loading")}</p>
+        <p className="text-ui-md text-content-tertiary">{t("meeting.loading")}</p>
       </div>
     );
   }
   if (view.error || !m) {
     return (
-      <p className="text-sm text-amber-700 dark:text-amber-400">
+      <p className="text-ui-md text-amber-700 dark:text-amber-400">
         {view.error ?? t("meeting.unavailable")}
       </p>
     );
   }
 
-  // Compute summary panel sizing: auto-fit by default, fixed ratio
-  // after the user drags the resize handle.
-  let summaryPanelStyle: React.CSSProperties | undefined;
-  if (summaryState.summary && userResized) {
-    summaryPanelStyle = { flex: `0 0 ${(clampedRatio * 100).toFixed(1)}%` };
-  } else if (summaryState.summary) {
-    summaryPanelStyle = { flex: "0 1 auto", maxHeight: `${(MAX_RATIO * 100).toFixed(0)}%` };
-  }
+  const tabs: { id: DetailTab; label: string; count?: number }[] = [
+    { id: "transcript", label: t("meeting.transcript"), count: m.segments.length },
+    { id: "summary", label: t("summary.label") },
+    { id: "chat", label: t("chat.label") },
+  ];
 
   return (
     <>
+      {/* ── Header ── */}
       <header className="flex flex-shrink-0 items-start justify-between gap-2">
         <div className="flex flex-col gap-1">
           <EditableTitle value={m.title} onCommit={onRenameMeeting} />
-          <p className="text-xs text-zinc-500 dark:text-zinc-400">
-            {formatDate(m.startedAt)} · {formatDurationMs(m.durationMs)} ·{" "}
-            {m.language ?? "?"} · {m.segmentCount} {t("meeting.segments")}
-          </p>
-          <p className="font-mono text-[10px] text-zinc-400">{m.id}</p>
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-ui-sm text-content-tertiary">
+            <span>{formatDate(m.startedAt)}</span>
+            <span>·</span>
+            <span>{formatDurationMs(m.durationMs)}</span>
+            <span>·</span>
+            <span>{m.language ?? "?"}</span>
+            <span>·</span>
+            <span>{m.segmentCount} {t("meeting.segments")}</span>
+          </div>
         </div>
         <ExportButton meetingId={m.id} title={m.title} />
       </header>
 
-      <div className="flex min-h-0 flex-1 flex-col gap-3">
-        {m.speakers.length > 0 && (
-          <SpeakersPanel speakers={m.speakers} onRename={onRenameSpeaker} />
+      {/* ── Speakers (inline, compact) ── */}
+      {m.speakers.length > 0 && (
+        <SpeakersPanel speakers={m.speakers} segments={m.segments} onRename={onRenameSpeaker} />
+      )}
+
+      {/* ── Tab bar ── */}
+      <nav className="flex gap-1 border-b border-subtle" aria-label="Meeting sections">
+        {tabs.map((tab) => (
+          <button
+            key={tab.id}
+            type="button"
+            onClick={() => setActiveTab(tab.id)}
+            className={`relative px-3 py-2 text-ui-sm font-medium transition-colors ${
+              activeTab === tab.id
+                ? "text-content-primary"
+                : "text-content-tertiary hover:text-content-secondary"
+            }`}
+          >
+            {tab.label}
+            {tab.count != null && tab.count > 0 && (
+              <span className="ml-1.5 inline-flex min-w-[18px] items-center justify-center rounded-full bg-surface-sunken px-1 text-micro font-medium tabular-nums text-content-tertiary">
+                {tab.count}
+              </span>
+            )}
+            {activeTab === tab.id && (
+              <span className="absolute inset-x-0 -bottom-px h-0.5 rounded-full bg-content-primary" />
+            )}
+          </button>
+        ))}
+      </nav>
+
+      {/* ── Tab content ── */}
+      <div className="flex min-h-0 flex-1 flex-col">
+        {activeTab === "summary" && (
+          <SummaryPanel state={summaryState} />
         )}
 
-        {/* Resizable split: Summary (top) + Transcript (bottom) */}
-        <div ref={splitRef} className="flex min-h-0 flex-1 flex-col">
-          {/* ── Summary (fixed ratio only when content exists) ── */}
-          <div
-            ref={summaryRef}
-            className="flex min-h-0 flex-col"
-            style={summaryPanelStyle}
-          >
-            <SummaryPanel state={summaryState} />
-          </div>
+        {activeTab === "transcript" && (
+          <div ref={splitRef} className="flex min-h-0 flex-1 flex-row">
+            {/* Notes panel (left) — only when notes exist */}
+            {notes.length > 0 && (
+              <>
+                <div
+                  className="flex min-h-0 min-w-0 flex-col overflow-y-auto"
+                  style={{ width: `${clampedSplit * 100}%` }}
+                >
+                  <NotesPanel notes={notes} onDeleted={handleNoteDeleted} />
+                </div>
+                <ResizableHandleVertical
+                  containerRef={splitRef}
+                  ratio={clampedSplit}
+                  onRatioChange={handleSplitChange}
+                />
+              </>
+            )}
 
-          {summaryState.summary && (
-            <ResizableHandle
-              containerRef={splitRef}
-              ratio={clampedRatio}
-              onRatioChange={handleRatioChange}
-            />
-          )}
-
-          {/* ── Transcript (fills remaining space) ── */}
-          <div className="flex min-h-0 flex-1 flex-col">
-            <div className="flex items-center justify-between px-1 py-0.5">
-              <span className="text-xs font-medium uppercase tracking-wide text-zinc-400">
-                {t("meeting.transcript")}
-              </span>
-              {m.segments.length > 0 && (
-                <CopyButton getText={getTranscriptText} title={t("meeting.copyTranscript")} />
-              )}
-            </div>
+            {/* Transcript panel (right, or full-width if no notes) */}
             <div
-              ref={scrollRef}
-              className="min-h-0 flex-1 overflow-y-auto rounded-md border border-zinc-100 bg-zinc-50 p-3 text-sm leading-relaxed dark:border-zinc-900 dark:bg-zinc-900"
+              className="flex min-h-0 min-w-0 flex-1 flex-col gap-1"
+              style={notes.length > 0 ? { width: `${(1 - clampedSplit) * 100}%` } : undefined}
             >
-          {m.segments.length === 0 ? (
-            <p className="text-zinc-400">{t("meeting.noSegments")}</p>
-          ) : (
-            <ol
-              className="relative w-full"
-              style={{ height: `${virtualizer.getTotalSize()}px` }}
-            >
-              {virtualizer.getVirtualItems().map((vItem) => {
-                const seg = m.segments[vItem.index]!;
-                const speaker = seg.speakerId
-                  ? speakerIndex.get(seg.speakerId)
-                  : undefined;
-                return (
-                  <li
-                    key={seg.id}
-                    data-segment-id={seg.id}
-                    className="absolute left-0 top-0 flex w-full items-baseline gap-3 rounded-sm"
-                    style={{ transform: `translateY(${vItem.start}px)` }}
-                    data-index={vItem.index}
-                    ref={virtualizer.measureElement}
+              <div className="flex items-center justify-between px-1 py-1">
+                <span className="text-ui-xs font-medium uppercase tracking-wide text-content-placeholder">
+                  {t("meeting.transcript")}
+                </span>
+                {m.segments.length > 0 && (
+                  <CopyButton getText={getTranscriptText} title={t("meeting.copyTranscript")} />
+                )}
+              </div>
+              <div
+                ref={scrollRef}
+                className="min-h-0 flex-1 overflow-y-auto rounded-md border border-subtle bg-surface-sunken p-3 text-ui-md leading-relaxed"
+              >
+                {m.segments.length === 0 ? (
+                  <p className="text-content-placeholder">{t("meeting.noSegments")}</p>
+                ) : (
+                  <ol
+                    className="relative w-full"
+                    style={{ height: `${virtualizer.getTotalSize()}px` }}
                   >
-                    <SegmentRow
-                      startMs={seg.startMs}
-                      text={seg.text}
-                      speaker={speaker}
-                      noSpeechLabel={t("meeting.noSpeech")}
-                    />
-                  </li>
-                );
-              })}
-            </ol>
-          )}
-        </div>
-        </div>
-        {/* ── end split ── */}
-        </div>
+                    {virtualizer.getVirtualItems().map((vItem) => {
+                      const seg = m.segments[vItem.index]!;
+                      const speaker = seg.speakerId
+                        ? speakerIndex.get(seg.speakerId)
+                        : undefined;
+                      return (
+                        <li
+                          key={seg.id}
+                          data-segment-id={seg.id}
+                          className="absolute left-0 top-0 flex w-full items-baseline gap-3 rounded-sm"
+                          style={{ transform: `translateY(${vItem.start}px)` }}
+                          data-index={vItem.index}
+                          ref={virtualizer.measureElement}
+                        >
+                          <SegmentRow
+                            startMs={seg.startMs}
+                            text={seg.text}
+                            speaker={speaker}
+                            noSpeechLabel={t("meeting.noSpeech")}
+                          />
+                        </li>
+                      );
+                    })}
+                  </ol>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {activeTab === "chat" && (
+          <div className="flex min-h-0 flex-1 flex-col">
+            <ChatPanel
+              chat={chat}
+              onScrollToSegment={handleScrollToSegment}
+              segmentTimestamps={m.segments.reduce<Record<string, number>>((acc, seg) => {
+                acc[seg.id] = seg.startMs;
+                return acc;
+              }, {})}
+            />
+          </div>
+        )}
       </div>
     </>
   );

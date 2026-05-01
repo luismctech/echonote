@@ -21,7 +21,7 @@ export const SegmentRow = memo(function SegmentRow({
 }: SegmentRowProps) {
   return (
     <>
-      <span className="w-12 shrink-0 font-mono text-xs tabular-nums text-zinc-500">
+      <span className="w-12 shrink-0 font-mono text-ui-sm tabular-nums text-content-tertiary">
         {formatTimestamp(startMs)}
       </span>
       {speaker && (
@@ -31,7 +31,7 @@ export const SegmentRow = memo(function SegmentRow({
           compact
         />
       )}
-      <span className="flex-1">{text.trim() || noSpeechLabel}</span>
+      <span className="flex-1 min-w-0 break-all">{text.trim() || noSpeechLabel}</span>
     </>
   );
 });

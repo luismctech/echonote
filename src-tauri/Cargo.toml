@@ -57,7 +57,7 @@ futures = { workspace = true }
 reqwest = { workspace = true }
 dirs = "6"
 keepawake = "0.6"
-sha2 = "0.10"
+sha2 = "0.11"
 scopeguard = "1"
 sysinfo = { version = "0.33", default-features = false, features = ["system"] }
 tauri-plugin-dialog = "2.7.0"

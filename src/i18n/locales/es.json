@@ -12,7 +12,9 @@
     "clearSearch": "Limpiar búsqueda",
     "noMeetings": "Sin reuniones aún. Pulsa Iniciar para grabar una.",
     "seg": "seg",
-    "deleteConfirm": "Eliminar {{title}}"
+    "deleteConfirm": "Eliminar {{title}}",
+    "open": "Abrir",
+    "delete": "Eliminar"
   },
   "search": {
     "failed": "Error en búsqueda:",
@@ -45,7 +47,13 @@
     "modelLoads": "el modelo se carga en el primer inicio",
     "silence": "silencio",
     "silenceRms": "silencio (rms={{rms}})",
-    "noSpeech": "[sin voz]"
+    "noSpeech": "[sin voz]",
+    "notePlaceholder": "Agrega una nota…",
+    "addNote": "Agregar",
+    "notes": "Notas",
+    "refineTranscript": "Afinando transcripción…",
+    "refineSpeakers": "Detectando speakers…",
+    "refineSummary": "Generando resumen…"
   },
   "health": {
     "warmingUp": "calentando…",
@@ -60,9 +68,12 @@
     "segments": "segmentos",
     "noSegments": "No hay segmentos guardados para esta reunión.",
     "noSpeech": "[sin voz]",
+    "notes": "Notas",
+    "deleteNote": "Eliminar nota",
     "transcript": "Transcripción",
     "copySummary": "Copiar resumen",
     "copyTranscript": "Copiar transcripción",
+    "copyNotes": "Copiar notas",
     "editTitle": "Clic para renombrar"
   },
   "export": {
@@ -85,6 +96,7 @@
     "generate": "Generar",
     "generating": "Generando…",
     "regenerate": "Regenerar",
+    "includeNotes": "Incluir notas",
     "unknown": "Plantilla desconocida. Intenta regenerar con una plantilla conocida.",
     "emptySummary": "[resumen vacío]",
     "sections": {
@@ -119,6 +131,8 @@
     "label": "Chat",
     "placeholder": "Pregunta sobre esta reunión…",
     "send": "Enviar",
+    "roleUser": "Tú",
+    "roleAssistant": "Echo",
     "noVerifiableCitations": "respuesta sin citas verificables",
     "scrollToSegment": "Ir al segmento {{id}}…",
     "noCitations": "Respuesta sin citas verificables",
@@ -128,15 +142,33 @@
     "title": "Modelos",
     "close": "Cerrar",
     "loading": "Cargando estado de modelos…",
-    "asr": "Reconocimiento de voz (Whisper)",
-    "llm": "Modelo de lenguaje (Resumen y Chat)",
-    "vad": "Detección de actividad vocal",
-    "embedder": "Embedder de hablantes",
-    "segmenter": "Segmentación de hablantes (pyannote)",
+    "sectionTranscription": "Transcripción de voz",
+    "sectionTranscriptionDesc": "Convierte audio en texto. Elige según tu idioma y la velocidad que necesites.",
+    "sectionSummaries": "Resúmenes y chat",
+    "sectionSummariesDesc": "Genera resúmenes y responde preguntas sobre tus reuniones.",
+    "sectionAudio": "Filtrado de audio",
+    "sectionAudioDesc": "Detecta cuándo alguien está hablando para evitar procesar silencio.",
+    "sectionSpeakers": "Detección de hablantes",
+    "sectionSpeakersDesc": "Identifica y distingue quién habla en cada momento de la conversación.",
+    "desc": {
+      "asr-large-v3-turbo": "Multilingüe · alta precisión · velocidad media",
+      "asr-large-v3-turbo-q5": "Multilingüe · buena precisión · más rápido",
+      "asr-distil-large-v3": "Solo inglés · 5× más rápido",
+      "asr-medium": "Multilingüe · precisión media",
+      "asr-small": "Multilingüe · ligero",
+      "asr-base": "Multilingüe · mínimo",
+      "llm-qwen3-14b": "Resúmenes detallados · requiere 16 GB RAM",
+      "llm-qwen3-8b": "Buen balance calidad/velocidad",
+      "llm-qwen3-4b": "Para equipos con menos de 8 GB RAM",
+      "vad-silero": "Detecta cuándo alguien está hablando",
+      "embedder-eres2net": "Identificación de hablantes · propósito general",
+      "embedder-camplusplus": "Identificación de hablantes · ideal para español",
+      "segmenter-pyannote": "Detecta cambios de hablante en la conversación"
+    },
     "connecting": "Conectando…",
     "installed": "Instalado",
     "downloading": "Descargando…",
-    "download": "Descargar ({{size}})",
+    "download": "Descargar",
     "cancel": "Cancelar",
     "delete": "Eliminar modelo",
     "use": "Usar",
@@ -145,7 +177,8 @@
     "recommended": "Recomendado",
     "hardwareDetected": "Hardware detectado",
     "badge": "modelos {{installed}}/{{total}}",
-    "badgeEmpty": "modelos"
+    "badgeEmpty": "modelos",
+    "replayOnboarding": "Repetir configuración inicial"
   },
   "templates": {
     "title": "Plantillas personalizadas",
@@ -163,6 +196,51 @@
     "promptPlaceholder": "Escribe tu prompt de resumen aquí… La transcripción de la reunión se agregará automáticamente.",
     "manage": "Gestionar plantillas",
     "customGroup": "Personalizadas"
+  },
+  "onboarding": {
+    "welcomeSubtitle": "Transcripción privada y resúmenes inteligentes para tus reuniones.",
+    "getStarted": "Empezar",
+    "continue": "Continuar",
+    "back": "Atrás",
+    "skip": "Omitir",
+    "privacyTitle": "Todo se queda en tu equipo. Siempre.",
+    "privacyBullet1": "El audio y las transcripciones nunca salen de tu computadora.",
+    "privacyBullet2": "Los modelos de IA corren localmente — sin servidores externos.",
+    "privacyBullet3": "Tú decides qué guardar y qué eliminar.",
+    "permissionsTitle": "Permisos de audio",
+    "permissionsChecking": "Verificando permisos…",
+    "permissionsGranted": "Permisos concedidos",
+    "permissionsDenied": "EchoNote necesita acceso al micrófono para transcribir. Abre Preferencias del Sistema para conceder el permiso.",
+    "permissionsRetry": "Reintentar",
+    "permissionsHint": "Solicitaremos acceso al micrófono del sistema.",
+    "hardwareTitle": "Tu equipo",
+    "hardwareDetecting": "Detectando hardware…",
+    "hwCpu": "CPU",
+    "hwCores": "Núcleos",
+    "hwRam": "RAM",
+    "hwGpu": "GPU",
+    "hwRecommended": "Perfil recomendado",
+    "confidence": {
+      "high": "Alta confianza",
+      "medium": "Confianza media",
+      "low": "Confianza baja"
+    },
+    "modelsTitle": "Descarga de modelos",
+    "modelsSubtitle": "EchoNote necesita modelos de IA locales. Los esenciales se descargarán automáticamente.",
+    "modelsRequired": "requerido",
+    "modelsDownload": "Descargar",
+    "modelsCancel": "cancelar",
+    "modelsWaiting": "Descargando modelos…",
+    "testTitle": "Prueba de grabación",
+    "testSubtitle": "Grabemos 20 segundos para confirmar que todo funciona.",
+    "testStart": "Grabar prueba",
+    "testRecording": "Grabando…",
+    "testRemaining": "restantes",
+    "testNoSpeech": "No se detectó voz. No te preocupes, puedes continuar.",
+    "testSkip": "Omitir prueba",
+    "completionTitle": "¡Listo!",
+    "completionSubtitle": "EchoNote está configurado y listo para usarse.",
+    "completionSkip": "Ir al inicio"
   },
   "errors": {
     "renderCrash": "fatal — error de renderizado",
@@ -215,6 +293,11 @@
     "upToDate": "¡Estás al día!"
   },
   "settings": {
-    "switchLanguage": "Cambiar idioma"
+    "switchLanguage": "Cambiar idioma",
+    "theme": {
+      "light": "Modo claro",
+      "dark": "Modo oscuro",
+      "system": "Según el sistema"
+    }
   }
 }

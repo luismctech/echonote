@@ -23,6 +23,8 @@ import type {
   MeetingId,
   MeetingSearchHit,
   MeetingSummary,
+  Note,
+  NoteId,
 } from "../types/meeting";
 import type { SpeakerId } from "../types/speaker";
 import type {
@@ -30,7 +32,7 @@ import type {
   StreamingSessionId,
   TranscriptEvent,
 } from "../types/streaming";
-import type { Summary } from "../types/summary";
+import type { Summary, SummarizeEvent } from "../types/summary";
 import type { CustomTemplate, CustomTemplateId } from "../types/custom-template";
 
 // ---------------------------------------------------------------------------
@@ -95,6 +97,16 @@ export async function resumeStreaming(
   sessionId: StreamingSessionId,
 ): Promise<boolean> {
   return invoke<boolean>("resume_streaming", { sessionId });
+}
+
+/**
+ * Look up the database MeetingId for a streaming session.
+ * Returns `null` when the session is unknown or not yet started.
+ */
+export async function getMeetingId(
+  sessionId: StreamingSessionId,
+): Promise<MeetingId | null> {
+  return invoke<MeetingId | null>("get_meeting_id", { sessionId });
 }
 
 // ---------------------------------------------------------------------------
@@ -173,6 +185,36 @@ export async function searchMeetings(
 }
 
 // ---------------------------------------------------------------------------
+// Meeting notes
+// ---------------------------------------------------------------------------
+
+/**
+ * Add a timestamped note to a meeting. `timestampMs` is relative to
+ * the recording start (same timeline as segment offsets).
+ */
+export async function addNote(
+  meetingId: MeetingId,
+  text: string,
+  timestampMs: number,
+): Promise<Note> {
+  return invoke<Note>("add_note", { meetingId, text, timestampMs });
+}
+
+/**
+ * List all notes for a meeting, ordered by recording timestamp.
+ */
+export async function listNotes(meetingId: MeetingId): Promise<Note[]> {
+  return invoke<Note[]>("list_notes", { meetingId });
+}
+
+/**
+ * Delete a single note by id.
+ */
+export async function deleteNote(noteId: NoteId): Promise<boolean> {
+  return invoke<boolean>("delete_note", { noteId });
+}
+
+// ---------------------------------------------------------------------------
 // LLM summaries (Sprint 1 day 9)
 // ---------------------------------------------------------------------------
 
@@ -186,10 +228,39 @@ export async function searchMeetings(
 export async function summarizeMeeting(
   meetingId: MeetingId,
   template?: string,
+  includeNotes?: boolean,
+  language?: string,
 ): Promise<Summary> {
   return invoke<Summary>("summarize_meeting", {
     meetingId,
     template: template ?? null,
+    includeNotes: includeNotes ?? false,
+    language: language ?? null,
+  });
+}
+
+/**
+ * Streaming variant of {@link summarizeMeeting}. Sends tokens as they
+ * are decoded so the UI can render them incrementally.
+ *
+ * The stream finishes with a `completed` event carrying the persisted
+ * {@link Summary}, or a `failed` event on error.
+ */
+export async function summarizeMeetingStream(
+  meetingId: MeetingId,
+  template: string | undefined,
+  includeNotes: boolean,
+  onEvent: (event: SummarizeEvent) => void,
+  language?: string,
+): Promise<void> {
+  const channel = new Channel<SummarizeEvent>();
+  channel.onmessage = onEvent;
+  return invoke<void>("summarize_meeting_stream", {
+    meetingId,
+    template: template ?? null,
+    includeNotes,
+    language: language ?? null,
+    onEvent: channel,
   });
 }
 
@@ -325,10 +396,14 @@ export async function deleteCustomTemplate(
 export async function summarizeWithCustomTemplate(
   meetingId: MeetingId,
   templateId: CustomTemplateId,
+  includeNotes?: boolean,
+  language?: string,
 ): Promise<Summary> {
   return invoke<Summary>("summarize_with_custom_template", {
     meetingId,
     templateId,
+    includeNotes: includeNotes ?? false,
+    language: language ?? null,
   });
 }
 

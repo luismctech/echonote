@@ -164,3 +164,19 @@ export type Summary = SummaryContent & {
   /** RFC 3339 timestamp of generation. */
   createdAt: string;
 };
+
+// ---------------------------------------------------------------------------
+// Streaming summary events (mirrors `echo_app::SummarizeEvent`)
+// ---------------------------------------------------------------------------
+
+export type SummarizeEventStarted = { kind: "started"; model: string };
+export type SummarizeEventToken = { kind: "token"; delta: string };
+export type SummarizeEventCompleted = { kind: "completed"; summary: Summary };
+export type SummarizeEventFailed = { kind: "failed"; error: string };
+
+/** Discriminated union of events emitted during streaming summary generation. */
+export type SummarizeEvent =
+  | SummarizeEventStarted
+  | SummarizeEventToken
+  | SummarizeEventCompleted
+  | SummarizeEventFailed;

@@ -24,7 +24,7 @@ members = [
 # Shared package metadata inherited by member crates via `package.xxx.workspace = true`
 # -----------------------------------------------------------------------------
 [workspace.package]
-version = "0.3.8"
+version = "0.4.0"
 edition = "2021"
 rust-version = "1.88"
 authors = ["Luis MC <luismctechdev@gmail.com>"]
@@ -55,7 +55,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-toml = "0.9"
+toml = "1.1"
 
 # IDs & time
 uuid = { version = "1.11", features = ["v7", "serde"] }
@@ -66,7 +66,7 @@ chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4.5", features = ["derive", "env"] }
 
 # Audio
-cpal = "0.15"
+cpal = "0.17"
 hound = "3.5"
 rubato = "0.16"
 # macOS-only system audio capture (ScreenCaptureKit). Pulled in conditionally

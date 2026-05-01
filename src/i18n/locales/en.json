@@ -12,7 +12,9 @@
     "clearSearch": "Clear search",
     "noMeetings": "No meetings yet. Press Start to record one.",
     "seg": "seg",
-    "deleteConfirm": "Delete {{title}}"
+    "deleteConfirm": "Delete {{title}}",
+    "open": "Open",
+    "delete": "Delete"
   },
   "search": {
     "failed": "Search failed:",
@@ -45,7 +47,13 @@
     "modelLoads": "model loads on first start",
     "silence": "silence",
     "silenceRms": "silence (rms={{rms}})",
-    "noSpeech": "[no speech]"
+    "noSpeech": "[no speech]",
+    "notePlaceholder": "Add a note…",
+    "addNote": "Add",
+    "notes": "Notes",
+    "refineTranscript": "Refining transcript…",
+    "refineSpeakers": "Detecting speakers…",
+    "refineSummary": "Generating summary…"
   },
   "health": {
     "warmingUp": "warming up…",
@@ -60,9 +68,12 @@
     "segments": "segments",
     "noSegments": "No segments persisted for this meeting.",
     "noSpeech": "[no speech]",
+    "notes": "Notes",
+    "deleteNote": "Delete note",
     "transcript": "Transcript",
     "copySummary": "Copy summary",
     "copyTranscript": "Copy transcript",
+    "copyNotes": "Copy notes",
     "editTitle": "Click to rename"
   },
   "export": {
@@ -85,6 +96,7 @@
     "generate": "Generate",
     "generating": "Generating…",
     "regenerate": "Regenerate",
+    "includeNotes": "Include notes",
     "unknown": "Unknown template. Try regenerating with a known template.",
     "emptySummary": "[empty summary]",
     "sections": {
@@ -119,6 +131,8 @@
     "label": "Chat",
     "placeholder": "Ask about this meeting…",
     "send": "Send",
+    "roleUser": "You",
+    "roleAssistant": "Echo",
     "noVerifiableCitations": "respuesta sin citas verificables",
     "scrollToSegment": "Scroll to segment {{id}}…",
     "noCitations": "Response without verifiable citations",
@@ -128,15 +142,33 @@
     "title": "Models",
     "close": "Close",
     "loading": "Loading model status…",
-    "asr": "Speech Recognition (Whisper)",
-    "llm": "Language Model (Summary & Chat)",
-    "vad": "Voice Activity Detection",
-    "embedder": "Speaker Embedder",
-    "segmenter": "Speaker Segmentation (pyannote)",
+    "sectionTranscription": "Speech Transcription",
+    "sectionTranscriptionDesc": "Converts audio to text. Choose based on your language and speed needs.",
+    "sectionSummaries": "Summaries & Chat",
+    "sectionSummariesDesc": "Generates summaries and answers questions about your meetings.",
+    "sectionAudio": "Audio Filtering",
+    "sectionAudioDesc": "Detects when someone is speaking to avoid processing silence.",
+    "sectionSpeakers": "Speaker Detection",
+    "sectionSpeakersDesc": "Identifies and distinguishes who is speaking at each moment in the conversation.",
+    "desc": {
+      "asr-large-v3-turbo": "Multilingual · high accuracy · medium speed",
+      "asr-large-v3-turbo-q5": "Multilingual · good accuracy · faster",
+      "asr-distil-large-v3": "English only · 5× faster",
+      "asr-medium": "Multilingual · medium accuracy",
+      "asr-small": "Multilingual · lightweight",
+      "asr-base": "Multilingual · minimal",
+      "llm-qwen3-14b": "Detailed summaries · requires 16 GB RAM",
+      "llm-qwen3-8b": "Good quality/speed balance",
+      "llm-qwen3-4b": "For devices with less than 8 GB RAM",
+      "vad-silero": "Detects when someone is speaking",
+      "embedder-eres2net": "Speaker identification · general purpose",
+      "embedder-camplusplus": "Speaker identification · ideal for Spanish",
+      "segmenter-pyannote": "Detects speaker changes in conversation"
+    },
     "connecting": "Connecting…",
     "installed": "Installed",
     "downloading": "Downloading…",
-    "download": "Download ({{size}})",
+    "download": "Download",
     "cancel": "Cancel",
     "delete": "Delete model",
     "use": "Use",
@@ -145,7 +177,8 @@
     "recommended": "Recommended",
     "hardwareDetected": "Hardware detected",
     "badge": "models {{installed}}/{{total}}",
-    "badgeEmpty": "models"
+    "badgeEmpty": "models",
+    "replayOnboarding": "Replay initial setup"
   },
   "templates": {
     "title": "Custom Templates",
@@ -163,6 +196,51 @@
     "promptPlaceholder": "Write your summary prompt here… The meeting transcript will be appended automatically.",
     "manage": "Manage templates",
     "customGroup": "Custom"
+  },
+  "onboarding": {
+    "welcomeSubtitle": "Private transcription and smart summaries for your meetings.",
+    "getStarted": "Get started",
+    "continue": "Continue",
+    "back": "Back",
+    "skip": "Skip",
+    "privacyTitle": "Everything stays on your device. Always.",
+    "privacyBullet1": "Audio and transcripts never leave your computer.",
+    "privacyBullet2": "AI models run locally — no external servers.",
+    "privacyBullet3": "You decide what to keep and what to delete.",
+    "permissionsTitle": "Audio permissions",
+    "permissionsChecking": "Checking permissions…",
+    "permissionsGranted": "Permissions granted",
+    "permissionsDenied": "EchoNote needs microphone access to transcribe. Open System Settings to grant permission.",
+    "permissionsRetry": "Retry",
+    "permissionsHint": "We'll request microphone access from the system.",
+    "hardwareTitle": "Your hardware",
+    "hardwareDetecting": "Detecting hardware…",
+    "hwCpu": "CPU",
+    "hwCores": "Cores",
+    "hwRam": "RAM",
+    "hwGpu": "GPU",
+    "hwRecommended": "Recommended profile",
+    "confidence": {
+      "high": "High confidence",
+      "medium": "Medium confidence",
+      "low": "Low confidence"
+    },
+    "modelsTitle": "Model download",
+    "modelsSubtitle": "EchoNote needs local AI models. Essential ones will be downloaded automatically.",
+    "modelsRequired": "required",
+    "modelsDownload": "Download",
+    "modelsCancel": "cancel",
+    "modelsWaiting": "Downloading models…",
+    "testTitle": "Test recording",
+    "testSubtitle": "Let's record 20 seconds to confirm everything works.",
+    "testStart": "Record test",
+    "testRecording": "Recording…",
+    "testRemaining": "remaining",
+    "testNoSpeech": "No speech detected. Don't worry, you can continue.",
+    "testSkip": "Skip test",
+    "completionTitle": "All set!",
+    "completionSubtitle": "EchoNote is set up and ready to go.",
+    "completionSkip": "Go to home"
   },
   "errors": {
     "renderCrash": "fatal — render error",
@@ -215,6 +293,11 @@
     "upToDate": "You're up to date!"
   },
   "settings": {
-    "switchLanguage": "Switch language"
+    "switchLanguage": "Switch language",
+    "theme": {
+      "light": "Light mode",
+      "dark": "Dark mode",
+      "system": "System default"
+    }
   }
 }

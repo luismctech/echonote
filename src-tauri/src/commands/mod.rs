@@ -257,6 +257,12 @@ impl AppState {
                 }
             }
         }
+        // Flush WAL to the main database file before _exit() skips
+        // normal cleanup. Without this, data written since the last
+        // automatic checkpoint may be lost.
+        if let Err(e) = self.store.checkpoint().await {
+            tracing::warn!(error = %e, "shutdown: WAL checkpoint failed");
+        }
         self.store.close().await;
         tracing::info!("shutdown: complete");
     }
@@ -274,29 +280,41 @@ impl AppState {
         };
         tracing::info!(data_root = %data_root.display(), "resolved data root for model assets");
 
+        // In debug builds, allow ECHO_*_MODEL env vars to override
+        // asset paths for development convenience. In release builds
+        // these are ignored to prevent path-hijack via environment
+        // variable manipulation.
+        let env_override = |key: &str| -> Option<String> {
+            if cfg!(debug_assertions) {
+                std::env::var(key).ok()
+            } else {
+                None
+            }
+        };
+
         let model_path = resolve_asset_path(
             &data_root,
-            std::env::var("ECHO_ASR_MODEL").ok(),
+            env_override("ECHO_ASR_MODEL"),
             preferred_asr_model(&data_root),
         );
         let embed_model_path = resolve_asset_path(
             &data_root,
-            std::env::var("ECHO_EMBED_MODEL").ok(),
+            env_override("ECHO_EMBED_MODEL"),
             preferred_embed_model(&data_root),
         );
         let seg_model_path = resolve_asset_path(
             &data_root,
-            std::env::var("ECHO_SEG_MODEL").ok(),
+            env_override("ECHO_SEG_MODEL"),
             "models/segmenter/pyannote_segmentation_3.onnx",
         );
         let llm_model_path = resolve_asset_path(
             &data_root,
-            std::env::var("ECHO_LLM_MODEL").ok(),
+            env_override("ECHO_LLM_MODEL"),
             preferred_llm_model(&data_root),
         );
         let vad_model_path = resolve_asset_path(
             &data_root,
-            std::env::var("ECHO_VAD_MODEL").ok(),
+            env_override("ECHO_VAD_MODEL"),
             "models/vad/silero_vad.onnx",
         );
 
@@ -352,9 +370,14 @@ impl AppState {
                 let path = if model_path.exists() {
                     model_path.clone()
                 } else {
+                    let env_llm = if cfg!(debug_assertions) {
+                        std::env::var("ECHO_LLM_MODEL").ok()
+                    } else {
+                        None
+                    };
                     let fresh = resolve_asset_path(
                         &data_root,
-                        std::env::var("ECHO_LLM_MODEL").ok(),
+                        env_llm,
                         preferred_llm_model(&data_root),
                     );
                     if !fresh.exists() {
@@ -538,9 +561,14 @@ impl AppState {
                 let path = if asr_path.exists() {
                     asr_path.clone()
                 } else {
+                    let env_asr = if cfg!(debug_assertions) {
+                        std::env::var("ECHO_ASR_MODEL").ok()
+                    } else {
+                        None
+                    };
                     let fresh = resolve_asset_path(
                         &data_root,
-                        std::env::var("ECHO_ASR_MODEL").ok(),
+                        env_asr,
                         preferred_asr_model(&data_root),
                     );
                     if !fresh.exists() {
@@ -576,19 +604,23 @@ impl AppState {
 // ---------------------------------------------------------------------------
 
 fn resolve_db_path(app_data_dir: Option<PathBuf>) -> PathBuf {
-    if let Some(raw) = std::env::var("ECHO_DB_PATH")
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-    {
-        let p = PathBuf::from(&raw);
-        if p.is_absolute() {
+    // Only honour ECHO_DB_PATH in debug builds to prevent
+    // environment-based path hijacking in production.
+    if cfg!(debug_assertions) {
+        if let Some(raw) = std::env::var("ECHO_DB_PATH")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+        {
+            let p = PathBuf::from(&raw);
+            if p.is_absolute() {
+                return p;
+            }
+            let rooted = workspace_root().join(&p);
+            if rooted.exists() {
+                return rooted;
+            }
             return p;
         }
-        let rooted = workspace_root().join(&p);
-        if rooted.exists() {
-            return rooted;
-        }
-        return p;
     }
     if let Some(dir) = app_data_dir {
         return dir.join("echonote.db");
@@ -601,6 +633,7 @@ fn preferred_llm_model(root: &Path) -> &'static str {
         "models/llm/Qwen3-30B-A3B-Q4_K_M.gguf",
         "models/llm/Qwen3-14B-Q4_K_M.gguf",
         "models/llm/Qwen3-8B-Q4_K_M.gguf",
+        "models/llm/Qwen3-4B-Q4_K_M.gguf",
         "models/llm/qwen2.5-7b-instruct-q4_k_m.gguf",
         "models/llm/qwen2.5-3b-instruct-q4_k_m.gguf",
     ];

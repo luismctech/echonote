@@ -3,7 +3,7 @@
 //! These functions are pure: they take domain entities and return strings.
 //! The Tauri shell layer handles path validation, file I/O, and IPC.
 
-use echo_domain::{Meeting, SpeakerId, Summary, SummaryContent};
+use echo_domain::{Meeting, Note, SpeakerId, Summary, SummaryContent};
 
 /// Supported export formats.
 #[derive(Debug, Clone, Copy)]
@@ -100,6 +100,11 @@ fn render_markdown(meeting: &Meeting, summary: Option<&Summary>) -> String {
             Some(name) => out.push_str(&format!("**[{ts}] {name}:** {text}\n\n")),
             None => out.push_str(&format!("**[{ts}]** {text}\n\n")),
         }
+    }
+
+    if !meeting.notes.is_empty() {
+        out.push_str("---\n\n## Notes\n\n");
+        render_notes_md(&mut out, &meeting.notes);
     }
 
     out
@@ -296,6 +301,14 @@ fn md_list(out: &mut String, heading: &str, items: &[String]) {
     out.push('\n');
 }
 
+fn render_notes_md(out: &mut String, notes: &[Note]) {
+    for note in notes {
+        let ts = format_ts(note.timestamp_ms);
+        out.push_str(&format!("- **[{ts}]** {}\n", note.text));
+    }
+    out.push('\n');
+}
+
 // ---------------------------------------------------------------------------
 // Plain text
 // ---------------------------------------------------------------------------
@@ -347,6 +360,14 @@ fn render_plain_text(meeting: &Meeting, summary: Option<&Summary>) -> String {
         match label {
             Some(name) => out.push_str(&format!("[{ts}] {name}: {text}\n")),
             None => out.push_str(&format!("[{ts}] {text}\n")),
+        }
+    }
+
+    if !meeting.notes.is_empty() {
+        out.push_str("\n\nNOTES\n-----\n\n");
+        for note in &meeting.notes {
+            let ts = format_ts(note.timestamp_ms);
+            out.push_str(&format!("[{ts}] {}\n", note.text));
         }
     }
 
