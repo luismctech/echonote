@@ -34,7 +34,6 @@ Most meeting transcription tools send your audio to the cloud. EchoNote doesn't.
 | **Notes in AI context** | Optionally include your notes when generating summaries or chatting |
 | **Custom summary templates** | Create your own prompt templates for tailored summaries (1:1, sprint review, sales call, or anything you need) |
 | **Model selection** | Download multiple ASR or LLM models and switch between them at runtime — no restart required |
-| **Theme switcher** | Light, dark, and system-follow modes with persistent preference |
 | **Hardware-aware recommendations** | The app detects your RAM and recommends the optimal models automatically |
 | **Meeting search** | Full-text search across all your past meetings |
 | **Conversational chat** | Ask follow-up questions about any meeting using the local LLM |
@@ -94,11 +93,10 @@ All processing happens locally using these open-source AI models:
 
 | Component | What it does | Size |
 |-----------|-------------|------|
-| [Whisper](https://github.com/ggerganov/whisper.cpp) | Speech-to-text | ~148 MB – 1.6 GB |
-| [Qwen 3](https://huggingface.co/Qwen) | Meeting summaries & chat | ~2.6 – 9.2 GB |
+| [Whisper](https://github.com/ggerganov/whisper.cpp) | Speech-to-text | ~1.6 GB |
+| [Qwen 3](https://huggingface.co/Qwen) | Meeting summaries & chat | ~2.5–9 GB |
 | [Silero VAD](https://github.com/snakers4/silero-vad) | Detects when someone is speaking | ~1.2 MB |
 | [3D-Speaker](https://github.com/modelscope/3D-Speaker) | Identifies different speakers (ERes2Net or CAM++) | ~26 MB |
-| [pyannote](https://github.com/pyannote/pyannote-audio) | Speaker segmentation | ~17 MB |
 
 Models are **not** downloaded automatically — you choose which ones to install from the built-in model manager in **Settings → Models**.
 
@@ -118,19 +116,20 @@ Not sure which models to pick? Use this guide based on your RAM:
 
 #### LLM (Summaries & Chat)
 
-| Model | Label | Size | RAM needed | Best for |
-|-------|-------|------|-----------|----------|
-| Qwen 3 4B | Qwen 3 Lite | ~2.6 GB | 6–8 GB | **Low-RAM machines** with <8 GB — good quality, 100+ languages |
-| Qwen 3 8B | Qwen 3 Medium | ~5.2 GB | 8–12 GB | **Laptops** with 8–16 GB RAM |
-| Qwen 3 14B ⭐ | Qwen 3 Large | ~9.2 GB | 14–18 GB | **Recommended** — best quality for 16 GB+ machines |
+| Model | Size | RAM needed | Best for |
+|-------|------|-----------|----------|
+| Qwen 3 4B | ~2.5 GB | 6–8 GB | **Low-RAM machines** with <8 GB — good quality, 100+ languages |
+| Qwen 3 8B | ~5 GB | 8–12 GB | **Laptops** with 8–16 GB RAM |
+| Qwen 3 14B ⭐ | ~9 GB | 14–18 GB | **Recommended** — best quality for 16 GB+ machines |
+| Qwen 3 30B-A3B (MoE) | ~18 GB | 24–32 GB | Premium quality on 32 GB+ machines (only 3B active per token) |
 
 #### Quick recommendations
 
 | Your machine | ASR model | LLM model | Total disk |
 |-------------|-----------|-----------|-----------|
-| **8 GB RAM** (older laptop) | Whisper Turbo Lite | Qwen 3 Lite | ~3.2 GB |
-| **16 GB RAM** (most machines) | Whisper Turbo | Qwen 3 Large | ~10.8 GB |
-| **32 GB+ RAM** (pro machine) | Whisper Turbo | Qwen 3 Large | ~10.8 GB |
+| **8 GB RAM** (older laptop) | `large-v3-turbo-q5_0` | Qwen 3 4B | ~3.5 GB |
+| **16 GB RAM** (most machines) | `large-v3-turbo` | Qwen 3 14B | ~11 GB |
+| **32 GB+ RAM** (pro machine) | `large-v3-turbo` | Qwen 3 30B-A3B | ~20 GB |
 
 ---
 
@@ -167,8 +166,7 @@ Not sure which models to pick? Use this guide based on your RAM:
 - [x] Hardware-aware model recommendations
 - [ ] System audio capture (transcribe the other side of the call)
 - [ ] Encrypted local storage
-- [x] Setup wizard (guided first-run onboarding)
-- [x] Light / dark / system theme switcher
+- [ ] Setup wizard (guided first-run experience)
 
 ---
 
