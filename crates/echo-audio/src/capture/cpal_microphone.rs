@@ -104,7 +104,10 @@ fn enumerate_input_devices() -> Result<Vec<DeviceInfo>, DomainError> {
 
     let mut out = Vec::new();
     for dev in devices {
-        let name = dev.description().map(|d| d.name().to_string()).unwrap_or_else(|_| "<unnamed>".to_string());
+        let name = dev
+            .description()
+            .map(|d| d.name().to_string())
+            .unwrap_or_else(|_| "<unnamed>".to_string());
         out.push(DeviceInfo {
             id: name.clone(),
             is_default: !default_id.is_empty() && name == default_id,
@@ -173,7 +176,10 @@ fn start_capture(spec: &CaptureSpec) -> Result<StartedStream, DomainError> {
     let host = cpal::default_host();
 
     let device = pick_device(&host, spec.device_id.as_deref())?;
-    let device_name = device.description().map(|d| d.name().to_string()).unwrap_or_else(|_| "<unnamed>".to_string());
+    let device_name = device
+        .description()
+        .map(|d| d.name().to_string())
+        .unwrap_or_else(|_| "<unnamed>".to_string());
     let supported = pick_config(&device, spec.preferred_format)?;
     let format = AudioFormat {
         sample_rate_hz: supported.sample_rate(),
@@ -228,7 +234,13 @@ fn pick_device(host: &cpal::Host, device_id: Option<&str>) -> Result<Device, Dom
             .input_devices()
             .map_err(|e| DomainError::AudioDeviceUnavailable(format!("input_devices: {e}")))?;
         for dev in devices {
-            if dev.description().ok().map(|d| d.name().to_string()).as_deref() == Some(id) {
+            if dev
+                .description()
+                .ok()
+                .map(|d| d.name().to_string())
+                .as_deref()
+                == Some(id)
+            {
                 return Ok(dev);
             }
         }
