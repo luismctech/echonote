@@ -45,19 +45,19 @@ export function ExportButton({
     <div className="relative inline-block">
       <details className="group">
         <summary
-          className={`cursor-pointer list-none rounded-md border border-zinc-200 bg-white px-3 py-1.5 text-xs font-medium hover:bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-900 dark:hover:bg-zinc-800 ${
+          className={`cursor-pointer list-none rounded-md border bg-surface-elevated px-3 py-1.5 text-ui-sm font-medium hover:bg-surface-sunken ${
             exporting ? "pointer-events-none opacity-60" : ""
           }`}
         >
           {exporting ? t("export.exporting") : t("export.button")}
         </summary>
-        <div className="absolute right-0 z-10 mt-1 w-44 rounded-md border border-zinc-200 bg-white py-1 shadow-lg dark:border-zinc-700 dark:bg-zinc-900">
+        <div className="absolute right-0 z-10 mt-1 w-44 rounded-md border bg-surface-elevated py-1 shadow-lg">
           {FORMATS.map((f) => (
             <button
               key={f.id}
               type="button"
               onClick={() => handleExport(f.id, f.ext)}
-              className="block w-full px-3 py-1.5 text-left text-xs hover:bg-zinc-100 dark:hover:bg-zinc-800"
+              className="block w-full px-3 py-1.5 text-left text-ui-sm hover:bg-surface-sunken"
             >
               {t(f.labelKey)}
             </button>
@@ -65,7 +65,7 @@ export function ExportButton({
         </div>
       </details>
       {error && (
-        <p className="mt-1 text-[10px] text-amber-600 dark:text-amber-400">
+        <p className="mt-1 text-micro text-amber-600 dark:text-amber-400">
           {error}
         </p>
       )}

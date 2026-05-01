@@ -54,6 +54,8 @@ use echo_domain::{
     MeetingId, MeetingStore, Note, Segment, SegmentId, Speaker,
 };
 
+use crate::sanitize::strip_chat_tokens;
+
 /// Maximum characters of transcript text fed to the model. Same budget
 /// as [`crate::SummarizeMeeting`] — a 32 k context Qwen tolerates ~6 k
 /// chars of Spanish text comfortably and leaves room for the system
@@ -286,10 +288,16 @@ fn build_messages(
     history: &[ChatMessage],
     question: &str,
 ) -> Vec<ChatMessage> {
+    // Sanitize all user-controlled / ASR-generated text to prevent
+    // chat-template token injection (security: prompt injection).
+    let safe_transcript = strip_chat_tokens(transcript_block);
+    let safe_notes = strip_chat_tokens(notes_block);
+    let safe_question = strip_chat_tokens(question);
+
     let mut out = Vec::with_capacity(history.len().min(MAX_HISTORY_TURNS) + 2);
     out.push(ChatMessage::system(build_system_prompt(
-        transcript_block,
-        notes_block,
+        &safe_transcript,
+        &safe_notes,
         language_instruction,
     )));
 
@@ -306,14 +314,18 @@ fn build_messages(
     };
     // We drop any prior `system` message in the history defensively —
     // the use case owns the system prompt and re-injects it on every
-    // turn so transcript edits propagate.
+    // turn so transcript edits propagate. Also strip chat-template
+    // tokens from history content to prevent injection via prior turns.
     out.extend(
         trimmed_history
             .iter()
             .filter(|m| m.role != ChatRole::System)
-            .cloned(),
+            .map(|m| ChatMessage {
+                role: m.role,
+                content: strip_chat_tokens(&m.content),
+            }),
     );
-    out.push(ChatMessage::user(question.to_string()));
+    out.push(ChatMessage::user(safe_question));
     out
 }
 

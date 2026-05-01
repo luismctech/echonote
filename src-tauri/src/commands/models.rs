@@ -16,9 +16,11 @@ use super::AppState;
 pub struct ModelInfo {
     /// Machine-readable id (e.g. `"asr-large-v3-turbo"`).
     pub id: String,
-    /// Human label shown in the UI.
+    /// Short, user-friendly name shown as the primary label.
     pub label: String,
-    /// Category: `"asr"`, `"llm"`, `"vad"`, or `"embedder"`.
+    /// One-line description with key traits (language, speed, etc.).
+    pub description: String,
+    /// Category: `"asr"`, `"llm"`, `"vad"`, `"embedder"`, or `"segmenter"`.
     pub kind: String,
     /// Whether the file exists on disk right now.
     pub present: bool,
@@ -39,7 +41,8 @@ fn model_catalog(root: &std::path::Path) -> Vec<(ModelInfo, &'static str, Option
         (
             ModelInfo {
                 id: "asr-large-v3-turbo".into(),
-                label: "Whisper Large V3 Turbo (multilingual, 1.5 GB)".into(),
+                label: "Whisper Turbo".into(),
+                description: "Multilingual · high accuracy · medium speed".into(),
                 kind: "asr".into(),
                 present: present("models/asr/ggml-large-v3-turbo.bin"),
                 size_bytes: 1_600_000_000,
@@ -50,7 +53,8 @@ fn model_catalog(root: &std::path::Path) -> Vec<(ModelInfo, &'static str, Option
         (
             ModelInfo {
                 id: "asr-large-v3-turbo-q5".into(),
-                label: "Whisper Large V3 Turbo Q5 (multilingual, 574 MB)".into(),
+                label: "Whisper Turbo Lite".into(),
+                description: "Multilingual · good accuracy · faster".into(),
                 kind: "asr".into(),
                 present: present("models/asr/ggml-large-v3-turbo-q5_0.bin"),
                 size_bytes: 574_000_000,
@@ -61,7 +65,8 @@ fn model_catalog(root: &std::path::Path) -> Vec<(ModelInfo, &'static str, Option
         (
             ModelInfo {
                 id: "asr-distil-large-v3".into(),
-                label: "Distil-Whisper Large V3 (English, 756 MB, 5x faster)".into(),
+                label: "Whisper Fast".into(),
+                description: "English only · 5x faster".into(),
                 kind: "asr".into(),
                 present: present("models/asr/ggml-distil-large-v3.bin"),
                 size_bytes: 756_000_000,
@@ -72,7 +77,8 @@ fn model_catalog(root: &std::path::Path) -> Vec<(ModelInfo, &'static str, Option
         (
             ModelInfo {
                 id: "asr-medium".into(),
-                label: "Whisper Medium (multilingual, 1.5 GB)".into(),
+                label: "Whisper Medium".into(),
+                description: "Multilingual · medium accuracy".into(),
                 kind: "asr".into(),
                 present: present("models/asr/ggml-medium.bin"),
                 size_bytes: 1_530_000_000,
@@ -83,7 +89,8 @@ fn model_catalog(root: &std::path::Path) -> Vec<(ModelInfo, &'static str, Option
         (
             ModelInfo {
                 id: "asr-small".into(),
-                label: "Whisper Small (multilingual, 488 MB)".into(),
+                label: "Whisper Small".into(),
+                description: "Multilingual · lightweight".into(),
                 kind: "asr".into(),
                 present: present("models/asr/ggml-small.bin"),
                 size_bytes: 488_000_000,
@@ -94,7 +101,8 @@ fn model_catalog(root: &std::path::Path) -> Vec<(ModelInfo, &'static str, Option
         (
             ModelInfo {
                 id: "asr-base".into(),
-                label: "Whisper Base (multilingual, 142 MB)".into(),
+                label: "Whisper Base".into(),
+                description: "Multilingual · minimal".into(),
                 kind: "asr".into(),
                 present: present("models/asr/ggml-base.bin"),
                 size_bytes: 148_000_000,
@@ -105,7 +113,8 @@ fn model_catalog(root: &std::path::Path) -> Vec<(ModelInfo, &'static str, Option
         (
             ModelInfo {
                 id: "llm-qwen3-14b".into(),
-                label: "Qwen 3 14B Q4_K_M (9 GB)".into(),
+                label: "Qwen 3 Large".into(),
+                description: "Detailed summaries · requires 16 GB RAM".into(),
                 kind: "llm".into(),
                 present: present("models/llm/Qwen3-14B-Q4_K_M.gguf"),
                 size_bytes: 9_200_000_000,
@@ -116,7 +125,8 @@ fn model_catalog(root: &std::path::Path) -> Vec<(ModelInfo, &'static str, Option
         (
             ModelInfo {
                 id: "llm-qwen3-8b".into(),
-                label: "Qwen 3 8B Q4_K_M (5 GB)".into(),
+                label: "Qwen 3 Medium".into(),
+                description: "Good quality/speed balance".into(),
                 kind: "llm".into(),
                 present: present("models/llm/Qwen3-8B-Q4_K_M.gguf"),
                 size_bytes: 5_200_000_000,
@@ -127,7 +137,8 @@ fn model_catalog(root: &std::path::Path) -> Vec<(ModelInfo, &'static str, Option
         (
             ModelInfo {
                 id: "llm-qwen3-4b".into(),
-                label: "Qwen 3 4B Q4_K_M (2.5 GB) — for <8 GB RAM".into(),
+                label: "Qwen 3 Lite".into(),
+                description: "For devices with less than 8 GB RAM".into(),
                 kind: "llm".into(),
                 present: present("models/llm/Qwen3-4B-Q4_K_M.gguf"),
                 size_bytes: 2_600_000_000,
@@ -138,7 +149,8 @@ fn model_catalog(root: &std::path::Path) -> Vec<(ModelInfo, &'static str, Option
         (
             ModelInfo {
                 id: "vad-silero".into(),
-                label: "Silero VAD v5 (1.2 MB, simplified for tract)".into(),
+                label: "Silero VAD".into(),
+                description: "Detects when someone is speaking".into(),
                 kind: "vad".into(),
                 present: present("models/vad/silero_vad.onnx"),
                 size_bytes: 1_200_000,
@@ -151,7 +163,8 @@ fn model_catalog(root: &std::path::Path) -> Vec<(ModelInfo, &'static str, Option
         (
             ModelInfo {
                 id: "embedder-eres2net".into(),
-                label: "ERes2Net Speaker Embedder (26 MB)".into(),
+                label: "ERes2Net".into(),
+                description: "Speaker identification · general purpose".into(),
                 kind: "embedder".into(),
                 present: present("models/embedder/eres2net_en_voxceleb.onnx"),
                 size_bytes: 26_000_000,
@@ -162,7 +175,8 @@ fn model_catalog(root: &std::path::Path) -> Vec<(ModelInfo, &'static str, Option
         (
             ModelInfo {
                 id: "embedder-camplusplus".into(),
-                label: "CAM++ Speaker Embedder — recommended for Spanish (28 MB)".into(),
+                label: "CAM++".into(),
+                description: "Speaker identification · ideal for Spanish".into(),
                 kind: "embedder".into(),
                 present: present("models/embedder/campplus_en_voxceleb.onnx"),
                 size_bytes: 28_000_000,
@@ -173,7 +187,8 @@ fn model_catalog(root: &std::path::Path) -> Vec<(ModelInfo, &'static str, Option
         (
             ModelInfo {
                 id: "segmenter-pyannote".into(),
-                label: "pyannote Segmentation 3.0 — speaker boundary detection (17 MB)".into(),
+                label: "pyannote 3.0".into(),
+                description: "Detects speaker changes in conversation".into(),
                 kind: "segmenter".into(),
                 present: present("models/segmenter/pyannote_segmentation_3.onnx"),
                 size_bytes: 17_000_000,
@@ -350,6 +365,14 @@ pub async fn download_model(
                     format!("SHA-256 mismatch for {model_id}: expected {expected}, got {actual}"),
                 ));
             }
+            tracing::info!(%model_id, "SHA-256 verified");
+        } else {
+            tracing::warn!(
+                %model_id,
+                "model downloaded WITHOUT SHA-256 verification — \
+                 integrity not guaranteed. Populate the hash in \
+                 model_catalog() before release."
+            );
         }
 
         tokio::fs::rename(&tmp, &dest)

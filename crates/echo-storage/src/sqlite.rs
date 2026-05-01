@@ -91,6 +91,17 @@ impl SqliteMeetingStore {
     pub async fn close(&self) {
         self.pool.close().await;
     }
+
+    /// Force a WAL checkpoint so all data is flushed to the main database
+    /// file. Must be called before any hard-exit (`_exit`, `process::exit`)
+    /// to prevent data loss.
+    pub async fn checkpoint(&self) -> Result<(), DomainError> {
+        sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
+            .execute(&self.pool)
+            .await
+            .map_err(|e| db_err(format!("WAL checkpoint failed: {e}")))?;
+        Ok(())
+    }
 }
 
 fn parse_uuid(s: &str, what: &'static str) -> Result<Uuid, DomainError> {
@@ -469,6 +480,10 @@ impl MeetingStore for SqliteMeetingStore {
         Ok(hits)
     }
 
+    async fn checkpoint(&self) -> Result<(), DomainError> {
+        SqliteMeetingStore::checkpoint(self).await
+    }
+
     async fn close(&self) {
         // Forward to the inherent helper, which awaits any in-flight
         // queries and flushes the WAL before the pool drops. Called
@@ -710,21 +725,37 @@ fn row_to_summary(row: &sqlx::sqlite::SqliteRow) -> Result<MeetingSummary, Domai
 /// then wrap the survivor in double quotes, turning the input into
 /// the safe shape `"tok1" "tok2" "tok3"` (an implicit AND).
 ///
-/// HTML-escape a snippet from FTS5, preserving only `<mark>` and
-/// `</mark>` tags that we control. This prevents any stored text from
-/// being rendered as raw HTML when the frontend uses
-/// `dangerouslySetInnerHTML`.
+/// HTML-escape a snippet from FTS5, preserving only the `<mark>` /
+/// `</mark>` tags that **FTS5 itself** injected as highlight markers.
+///
+/// Problem with the naïve escape-then-restore approach: if the
+/// user-stored text literally contains the string `<mark>`, the old
+/// code would restore it as a real HTML tag — a stored-XSS vector.
+///
+/// Fix: replace the FTS5-injected markers with unique placeholders
+/// **before** HTML-escaping, then swap the placeholders with the real
+/// `<mark>` tags afterwards. The placeholders cannot appear in the
+/// original text because they contain NUL bytes.
 fn sanitize_fts_snippet(raw: &str) -> String {
-    // Step 1: escape all HTML-significant characters.
-    let escaped = raw
+    const OPEN_PH: &str = "\x00MARK_OPEN\x00";
+    const CLOSE_PH: &str = "\x00MARK_CLOSE\x00";
+
+    // Step 1: replace the real FTS5 markers with placeholders.
+    let with_placeholders = raw.replace("<mark>", OPEN_PH).replace("</mark>", CLOSE_PH);
+
+    // Step 2: HTML-escape everything (including any literal "<mark>"
+    // that was NOT an FTS5 marker — those were already consumed in
+    // step 1, so only user-authored `<mark>` survives to be escaped).
+    let escaped = with_placeholders
         .replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;");
-    // Step 2: restore only the FTS5 marker tags.
+
+    // Step 3: restore placeholders → real HTML.
     escaped
-        .replace("&lt;mark&gt;", "<mark>")
-        .replace("&lt;/mark&gt;", "</mark>")
+        .replace(OPEN_PH, "<mark>")
+        .replace(CLOSE_PH, "</mark>")
 }
 
 /// Returns `None` for empty / whitespace-only / all-stripped inputs

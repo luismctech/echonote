@@ -24,12 +24,13 @@ pub async fn summarize_meeting(
     meeting_id: MeetingId,
     template: Option<String>,
     include_notes: bool,
+    language: Option<String>,
 ) -> Result<Summary, IpcError> {
     let llm = state.ensure_llm().await?;
     let use_case = SummarizeMeeting::new(llm, state.store.clone());
     let tmpl = template.as_deref().unwrap_or("general");
     use_case
-        .execute(meeting_id, tmpl, include_notes)
+        .execute(meeting_id, tmpl, include_notes, language.as_deref())
         .await
         .map_err(IpcError::from)
 }
@@ -63,6 +64,7 @@ pub async fn summarize_with_custom_template(
     meeting_id: MeetingId,
     template_id: CustomTemplateId,
     include_notes: bool,
+    language: Option<String>,
 ) -> Result<Summary, IpcError> {
     // Load the custom template from disk.
     let templates = super::templates::read_templates_from(&state)?;
@@ -74,7 +76,7 @@ pub async fn summarize_with_custom_template(
     let llm = state.ensure_llm().await?;
     let use_case = SummarizeMeeting::new(llm, state.store.clone());
     use_case
-        .execute_custom(meeting_id, custom, include_notes)
+        .execute_custom(meeting_id, custom, include_notes, language.as_deref())
         .await
         .map_err(IpcError::from)
 }
@@ -159,6 +161,7 @@ pub async fn summarize_meeting_stream(
     meeting_id: MeetingId,
     template: Option<String>,
     include_notes: bool,
+    language: Option<String>,
     on_event: Channel<SummarizeEvent>,
 ) -> Result<(), IpcError> {
     let llm = state.ensure_llm().await?;
@@ -166,7 +169,7 @@ pub async fn summarize_meeting_stream(
     let tmpl = template.as_deref().unwrap_or("general");
 
     let mut stream = use_case
-        .execute_stream(meeting_id, tmpl, include_notes)
+        .execute_stream(meeting_id, tmpl, include_notes, language.as_deref())
         .await
         .map_err(IpcError::from)?;
 

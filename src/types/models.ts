@@ -2,6 +2,7 @@
 export type ModelInfo = {
   id: string;
   label: string;
+  description: string;
   kind: "asr" | "llm" | "vad" | "embedder" | "segmenter";
   present: boolean;
   sizeBytes: number;

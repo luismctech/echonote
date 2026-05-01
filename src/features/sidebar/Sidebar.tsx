@@ -38,21 +38,21 @@ export function Sidebar({
   const activeId = view.kind === "meeting" ? view.id : null;
 
   return (
-    <aside className="flex min-h-0 flex-col gap-2 overflow-hidden rounded-lg border border-zinc-200 bg-white p-3 shadow-sm dark:border-zinc-800 dark:bg-zinc-950">
+    <aside className="flex h-full min-h-0 flex-col gap-2 overflow-hidden rounded-lg border bg-surface-elevated p-3 shadow-sm">
       <header className="flex items-center justify-between">
         <div className="flex items-center gap-1.5">
           <LogoMark size={18} className="flex-shrink-0 opacity-60" />
-          <h2 className="text-sm font-semibold tracking-wide text-zinc-700 dark:text-zinc-200">
+          <h2 className="text-ui-md font-semibold tracking-wide text-content-secondary">
             {t("sidebar.meetings")}
           </h2>
         </div>
         <button
           type="button"
           onClick={onGoLive}
-          className={`flex items-center gap-1.5 rounded-md border px-2 py-0.5 text-xs ${
+          className={`flex items-center gap-1.5 rounded-md border px-2 py-0.5 text-ui-sm ${
             isRecording
               ? "border-rose-300 bg-rose-50 text-rose-700 dark:border-rose-800 dark:bg-rose-950/40 dark:text-rose-300"
-              : "border-zinc-200 text-zinc-600 hover:bg-zinc-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+              : "border text-content-secondary hover:bg-surface-sunken"
           }`}
         >
           {isRecording && (
@@ -66,7 +66,7 @@ export function Sidebar({
       </header>
 
       {meetingsError && (
-        <p className="rounded bg-amber-50 px-2 py-1 text-xs text-amber-800 dark:bg-amber-950/40 dark:text-amber-300">
+        <p className="rounded bg-amber-50 px-2 py-1 text-ui-sm text-amber-800 dark:bg-amber-950/40 dark:text-amber-300">
           {meetingsError}
         </p>
       )}

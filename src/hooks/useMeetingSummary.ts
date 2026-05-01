@@ -109,7 +109,7 @@ export function useMeetingSummary(meetingId: MeetingId | null): UseMeetingSummar
     };
   }, [meetingId]);
 
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
 
   const generateCustomCall = useIpcAction(
     t("errors.summaryFailed"),
@@ -120,11 +120,12 @@ export function useMeetingSummary(meetingId: MeetingId | null): UseMeetingSummar
     if (!meetingId) return undefined;
     setGenerating(true);
     setStreamingText("");
+    const lang = i18n.language;
     try {
       let fresh: Summary | undefined;
       if (selectedTemplate.kind === "custom") {
         // Custom templates use non-streaming path (no streaming command for custom yet).
-        fresh = await generateCustomCall(meetingId, selectedTemplate.id, includeNotes);
+        fresh = await generateCustomCall(meetingId, selectedTemplate.id, includeNotes, lang);
       } else {
         // Built-in templates use streaming for progressive rendering.
         fresh = await new Promise<Summary | undefined>((resolve, reject) => {
@@ -145,6 +146,7 @@ export function useMeetingSummary(meetingId: MeetingId | null): UseMeetingSummar
                   break;
               }
             },
+            lang,
           ).catch(reject);
         });
       }
@@ -160,7 +162,7 @@ export function useMeetingSummary(meetingId: MeetingId | null): UseMeetingSummar
       setGenerating(false);
       setStreamingText("");
     }
-  }, [meetingId, selectedTemplate, includeNotes, generateCustomCall]);
+  }, [meetingId, selectedTemplate, includeNotes, generateCustomCall, i18n.language]);
 
   return {
     summary,

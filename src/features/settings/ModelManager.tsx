@@ -8,6 +8,7 @@
 
 import { useTranslation } from "react-i18next";
 
+import { Modal } from "../../components/Modal";
 import type { UseModelManager, DownloadProgress } from "../../hooks/useModelManager";
 import type { ModelInfo } from "../../types/models";
 import type { ModelRecommendation } from "../../types/hardware";
@@ -22,15 +23,17 @@ function formatBytes(bytes: number): string {
 export function ModelManager({
   state,
   onClose,
+  onReplayOnboarding,
 }: Readonly<{
   state: UseModelManager;
   onClose: () => void;
+  onReplayOnboarding: () => void;
 }>) {
   const { models, loading, downloading, error, activeLlm, activeAsr, activeEmbedder } = state;
   const { t } = useTranslation();
   const { data: recommendation } = useHardwareRecommendation();
 
-  const grouped = groupByKind(models);
+  const sections = groupBySections(models);
 
   const activeIds: Record<string, string | null> = {
     llm: activeLlm,
@@ -50,120 +53,143 @@ export function ModelManager({
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
-      <div className="flex max-h-[80vh] w-full max-w-lg flex-col gap-3 overflow-hidden rounded-xl border border-zinc-200 bg-white p-5 shadow-xl dark:border-zinc-800 dark:bg-zinc-950">
-        <header className="flex items-center justify-between">
-          <h2 className="text-base font-semibold">{t("models.title")}</h2>
+    <Modal open onClose={onClose} className="w-full max-w-lg">
+      <div className="flex max-h-[80vh] w-full flex-col gap-3 overflow-hidden rounded-xl border bg-surface-elevated p-5 shadow-xl">
+        <header className="flex shrink-0 items-center justify-between">
+          <h2 className="text-ui-lg font-semibold">{t("models.title")}</h2>
           <button
             type="button"
             onClick={onClose}
-            className="rounded-md px-2 py-1 text-xs text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-900"
+            className="rounded-md px-2 py-1 text-ui-sm text-content-tertiary hover:bg-surface-sunken"
           >
             {t("models.close")}
           </button>
         </header>
 
-        {recommendation && <HardwareChip recommendation={recommendation} />}
+        {recommendation && <HardwareCard recommendation={recommendation} />}
 
         {error && (
-          <p className="rounded-md bg-red-50 px-3 py-2 text-xs text-red-700 dark:bg-red-950/40 dark:text-red-300">
+          <p className="rounded-md bg-red-50 px-3 py-2 text-ui-sm text-red-700 dark:bg-red-950/40 dark:text-red-300">
             {error}
           </p>
         )}
 
         {loading ? (
-          <p className="py-6 text-center text-sm text-zinc-500">{t("models.loading")}</p>
+          <p className="py-6 text-center text-ui-md text-content-tertiary">{t("models.loading")}</p>
         ) : (
-          <div className="flex min-h-0 flex-col gap-4 overflow-y-auto">
-            {grouped.map(([kind, items]) => (
-              <ModelGroup
-                key={kind}
-                kind={kind}
-                models={items}
+          <div className="flex min-h-0 flex-col gap-5 overflow-y-auto">
+            {sections.map((s) => (
+              <ModelSection
+                key={s.key}
+                section={s}
+                models={s.models}
                 downloading={downloading}
-                activeId={activeIds[kind] ?? null}
+                activeIds={activeIds}
                 recommendedIds={recommendedIds}
+                selectHandlers={selectHandlers}
                 onDownload={state.download}
                 onCancel={state.cancelDl}
                 onDelete={state.remove}
-                {...(selectHandlers[kind] ? { onSelect: selectHandlers[kind] } : {})}
               />
             ))}
           </div>
         )}
+
+        {/* Footer */}
+        <div className="flex shrink-0 items-center justify-center border-t border-subtle pt-3">
+          <button
+            type="button"
+            onClick={onReplayOnboarding}
+            className="flex items-center gap-1.5 text-ui-xs text-content-tertiary transition-colors hover:text-content-secondary"
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" className="h-3.5 w-3.5">
+              <path fillRule="evenodd" d="M13.836 2.477a.75.75 0 0 1 .75.75v3.182a.75.75 0 0 1-.75.75h-3.182a.75.75 0 0 1 0-1.5h1.37l-.84-.841a4.5 4.5 0 0 0-7.08.932.75.75 0 0 1-1.3-.75 6 6 0 0 1 9.44-1.242l.842.84V3.227a.75.75 0 0 1 .75-.75Zm-.911 7.5A.75.75 0 0 1 13.199 11a6 6 0 0 1-9.44 1.241l-.84-.84v1.371a.75.75 0 0 1-1.5 0V9.591a.75.75 0 0 1 .75-.75H5.35a.75.75 0 0 1 0 1.5H3.98l.841.841a4.5 4.5 0 0 0 7.08-.932.75.75 0 0 1 1.025-.273Z" clipRule="evenodd" />
+            </svg>
+            {t("models.replayOnboarding")}
+          </button>
+        </div>
       </div>
-    </div>
+    </Modal>
   );
 }
 
-function groupByKind(models: ModelInfo[]): [string, ModelInfo[]][] {
-  const order = ["asr", "llm", "vad", "embedder", "segmenter"];
-  const map = new Map<string, ModelInfo[]>();
-  for (const m of models) {
-    const arr = map.get(m.kind) ?? [];
-    arr.push(m);
-    map.set(m.kind, arr);
-  }
-  return order
-    .filter((k) => map.has(k))
-    .map((k) => {
-      const items = map.get(k);
-      if (!items) throw new Error(`unreachable: ${k} passed filter`);
-      return [k, items] as [string, ModelInfo[]];
-    });
+/** Logical sections that group model kinds together. */
+const MODEL_SECTIONS = [
+  { key: "transcription", kinds: ["asr"], chip: "required" as const },
+  { key: "summaries", kinds: ["llm"], chip: null },
+  { key: "audio", kinds: ["vad"], chip: "required" as const },
+  { key: "speakers", kinds: ["embedder", "segmenter"], chip: null },
+];
+
+function groupBySections(models: ModelInfo[]): { key: string; chip: "required" | null; models: ModelInfo[] }[] {
+  return MODEL_SECTIONS.map((s) => ({
+    key: s.key,
+    chip: s.chip,
+    models: models.filter((m) => s.kinds.includes(m.kind)),
+  })).filter((s) => s.models.length > 0);
 }
 
-const KIND_LABELS: Record<string, string> = {
-  asr: "models.asr",
-  llm: "models.llm",
-  vad: "models.vad",
-  embedder: "models.embedder",
-  segmenter: "models.segmenter",
-};
+/** Which kinds allow selecting the active model. */
+const SELECTABLE_KINDS = new Set(["llm", "asr", "embedder"]);
 
-function ModelGroup({
-  kind,
+function ModelSection({
+  section,
   models,
   downloading,
-  activeId,
+  activeIds,
   recommendedIds,
+  selectHandlers,
   onDownload,
   onCancel,
   onDelete,
-  onSelect,
 }: Readonly<{
-  kind: string;
+  section: { key: string; chip: "required" | null };
   models: ModelInfo[];
   downloading: DownloadProgress | null;
-  activeId: string | null;
+  activeIds: Record<string, string | null>;
   recommendedIds: Set<string>;
+  selectHandlers: Record<string, (id: string) => void>;
   onDownload: (id: string) => void;
   onCancel: (id: string) => void;
   onDelete: (id: string) => void;
-  onSelect?: (id: string) => void;
 }>) {
   const { t } = useTranslation();
-  const selectable = kind === "llm" || kind === "asr" || kind === "embedder";
+
   return (
     <div className="flex flex-col gap-2">
-      <h3 className="text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
-        {t(KIND_LABELS[kind] ?? kind)}
-      </h3>
-      {models.map((m) => (
-        <ModelRow
-          key={m.id}
-          model={m}
-          downloading={downloading}
-          isActive={selectable && m.id === activeId}
-          isRecommended={recommendedIds.has(m.id)}
-          isRequired={kind === "vad"}
-          showUse={selectable}
-          onDownload={onDownload}
-          onCancel={onCancel}
-          onDelete={onDelete}
-          {...(onSelect ? { onSelect } : {})}
-        />
-      ))}
+      <div className="flex flex-col gap-0.5">
+        <div className="flex items-center gap-2">
+          <h3 className="text-ui-sm font-semibold text-content-primary">
+            {t(`models.section${section.key.charAt(0).toUpperCase()}${section.key.slice(1)}`)}
+          </h3>
+          {section.chip === "required" && (
+            <span className="shrink-0 rounded bg-rose-100 px-1.5 py-0.5 text-micro font-medium text-rose-700 dark:bg-rose-900/40 dark:text-rose-300">
+              {t("models.required")}
+            </span>
+          )}
+        </div>
+        <p className="text-ui-xs text-content-tertiary">
+          {t(`models.section${section.key.charAt(0).toUpperCase()}${section.key.slice(1)}Desc`)}
+        </p>
+      </div>
+      {models.map((m) => {
+        const selectable = SELECTABLE_KINDS.has(m.kind);
+        const activeId = activeIds[m.kind] ?? null;
+        return (
+          <ModelRow
+            key={m.id}
+            model={m}
+            downloading={downloading}
+            isActive={selectable && m.id === activeId}
+            isRecommended={recommendedIds.has(m.id)}
+            showUse={selectable}
+            onDownload={onDownload}
+            onCancel={onCancel}
+            onDelete={onDelete}
+            {...(selectable && selectHandlers[m.kind] ? { onSelect: selectHandlers[m.kind] } : {})}
+          />
+        );
+      })}
     </div>
   );
 }
@@ -173,7 +199,6 @@ function ModelRow({
   downloading,
   isActive,
   isRecommended,
-  isRequired,
   showUse,
   onDownload,
   onCancel,
@@ -184,7 +209,6 @@ function ModelRow({
   downloading: DownloadProgress | null;
   isActive: boolean;
   isRecommended: boolean;
-  isRequired: boolean;
   showUse: boolean;
   onDownload: (id: string) => void;
   onCancel: (id: string) => void;
@@ -199,58 +223,77 @@ function ModelRow({
       ? (downloading.downloaded / downloading.total) * 100
       : 0;
 
-  let borderClass = "border-zinc-100 bg-zinc-50/50 dark:border-zinc-800/60 dark:bg-zinc-900/30";
-  if (isActive) {
-    borderClass = "border-blue-200 bg-blue-50/50 dark:border-blue-800/60 dark:bg-blue-950/20";
-  } else if (isRequired && !model.present) {
-    borderClass = "border-rose-200 bg-rose-50/30 dark:border-rose-800/40 dark:bg-rose-950/10";
-  } else if (isRecommended) {
-    borderClass = "border-amber-200 bg-amber-50/30 dark:border-amber-800/40 dark:bg-amber-950/10";
-  }
+  // Use i18n description, fall back to Rust description
+  const localizedDesc = t(`models.desc.${model.id}`, { defaultValue: "" });
+  const description = localizedDesc || model.description;
 
   return (
-    <div className={`flex items-center gap-3 rounded-lg border px-3 py-2.5 ${borderClass}`}>
-      <StatusDot present={model.present} active={isActive} />
+    <div
+      className={`flex items-center gap-3 rounded-lg border p-3 transition-colors ${
+        model.present
+          ? "border-emerald-200 bg-emerald-50/50 dark:border-emerald-900 dark:bg-emerald-950/20"
+          : "border-subtle bg-surface-sunken"
+      }`}
+    >
+      {/* Status indicator */}
+      <div className="flex h-8 w-8 shrink-0 items-center justify-center">
+        {model.present ? (
+          <svg width="20" height="20" viewBox="0 0 16 16" fill="none" className="text-emerald-600 dark:text-emerald-400">
+            <path d="M13.78 4.22a.75.75 0 0 1 0 1.06l-6.25 6.25a.75.75 0 0 1-1.06 0L3.22 8.28a.75.75 0 0 1 1.06-1.06L7 9.94l5.72-5.72a.75.75 0 0 1 1.06 0z" fill="currentColor" />
+          </svg>
+        ) : isDownloading ? (
+          <div className="h-5 w-5 animate-spin rounded-full border-2 border-accent-400 border-t-transparent" />
+        ) : (
+          <div className="h-5 w-5 rounded-full border-2 border-content-placeholder/30" />
+        )}
+      </div>
 
-      <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-        <div className="flex items-center gap-1.5">
-          <span className="truncate text-sm font-medium text-zinc-800 dark:text-zinc-200">
+      {/* Info */}
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-2">
+          <span className="truncate text-ui-sm font-medium text-content-primary">
             {model.label}
           </span>
-          {isRequired && (
-            <span className="shrink-0 rounded-md bg-rose-100 px-1.5 py-0.5 text-[9px] font-semibold uppercase text-rose-700 dark:bg-rose-900/40 dark:text-rose-300">
-              {t("models.required")}
-            </span>
-          )}
-          {isRecommended && !isRequired && (
-            <span className="shrink-0 rounded-md bg-amber-100 px-1.5 py-0.5 text-[9px] font-semibold uppercase text-amber-700 dark:bg-amber-900/40 dark:text-amber-300">
+          {isRecommended && (
+            <span className="shrink-0 rounded bg-accent-100 px-1.5 py-0.5 text-micro font-medium text-accent-700 dark:bg-accent-50 dark:text-accent-900">
               {t("models.recommended")}
             </span>
           )}
+          {isActive && (
+            <span className="shrink-0 rounded bg-blue-100 px-1.5 py-0.5 text-micro font-medium text-blue-700 dark:bg-blue-950/40 dark:text-blue-300">
+              {t("models.active")}
+            </span>
+          )}
         </div>
+        <p className="text-ui-xs text-content-tertiary">
+          {description} · {formatBytes(model.sizeBytes)}
+        </p>
+
+        {/* Download progress bar */}
         {isDownloading && downloading.total > 0 && (
-          <div className="flex items-center gap-2">
-            <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-zinc-200 dark:bg-zinc-700">
+          <div className="mt-1.5 flex items-center gap-2">
+            <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-content-placeholder/20">
               <div
-                className="h-full rounded-full bg-blue-500 transition-all duration-300"
+                className="h-full rounded-full bg-accent-600 transition-all duration-300"
                 style={{ width: `${progress}%` }}
               />
             </div>
-            <span className="shrink-0 text-[10px] tabular-nums text-zinc-500">
+            <span className="shrink-0 text-micro tabular-nums text-content-tertiary">
               {formatBytes(downloading.downloaded)} / {formatBytes(downloading.total)}
             </span>
           </div>
         )}
         {isDownloading && downloading.total === 0 && (
-          <span className="text-[10px] text-zinc-500">{t("models.connecting")}</span>
+          <span className="mt-1 block text-micro text-content-tertiary">{t("models.connecting")}</span>
         )}
       </div>
 
+      {/* Actions */}
       {isDownloading && (
         <button
           type="button"
           onClick={() => onCancel(model.id)}
-          className="shrink-0 rounded-md border border-red-200 bg-red-50 px-2.5 py-1 text-xs font-medium text-red-700 hover:bg-red-100 dark:border-red-800 dark:bg-red-950/40 dark:text-red-300 dark:hover:bg-red-900/60"
+          className="shrink-0 text-ui-xs text-content-tertiary underline hover:text-content-secondary"
         >
           {t("models.cancel")}
         </button>
@@ -261,23 +304,15 @@ function ModelRow({
             <button
               type="button"
               onClick={() => onSelect(model.id)}
-              className="rounded-md border border-blue-200 bg-blue-50 px-2.5 py-1 text-[10px] font-medium text-blue-700 hover:bg-blue-100 dark:border-blue-800 dark:bg-blue-950/40 dark:text-blue-300 dark:hover:bg-blue-900/60"
+              className="rounded-full border border-subtle px-3 py-1 text-ui-xs font-medium text-content-secondary transition-colors hover:bg-surface-elevated"
             >
               {t("models.use")}
             </button>
           )}
-          {isActive && (
-            <span className="rounded-md bg-blue-100 px-2 py-1 text-[10px] font-medium text-blue-700 dark:bg-blue-950/40 dark:text-blue-300">
-              {t("models.active")}
-            </span>
-          )}
-          <span className="rounded-md bg-emerald-50 px-2 py-1 text-[10px] font-medium text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300">
-            {t("models.installed")}
-          </span>
           <button
             type="button"
             onClick={() => onDelete(model.id)}
-            className="rounded-md p-1 text-zinc-400 hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-950/40 dark:hover:text-red-400"
+            className="rounded-full p-1.5 text-content-placeholder hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-950/40 dark:hover:text-red-400"
             title={t("models.delete")}
           >
             <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" className="h-3.5 w-3.5">
@@ -291,45 +326,65 @@ function ModelRow({
           type="button"
           disabled={anyDownloading}
           onClick={() => onDownload(model.id)}
-          className="shrink-0 rounded-md border border-blue-200 bg-blue-50 px-2.5 py-1 text-xs font-medium text-blue-700 hover:bg-blue-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-blue-800 dark:bg-blue-950/40 dark:text-blue-300 dark:hover:bg-blue-900/60"
+          className="shrink-0 rounded-full border border-subtle px-3 py-1 text-ui-xs font-medium text-content-secondary transition-colors hover:bg-surface-elevated disabled:opacity-50"
         >
-          {t("models.download", { size: formatBytes(model.sizeBytes) })}
+          {t("models.download")}
         </button>
       )}
     </div>
   );
 }
 
-function StatusDot({ present, active }: Readonly<{ present: boolean; active: boolean }>) {
-  let color = "bg-zinc-300 dark:bg-zinc-600";
-  if (active) color = "bg-blue-500";
-  else if (present) color = "bg-emerald-500";
-  return <span className={`h-2 w-2 shrink-0 rounded-full ${color}`} />;
+function confidenceColor(c: "high" | "medium" | "low"): string {
+  if (c === "high") return "text-emerald-600 dark:text-emerald-400";
+  if (c === "medium") return "text-amber-600 dark:text-amber-400";
+  return "text-rose-600 dark:text-rose-400";
 }
 
-function HardwareChip({ recommendation }: Readonly<{ recommendation: ModelRecommendation }>) {
+function HardwareCard({ recommendation }: Readonly<{ recommendation: ModelRecommendation }>) {
   const { t } = useTranslation();
   const hw = recommendation.hardware;
-  const ramGb = (hw.totalRamBytes / 1_073_741_824).toFixed(0);
+  const ramGb = (hw.totalRamBytes / 1_073_741_824).toFixed(1);
 
   return (
-    <div className="flex flex-col gap-1.5 rounded-lg border border-indigo-100 bg-indigo-50/50 px-3 py-2 dark:border-indigo-900/40 dark:bg-indigo-950/20">
-      <div className="flex items-center gap-2 text-xs text-indigo-700 dark:text-indigo-300">
-        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" className="h-3.5 w-3.5 shrink-0">
-          <path d="M1 8a7 7 0 1 1 14 0A7 7 0 0 1 1 8Zm7.75-4.25a.75.75 0 0 0-1.5 0V8c0 .414.336.75.75.75h3.25a.75.75 0 0 0 0-1.5h-2.5v-3.5Z" />
-        </svg>
-        <span className="font-medium">{t("models.hardwareDetected")}</span>
+    <div className="flex shrink-0 flex-col gap-3 rounded-lg border border-subtle bg-surface-sunken p-4">
+      {/* 2×2 hardware grid */}
+      <div className="grid grid-cols-2 gap-3 text-ui-sm">
+        <div>
+          <p className="text-content-tertiary">{t("onboarding.hwCpu")}</p>
+          <p className="font-medium text-content-primary">{hw.cpuBrand}</p>
+        </div>
+        <div>
+          <p className="text-content-tertiary">{t("onboarding.hwCores")}</p>
+          <p className="font-medium text-content-primary">{hw.cpuCores}</p>
+        </div>
+        <div>
+          <p className="text-content-tertiary">{t("onboarding.hwRam")}</p>
+          <p className="font-medium text-content-primary">{ramGb} GB</p>
+        </div>
+        <div>
+          <p className="text-content-tertiary">{t("onboarding.hwGpu")}</p>
+          <p className="font-medium text-content-primary">{hw.gpuName || "—"}</p>
+        </div>
       </div>
-      <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-[10px] text-indigo-600 dark:text-indigo-400">
-        <span>{hw.cpuBrand}</span>
-        <span>{ramGb} GB RAM</span>
-        <span>{hw.gpuName}</span>
+
+      {/* Recommendation */}
+      <div className="border-t border-subtle pt-3">
+        <div className="flex items-center justify-between">
+          <p className="text-ui-xs font-medium uppercase tracking-wide text-content-tertiary">
+            {t("onboarding.hwRecommended")}
+          </p>
+          <span className={`text-ui-xs font-medium ${confidenceColor(recommendation.asr.confidence)}`}>
+            {t(`onboarding.confidence.${recommendation.asr.confidence}`)}
+          </span>
+        </div>
+        <p className="mt-1 text-ui-sm text-content-secondary">{recommendation.asr.reason}</p>
+        {recommendation.warning && (
+          <p className="mt-2 text-ui-xs text-amber-600 dark:text-amber-400">
+            ⚠ {recommendation.warning}
+          </p>
+        )}
       </div>
-      {recommendation.warning && (
-        <p className="mt-0.5 text-[10px] text-amber-700 dark:text-amber-400">
-          ⚠ {recommendation.warning}
-        </p>
-      )}
     </div>
   );
 }

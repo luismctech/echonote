@@ -24,7 +24,7 @@ export const TranscriptRow = memo(function TranscriptRow({
   }
   return (
     <>
-      <span className="w-12 shrink-0 tabular-nums text-zinc-500">{ts}</span>
+      <span className="w-12 shrink-0 tabular-nums text-content-tertiary">{ts}</span>
       {line.speakerSlot !== undefined && (
         <SpeakerChip
           slot={line.speakerSlot}
@@ -32,8 +32,8 @@ export const TranscriptRow = memo(function TranscriptRow({
           compact
         />
       )}
-      <span className="flex-1">{line.text}</span>
-      <span className="shrink-0 text-zinc-400">
+      <span className="flex-1 min-w-0 break-all">{line.text}</span>
+      <span className="shrink-0 text-content-placeholder">
         {line.language ?? "?"} · rtf {line.rtf.toFixed(2)}
       </span>
     </>

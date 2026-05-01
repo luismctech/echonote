@@ -42,12 +42,22 @@ const CITATION_RE = /\[seg:([0-9a-f-]{36})\]/gi;
 // eslint-disable-next-line @typescript-eslint/no-empty-function
 const noop = () => {};
 
+/** Format milliseconds as MM:SS for citation chips. */
+function formatCitationTime(ms: number): string {
+  const totalSec = Math.floor(ms / 1000);
+  const min = Math.floor(totalSec / 60);
+  const sec = totalSec % 60;
+  return `${String(min).padStart(2, "0")}:${String(sec).padStart(2, "0")}`;
+}
+
 export function ChatPanel({
   chat,
   onScrollToSegment,
+  segmentTimestamps,
 }: Readonly<{
   chat: UseChat;
   onScrollToSegment?: (segmentId: SegmentId) => void;
+  segmentTimestamps?: Record<string, number>;
 }>) {
   const { t } = useTranslation();
   const [input, setInput] = useState("");
@@ -120,19 +130,19 @@ export function ChatPanel({
     >
       {/* ── Header bar (never scrolls) ── */}
       <div className="flex flex-shrink-0 items-center justify-between px-1 py-1">
-        <span className="text-xs font-medium uppercase tracking-wide text-zinc-400">
+        <span className="type-section-header text-content-placeholder">
           {t("chat.label")}
         </span>
         {chat.model && (
-          <span className="text-[10px] text-zinc-400">{chat.model}</span>
+          <span className="text-micro text-content-placeholder">{chat.model}</span>
         )}
       </div>
 
       {/* ── Scrollable messages area ── */}
-      <div className="flex min-h-0 flex-1 flex-col rounded-md border border-zinc-100 bg-zinc-50 dark:border-zinc-900 dark:bg-zinc-900/40">
+      <div className="flex min-h-0 flex-1 flex-col rounded-md border border-subtle bg-surface-sunken">
         <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto p-3">
           {isEmpty && (
-            <p className="py-4 text-center text-xs text-zinc-400">
+            <p className="py-4 text-center text-ui-sm text-content-placeholder">
               {t("chat.description")}
             </p>
           )}
@@ -141,19 +151,23 @@ export function ChatPanel({
               key={i}
               message={msg}
               onCitationClick={onScrollToSegment ?? noop}
+              {...(segmentTimestamps != null && { segmentTimestamps })}
+              showRole={
+                i === 0 || chat.messages[i - 1]!.role !== msg.role
+              }
             />
           ))}
           {chat.streaming && chat.streamingText && (
-            <div className="flex justify-start">
-              <div className="max-w-[85%] rounded-lg bg-zinc-100 px-3 py-2 text-sm text-zinc-800 dark:bg-zinc-800 dark:text-zinc-200">
+            <div className="flex flex-col items-start">
+              <div className="max-w-[85%] rounded-lg border border-subtle bg-surface-elevated px-3 py-2 text-ui-md text-content-primary shadow-sm">
                 {chat.streamingText}
-                <span className="ml-0.5 inline-block h-4 w-[2px] animate-pulse bg-zinc-500" />
+                <span className="ml-0.5 inline-block h-4 w-[2px] animate-pulse bg-content-tertiary" />
               </div>
             </div>
           )}
           {chat.streaming && !chat.streamingText && (
-            <div className="flex justify-start">
-              <div className="rounded-lg bg-zinc-100 px-3 py-2 text-sm text-zinc-500 dark:bg-zinc-800">
+            <div className="flex flex-col items-start">
+              <div className="rounded-lg border border-subtle bg-surface-elevated px-3 py-2 text-ui-md text-content-tertiary shadow-sm">
                 <span className="inline-flex gap-1">
                   <span className="animate-bounce">·</span>
                   <span className="animate-bounce [animation-delay:150ms]">·</span>
@@ -163,7 +177,7 @@ export function ChatPanel({
             </div>
           )}
           {chat.error && (
-            <p className="text-xs text-amber-700 dark:text-amber-400">
+            <p className="text-ui-sm text-amber-700 dark:text-amber-400">
               {chat.error}
             </p>
           )}
@@ -171,7 +185,7 @@ export function ChatPanel({
         </div>
 
         {/* ── Input area (pinned to bottom) ── */}
-        <form onSubmit={handleSubmit} className="flex flex-shrink-0 gap-2 border-t border-zinc-100 p-2 dark:border-zinc-800">
+        <form onSubmit={handleSubmit} className="flex flex-shrink-0 gap-2 border-t border-subtle p-2">
           <textarea
             ref={inputRef}
             value={input}
@@ -180,12 +194,12 @@ export function ChatPanel({
             placeholder={t("chat.placeholder")}
             rows={1}
             disabled={chat.streaming}
-            className="min-h-[36px] flex-1 resize-none rounded-md border border-zinc-200 bg-white px-2 py-1.5 text-sm placeholder:text-zinc-400 focus:border-zinc-400 focus:outline-none disabled:opacity-60 dark:border-zinc-700 dark:bg-zinc-900 dark:placeholder:text-zinc-600 dark:focus:border-zinc-500"
+            className="min-h-[30px] flex-1 resize-none rounded-md border bg-surface-elevated px-2 py-1 text-ui-sm placeholder:text-content-placeholder focus:border-strong focus:outline-none disabled:opacity-60"
           />
           <button
             type="submit"
             disabled={chat.streaming || !input.trim()}
-            className="rounded-md border border-zinc-200 bg-white px-3 py-1.5 text-xs font-medium hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-60 dark:border-zinc-800 dark:bg-zinc-900 dark:hover:bg-zinc-800"
+            className="rounded-md border bg-surface-elevated px-3 py-1.5 text-ui-sm font-medium hover:bg-surface-sunken disabled:cursor-not-allowed disabled:opacity-60"
           >
             {t("chat.send")}
           </button>
@@ -202,18 +216,28 @@ export function ChatPanel({
 function MessageBubble({
   message,
   onCitationClick,
+  segmentTimestamps,
+  showRole,
 }: Readonly<{
   message: DisplayMessage;
   onCitationClick?: (segmentId: SegmentId) => void;
+  segmentTimestamps?: Record<string, number>;
+  showRole?: boolean;
 }>) {
+  const { t } = useTranslation();
   const isUser = message.role === "user";
   return (
-    <div className={`flex ${isUser ? "justify-end" : "justify-start"}`}>
+    <div className={`flex flex-col ${isUser ? "items-end" : "items-start"}`}>
+      {showRole && (
+        <span className="mb-0.5 px-1 text-micro font-medium text-content-placeholder">
+          {isUser ? t("chat.roleUser") : t("chat.roleAssistant")}
+        </span>
+      )}
       <div
-        className={`max-w-[85%] rounded-lg px-3 py-2 text-sm ${
+        className={`max-w-[85%] rounded-lg px-3 py-2 text-ui-md ${
           isUser
-            ? "bg-zinc-800 text-zinc-100 dark:bg-zinc-200 dark:text-zinc-900"
-            : "bg-zinc-100 text-zinc-800 dark:bg-zinc-800 dark:text-zinc-200"
+            ? "bg-accent-600 text-white"
+            : "border border-subtle bg-surface-elevated text-content-primary shadow-sm"
         }`}
       >
         {isUser ? (
@@ -224,6 +248,7 @@ function MessageBubble({
             citations={message.citations ?? []}
             hadCitations={message.hadCitations ?? false}
             onCitationClick={onCitationClick ?? noop}
+            {...(segmentTimestamps != null && { segmentTimestamps })}
           />
         )}
       </div>
@@ -240,11 +265,13 @@ function AssistantContent({
   citations,
   hadCitations,
   onCitationClick,
+  segmentTimestamps,
 }: Readonly<{
   text: string;
   citations?: SegmentId[];
   hadCitations?: boolean;
   onCitationClick?: (segmentId: SegmentId) => void;
+  segmentTimestamps?: Record<string, number>;
 }>) {
   const validCitations = useMemo(() => new Set(citations ?? []), [citations]);
 
@@ -267,7 +294,7 @@ function AssistantContent({
   const renderChildren = useCallback(
     (children: ReactNode): ReactNode => {
       if (typeof children === "string") {
-        return replacePlaceholders(children, chips, validCitations, onCitationClick);
+        return replacePlaceholders(children, chips, validCitations, onCitationClick, segmentTimestamps);
       }
       if (Array.isArray(children)) {
         return children.map((child, idx) => (
@@ -277,7 +304,7 @@ function AssistantContent({
       }
       return children;
     },
-    [chips, validCitations, onCitationClick],
+    [chips, validCitations, onCitationClick, segmentTimestamps],
   );
 
   const mdComponents = useMemo(
@@ -291,12 +318,12 @@ function AssistantContent({
   );
 
   return (
-    <div className="prose prose-sm prose-zinc dark:prose-invert max-w-none [&_p]:my-1 [&_ul]:my-1 [&_ol]:my-1 [&_li]:my-0 [&_h1]:text-sm [&_h2]:text-sm [&_h3]:text-xs [&_h4]:text-xs [&_pre]:text-xs">
+    <div className="prose prose-sm max-w-none [&_p]:my-1 [&_ul]:my-1 [&_ol]:my-1 [&_li]:my-0 [&_h1]:text-ui-md [&_h2]:text-ui-md [&_h3]:text-ui-sm [&_h4]:text-ui-sm [&_pre]:text-ui-sm">
       <Markdown components={mdComponents}>
         {cleaned}
       </Markdown>
       {hadCitations === false && (
-        <span className="mt-1 block text-[10px] italic text-zinc-400">
+          <span className="mt-1 block text-micro italic text-content-placeholder">
           {i18next.t("chat.noCitations")}
         </span>
       )}
@@ -310,6 +337,7 @@ function replacePlaceholders(
   chips: Map<string, string>,
   validIds: Set<string>,
   onClick?: (id: SegmentId) => void,
+  segmentTimestamps?: Record<string, number>,
 ): ReactNode[] {
   const parts: ReactNode[] = [];
   const placeholderRe = /%%CIT(\d+)%%/g;
@@ -323,15 +351,21 @@ function replacePlaceholders(
     const placeholder = match[0];
     const segId = chips.get(placeholder);
     if (segId && validIds.has(segId)) {
+      const ms = segmentTimestamps?.[segId];
+      const label = ms == null ? segId.slice(0, 8) : formatCitationTime(ms);
       parts.push(
         <button
           key={`cit-${match.index}`}
           type="button"
           onClick={() => onClick?.(segId)}
-          title={i18next.t("chat.scrollToSegment", { id: segId.slice(0, 8) })}
-          className="mx-0.5 inline-flex items-center rounded bg-blue-100 px-1 py-0.5 font-mono text-[10px] text-blue-700 hover:bg-blue-200 dark:bg-blue-900/40 dark:text-blue-300 dark:hover:bg-blue-900/60"
+          title={i18next.t("chat.scrollToSegment", { id: label })}
+          className="mx-0.5 inline-flex items-center gap-0.5 rounded bg-blue-100 px-1.5 py-0.5 font-mono text-micro text-blue-700 hover:bg-blue-200 dark:bg-blue-900/40 dark:text-blue-300 dark:hover:bg-blue-900/60"
         >
-          {segId.slice(0, 8)}
+          <svg className="h-2.5 w-2.5" viewBox="0 0 16 16" fill="currentColor">
+            <path d="M8 3.5a.5.5 0 0 0-1 0V8a.5.5 0 0 0 .252.434l3.5 2a.5.5 0 0 0 .496-.868L8 7.71V3.5z" />
+            <path d="M8 16A8 8 0 1 0 8 0a8 8 0 0 0 0 16zm7-8A7 7 0 1 1 1 8a7 7 0 0 1 14 0z" />
+          </svg>
+          {label}
         </button>,
       );
     } else if (segId) {

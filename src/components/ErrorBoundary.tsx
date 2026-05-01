@@ -107,28 +107,28 @@ function DefaultFallback({
     <main className="mx-auto flex min-h-screen max-w-2xl flex-col items-start gap-6 px-6 py-12">
       <header className="flex flex-col gap-3">
         <LogoGlow size={48} />
-        <p className="font-mono text-xs uppercase tracking-wider text-rose-600 dark:text-rose-400">
+        <p className="font-mono text-ui-sm uppercase tracking-wider text-rose-600 dark:text-rose-400">
           {i18next.t("errors.renderCrash")}
         </p>
         <h1 className="text-2xl font-semibold tracking-tight">
           {i18next.t("errors.crashMessage")}
         </h1>
-        <p className="text-sm text-zinc-600 dark:text-zinc-400">
+        <p className="text-ui-md text-content-secondary">
           {i18next.t("errors.crashDetail")}
         </p>
       </header>
 
       <section className="w-full rounded-md border border-rose-200 bg-rose-50 p-3 dark:border-rose-900 dark:bg-rose-950/40">
-        <p className="font-mono text-xs font-semibold text-rose-900 dark:text-rose-200">
+        <p className="font-mono text-ui-sm font-semibold text-rose-900 dark:text-rose-200">
           {error.name}: {error.message}
         </p>
       </section>
 
-      <details className="w-full rounded-md border border-zinc-200 bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-900">
-        <summary className="cursor-pointer select-none px-3 py-2 text-xs font-medium text-zinc-700 dark:text-zinc-300">
+      <details className="w-full rounded-md border bg-surface-sunken">
+        <summary className="cursor-pointer select-none px-3 py-2 text-ui-sm font-medium text-content-secondary">
           {i18next.t("errors.stackTrace")}
         </summary>
-        <pre className="max-h-72 overflow-auto whitespace-pre-wrap break-all border-t border-zinc-200 p-3 font-mono text-[10px] leading-tight text-zinc-700 dark:border-zinc-800 dark:text-zinc-300">
+        <pre className="max-h-72 overflow-auto whitespace-pre-wrap break-all border-t p-3 font-mono text-micro text-content-secondary">
           {fullDetail}
         </pre>
       </details>
@@ -137,28 +137,28 @@ function DefaultFallback({
         <button
           type="button"
           onClick={onReset}
-          className="rounded-md bg-emerald-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-emerald-500"
+          className="rounded-md bg-emerald-600 px-3 py-1.5 text-ui-md font-medium text-white hover:bg-emerald-500"
         >
           {i18next.t("errors.tryAgain")}
         </button>
         <button
           type="button"
           onClick={onReload}
-          className="rounded-md border border-zinc-300 px-3 py-1.5 text-sm font-medium text-zinc-700 hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-800"
+          className="rounded-md border px-3 py-1.5 text-ui-md font-medium text-content-secondary hover:bg-surface-sunken"
         >
           {i18next.t("errors.reloadWindow")}
         </button>
         <button
           type="button"
           onClick={onCopy}
-          className="rounded-md border border-zinc-300 px-3 py-1.5 text-sm font-medium text-zinc-700 hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-800"
+          className="rounded-md border px-3 py-1.5 text-ui-md font-medium text-content-secondary hover:bg-surface-sunken"
         >
           {i18next.t("errors.copyError")}
         </button>
         <button
           type="button"
           onClick={onReport}
-          className="rounded-md border border-zinc-300 px-3 py-1.5 text-sm font-medium text-zinc-700 hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-800"
+          className="rounded-md border px-3 py-1.5 text-ui-md font-medium text-content-secondary hover:bg-surface-sunken"
         >
           {i18next.t("errors.reportBug")}
         </button>

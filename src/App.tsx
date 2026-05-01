@@ -17,16 +17,19 @@ import { useTranslation } from "react-i18next";
 
 import { LogoMark } from "./components/Logo";
 import { useToast } from "./components/Toaster";
+import { OnboardingFlow } from "./features/onboarding/OnboardingFlow";
 import { HealthProbe } from "./features/live/HealthProbe";
 import { LivePane } from "./features/live/LivePane";
 import { MeetingDetail } from "./features/meetings/MeetingDetail";
 import { ModelManager } from "./features/settings/ModelManager";
 import { LanguageSwitcher } from "./features/settings/LanguageSwitcher";
+import { ThemeSwitcher } from "./features/settings/ThemeSwitcher";
 import { Sidebar } from "./features/sidebar/Sidebar";
 import { useAutoUpdate, installUpdate } from "./hooks/useAutoUpdate";
 import { useGlobalShortcuts } from "./hooks/useGlobalShortcuts";
 import { useHealthProbe } from "./hooks/useHealthProbe";
 import { useModelManager } from "./hooks/useModelManager";
+import { useOnboardingState } from "./hooks/useOnboardingState";
 import { useRecordingSession } from "./hooks/useRecordingSession";
 import { useMeetings } from "./state/useMeetingsStore";
 
@@ -54,7 +57,7 @@ function ModelStatusBadge({
     <button
       type="button"
       onClick={onClick}
-      className={`flex items-center gap-1.5 rounded-md border px-2 py-1 font-mono text-[11px] leading-none whitespace-nowrap ${
+      className={`flex items-center gap-1.5 rounded-md border px-2 py-1 font-mono text-ui-xs leading-none whitespace-nowrap ${
         allGood
           ? "border-emerald-300 bg-emerald-50 text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950/40 dark:text-emerald-300"
           : "border-amber-300 bg-amber-50 text-amber-800 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-300"
@@ -71,6 +74,7 @@ function ModelStatusBadge({
 export function App() {
   const { t } = useTranslation();
   const toast = useToast();
+  const { completed: onboardingDone, markComplete, reset: resetOnboarding } = useOnboardingState();
   const probe = useHealthProbe();
   const { goToLive, refreshMeetings, view, renameSpeaker, renameMeeting } = useMeetings();
 
@@ -92,7 +96,6 @@ export function App() {
     start: startRecording,
     reset: resetRecording,
     stop: stopRecording,
-    dismissError,
   } = recording;
 
   // Diarize is opt-in to keep the existing whisper-only path unchanged
@@ -100,8 +103,9 @@ export function App() {
   const [diarize, setDiarize] = useState(false);
   const [language, setLanguage] = useState<string>("es");
   const [showModels, setShowModels] = useState(false);
-  openModelsRef.current = () => setShowModels(true);
+  const [focusMode, setFocusMode] = useState(false);
   const modelManager = useModelManager();
+  openModelsRef.current = () => { modelManager.refresh(); setShowModels(true); };
 
   // Pressing Start while viewing a stored meeting must also flip the
   // pane back to live so the user sees the new transcript.
@@ -188,47 +192,59 @@ export function App() {
     // If found, the useAutoUpdate callback already shows the toast.
   }, [checkForUpdate, toast, t]);
 
+  if (!onboardingDone) {
+    return <OnboardingFlow onComplete={markComplete} />;
+  }
+
   return (
     <main className="flex h-full w-full flex-col gap-3 overflow-hidden px-4 py-3 sm:px-6 sm:py-4">
       <header className="flex flex-shrink-0 items-end justify-between gap-4">
         <div className="flex items-center gap-2.5">
           <LogoMark size={28} className="flex-shrink-0" />
           <div className="flex flex-col">
-            <h1 className="text-xl font-semibold tracking-tight sm:text-2xl">
+            <h1 className="text-[22px] font-semibold leading-tight tracking-tight">
               {t("app.title")}
             </h1>
-            <p className="hidden text-xs text-zinc-500 dark:text-zinc-400 sm:block">
+            <p className="hidden text-ui-sm text-content-tertiary sm:block">
               {t("app.subtitle")}
             </p>
           </div>
         </div>
         <div className="flex items-center gap-2">
+          <ThemeSwitcher />
           <LanguageSwitcher />
           <ModelStatusBadge
             models={modelManager.models}
             downloading={modelManager.downloading !== null}
-            onClick={() => setShowModels(true)}
+            onClick={() => { modelManager.refresh(); setShowModels(true); }}
           />
           <HealthProbe probe={probe} onClickVersion={handleCheckVersion} />
         </div>
       </header>
 
       {showModels && (
-        <ModelManager state={modelManager} onClose={() => setShowModels(false)} />
+        <ModelManager state={modelManager} onClose={() => setShowModels(false)} onReplayOnboarding={() => { setShowModels(false); resetOnboarding(); }} />
       )}
 
-      <div className="grid min-h-0 flex-1 grid-cols-1 gap-4 md:grid-cols-[260px_1fr]">
-        <Sidebar
-          onGoLive={handleGoLive}
-          isRecording={
-            recording.stream.kind === "starting" ||
-            recording.stream.kind === "recording" ||
-            recording.stream.kind === "paused" ||
-            recording.stream.kind === "stopping"
-          }
-        />
+      <div className="grid min-h-0 flex-1 grid-cols-1 gap-4 md:grid-cols-[auto_1fr]">
+        <div
+          className="hidden min-h-0 overflow-hidden transition-[width] duration-300 ease-in-out md:block"
+          style={{ width: focusMode ? 0 : 260 }}
+        >
+          <div className="h-full min-h-0" style={{ width: 260 }}>
+            <Sidebar
+              onGoLive={handleGoLive}
+              isRecording={
+                recording.stream.kind === "starting" ||
+                recording.stream.kind === "recording" ||
+                recording.stream.kind === "paused" ||
+                recording.stream.kind === "stopping"
+              }
+            />
+          </div>
+        </div>
 
-        <section className="flex min-h-0 min-w-0 flex-col gap-3 overflow-hidden rounded-lg border border-zinc-200 bg-white p-4 shadow-sm dark:border-zinc-800 dark:bg-zinc-950">
+        <section className="flex min-h-0 min-w-0 flex-col gap-3 overflow-hidden rounded-lg border bg-surface-elevated p-4 shadow-sm">
           {view.kind === "live" ? (
             <LivePane
               stream={recording.stream}
@@ -249,7 +265,9 @@ export function App() {
               onPause={recording.pause}
               onResume={recording.resume}
               onAddNote={recording.addNote}
-              onDismissError={dismissError}
+              focusMode={focusMode}
+              onToggleFocusMode={() => setFocusMode((prev) => !prev)}
+              refineStage={recording.refineStage}
             />
           ) : (
             <MeetingDetail view={view} onRenameSpeaker={renameSpeaker} onRenameMeeting={renameMeeting} />

@@ -18,7 +18,7 @@ export function StatsBar({
 }) {
   const { t } = useTranslation();
   return (
-    <dl className="grid grid-cols-4 gap-x-4 text-xs">
+    <dl className="grid grid-cols-4 gap-x-4 text-ui-sm">
       <Stat label={t("stats.status")} value={status} />
       <Stat label={t("stats.chunks")} value={String(stats.chunks)} />
       <Stat label={t("stats.skipped")} value={String(stats.skipped)} />

@@ -1,8 +1,8 @@
 # Proyecto Echo — Diseño UI/UX
 
-**Versión:** 0.1
-**Fecha:** 17 de abril de 2026
-**Estado:** Borrador para revisión
+**Versión:** 0.2
+**Fecha:** 1 de mayo de 2026
+**Estado:** Implementado (Phase 1 — Foundation)
 
 ---
 
@@ -119,40 +119,54 @@ Lo que **no** es:
 
 ### 4.1 Tipografía
 
-**Serif display (títulos, headers, momentos editoriales):**
-- `Instrument Serif` (Google Fonts, gratuita, hermosa)
-- Fallback: `Charter`, `Georgia`, serif
+> **Referencia de alineación:** macOS Human Interface Guidelines (built-in text styles).
+> La escala UI de Echo está calibrada para que los tamaños se correspondan con los
+> roles tipográficos nativos de macOS, garantizando proporciones familiares en una
+> app de escritorio.
 
-**Sans-serif (UI, body, interfaz densa):**
-- `Inter` como body workhorse — sí, es mainstream, pero con variantes OTF y tracking cuidadoso brilla
-- Alternativa premium considerada: `Söhne` (pagada, superior para editorial)
-- Fallback: system stack
+**Sans-serif (toda la UI, títulos incluidos):**
+- `Inter` — sans-serif workhorse para títulos, body y toda la interfaz
+- Fallback: `system-ui`, `-apple-system`, sans-serif
 
 **Monospace (código, timestamps, técnico):**
 - `JetBrains Mono` — excelente ligaduras, neutral, legible
 - Fallback: `SF Mono`, `Consolas`, monospace
 
-**Escalas tipográficas:**
+**Escalas tipográficas (alineadas a macOS HIG):**
 
 ```css
-/* Display — solo para momentos hero (onboarding, empty states, títulos de reunión) */
---font-display-xl: 48px / 1.05 / 'Instrument Serif';
---font-display-lg: 36px / 1.1 / 'Instrument Serif';
---font-display-md: 28px / 1.15 / 'Instrument Serif';
+/* Display — solo para momentos hero (onboarding, empty states) */
+--font-display-xl: 48px / 1.05 / Inter;
+--font-display-lg: 36px / 1.1  / Inter;
+--font-display-md: 28px / 1.15 / Inter;
 
-/* UI — uso principal */
---font-ui-lg: 17px / 1.5 / 'Inter';       /* headings en paneles */
---font-ui-md: 15px / 1.55 / 'Inter';      /* body, default */
---font-ui-sm: 13px / 1.45 / 'Inter';      /* metadata, labels */
---font-ui-xs: 11px / 1.3 / 'Inter';       /* tags, timestamps, micro */
+/* UI — escala principal de interfaz (alineada a macOS) */
+--font-ui-lg: 15px / 1.45 / Inter;      /* ≈ macOS Title 3 — headings de panel */
+--font-ui-md: 13px / 1.4  / Inter;      /* ≈ macOS Body — texto primario, botones, chat */
+--font-ui-sm: 12px / 1.35 / Inter;      /* ≈ macOS Callout — inputs, labels, secondary */
+--font-ui-xs: 11px / 1.3  / Inter;      /* ≈ macOS Subheadline — tags, section headers */
 
 /* Reading — para transcripciones y notas largas */
---font-reading-lg: 18px / 1.65 / 'Inter';  /* notas expandidas */
---font-reading-md: 16px / 1.7 / 'Inter';   /* transcripción default */
+--font-reading-lg: 18px / 1.65 / Inter;  /* notas expandidas */
+--font-reading-md: 16px / 1.7  / Inter;  /* transcripción expandida */
 
 /* Mono */
---font-mono-md: 13px / 1.5 / 'JetBrains Mono';
+--font-mono-md: 12px / 1.5 / JetBrains Mono;
+
+/* Micro — badges, status indicators */
+--font-micro: 10px / 1.3 / Inter;
 ```
+
+**Correspondencia con macOS HIG:**
+
+| Token Echo | Tamaño | macOS equivalent | Rol |
+|---|---|---|---|
+| `display-md` | 28px | Large Title (26pt) | Títulos hero |
+| `ui-lg` | 15px | Title 3 (15pt) | Headings de panel |
+| `ui-md` | 13px | Body / Headline (13pt) | Texto primario, botones |
+| `ui-sm` | 12px | Callout (12pt) | Inputs, labels funcionales |
+| `ui-xs` | 11px | Subheadline (11pt) | Section headers, tags |
+| `micro` | 10px | Footnote / Caption (10pt) | Badges, indicadores |
 
 **Pesos utilizados:** 400 (regular), 500 (medium), 600 (semibold). Evitar 700+ (demasiado pesado contra body).
 
@@ -162,21 +176,21 @@ Lo que **no** es:
 
 ```css
 /* Superficies */
---bg-base: #FAF7F2;          /* off-white cálido, papel */
+--bg-base: #F8F5F0;          /* off-white cálido, papel */
 --bg-elevated: #FFFFFF;      /* cards, popovers */
---bg-sunken: #F0EBE3;        /* hovers, sidebars */
---bg-inset: #E8E1D4;         /* inputs, wells */
+--bg-sunken: #EAE4DA;        /* hovers, sidebars */
+--bg-inset: #DED6C8;         /* inputs, wells */
 
 /* Texto */
---text-primary: #1A1814;     /* casi negro cálido */
---text-secondary: #4A4540;   /* muted */
---text-tertiary: #7A7269;    /* muy muted, metadata */
---text-placeholder: #A8A098;
+--text-primary: #161410;     /* casi negro cálido, alto contraste */
+--text-secondary: #3A3630;   /* cuerpo legible */
+--text-tertiary: #5C564E;    /* metadata, headers de sección */
+--text-placeholder: #948C82;
 
 /* Bordes */
---border-subtle: rgba(26, 24, 20, 0.06);
---border-default: rgba(26, 24, 20, 0.12);
---border-strong: rgba(26, 24, 20, 0.24);
+--border-subtle: rgba(22, 20, 16, 0.08);
+--border-default: rgba(22, 20, 16, 0.18);
+--border-strong: rgba(22, 20, 16, 0.32);
 
 /* Acento principal — ámbar quemado */
 --accent-50: #FDF7ED;
@@ -206,26 +220,26 @@ Lo que **no** es:
 **Tema oscuro:**
 
 ```css
---bg-base: #1A1814;           /* carbón cálido */
---bg-elevated: #242019;
---bg-sunken: #141210;
---bg-inset: #0F0D0B;
+--bg-base: #10121B;           /* navy profundo azulado */
+--bg-elevated: #181A26;
+--bg-sunken: #0A0C14;
+--bg-inset: #06070E;
 
---text-primary: #F5F0E8;
---text-secondary: #B8B0A4;
---text-tertiary: #8A8278;
---text-placeholder: #5A5248;
+--text-primary: #E8ECF4;      /* blanco con matiz azul */
+--text-secondary: #A8B0C4;
+--text-tertiary: #767E96;
+--text-placeholder: #444C64;
 
---border-subtle: rgba(245, 240, 232, 0.06);
---border-default: rgba(245, 240, 232, 0.12);
---border-strong: rgba(245, 240, 232, 0.24);
+--border-subtle: rgba(200, 210, 235, 0.07);
+--border-default: rgba(200, 210, 235, 0.14);
+--border-strong: rgba(200, 210, 235, 0.26);
 
---accent-50: #3D2818;
---accent-100: #5A3A20;
+--accent-50: #28201C;
+--accent-100: #44301C;
 --accent-400: #E89938;
---accent-600: #F2A04D;        /* más claro en dark */
---accent-700: #F7B577;
---accent-900: #FAD5A8;
+--accent-600: #F2A552;        /* más claro en dark */
+--accent-700: #F7BA7C;
+--accent-900: #FAD8AC;
 ```
 
 ### 4.3 Espaciado y grid

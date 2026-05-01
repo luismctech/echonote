@@ -935,7 +935,7 @@ async fn run_summarize(
 
     let started = std::time::Instant::now();
     let summary = use_case
-        .execute(meeting_id, "general", false)
+        .execute(meeting_id, "general", false, None)
         .await
         .map_err(|e| match e {
             SummarizeMeetingError::NotFound(id) => {

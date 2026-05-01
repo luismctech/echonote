@@ -51,7 +51,7 @@ export function ResizableHandleVertical({
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
     >
-      <div className="w-0.5 h-12 rounded-full bg-zinc-300 transition-colors group-hover:bg-zinc-400 group-active:bg-emerald-500 dark:bg-zinc-700 dark:group-hover:bg-zinc-500 dark:group-active:bg-emerald-500" />
+      <div className="w-0.5 h-12 rounded-full bg-content-placeholder transition-colors group-hover:bg-content-tertiary group-active:bg-accent-400" />
     </div>
   );
 }

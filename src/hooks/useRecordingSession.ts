@@ -384,6 +384,20 @@ export function useRecordingSession({
   const canPause = selectCanPause(stream);
   const canResume = selectCanResume(stream);
 
+  // ── Refine stage: simulates the segmented progress bar during the
+  // stopping phase. Advances from 0→1→2 on a timer while the backend
+  // processes transcript refinement, diarization, and summary.
+  const [refineStage, setRefineStage] = useState(-1);
+  useEffect(() => {
+    if (stream.kind === "stopping") {
+      setRefineStage(0);
+      const t1 = setTimeout(() => setRefineStage(1), 2_500);
+      const t2 = setTimeout(() => setRefineStage(2), 6_000);
+      return () => { clearTimeout(t1); clearTimeout(t2); };
+    }
+    setRefineStage(-1);
+  }, [stream.kind]);
+
   return {
     stream,
     lines,
@@ -394,6 +408,7 @@ export function useRecordingSession({
     canStop,
     canPause,
     canResume,
+    refineStage,
     start,
     stop,
     pause,

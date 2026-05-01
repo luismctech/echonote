@@ -41,7 +41,7 @@ export const SpeakerEditor = memo(function SpeakerEditor({
   };
   return (
     <div
-      className={`flex items-center gap-1.5 rounded-full px-2 py-0.5 text-xs ring-1 ring-inset ${palette.bg} ${palette.text} ${palette.ring}`}
+      className={`flex items-center gap-1.5 rounded-full px-2 py-0.5 text-ui-sm ring-1 ring-inset ${palette.bg} ${palette.text} ${palette.ring}`}
     >
       <span className="font-semibold tabular-nums">{shortTag(speaker.slot)}</span>
       <input

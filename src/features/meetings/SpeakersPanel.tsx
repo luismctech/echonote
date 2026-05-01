@@ -40,7 +40,7 @@ export function SpeakersPanel({
   return (
     <section
       aria-label={t("speakers.label")}
-      className="flex flex-wrap gap-2 rounded-md border border-zinc-100 bg-zinc-50 p-2 dark:border-zinc-900 dark:bg-zinc-900/40"
+      className="flex flex-wrap gap-2 rounded-md border border-subtle bg-surface-sunken p-2"
     >
       {speakers.map((sp) => {
         const ms = talkTime.get(sp.id) ?? 0;
