@@ -1313,7 +1313,6 @@ createdAt: string }
  * other id in this crate uses.
  */
 export type SummaryId = string
-export type TAURI_CHANNEL<TSend> = null
 /**
  * One event emitted by the streaming pipeline.
  * 
@@ -1381,6 +1380,8 @@ export type Result<T, E> =
 	| { status: "ok"; data: T }
 	| { status: "error"; error: E };
 
+// @ts-ignore tauri-specta boilerplate — function is part of the generated event scaffold
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 function __makeEvents__<T extends Record<string, any>>(
 	mappings: Record<keyof T, string>,
 ) {
