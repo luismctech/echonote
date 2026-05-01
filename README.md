@@ -29,8 +29,12 @@ Most meeting transcription tools send your audio to the cloud. EchoNote doesn't.
 | **Live transcription** | Real-time speech-to-text as you speak, powered by [Whisper](https://github.com/ggerganov/whisper.cpp) |
 | **Speaker identification** | Automatically detects and labels different speakers in the conversation |
 | **AI summaries** | Generate meeting summaries with one click using a local LLM (no cloud API) |
+| **Streaming summaries** | Summary tokens appear in real-time as the LLM generates them |
+| **Notes panel** | Take timestamped notes side-by-side with the live transcript |
+| **Notes in AI context** | Optionally include your notes when generating summaries or chatting |
 | **Custom summary templates** | Create your own prompt templates for tailored summaries (1:1, sprint review, sales call, or anything you need) |
 | **Model selection** | Download multiple ASR or LLM models and switch between them at runtime — no restart required |
+| **Hardware-aware recommendations** | The app detects your RAM and recommends the optimal models automatically |
 | **Meeting search** | Full-text search across all your past meetings |
 | **Conversational chat** | Ask follow-up questions about any meeting using the local LLM |
 | **Multiple languages** | Supports 90+ languages via Whisper; optimized for English and Spanish |
@@ -89,9 +93,9 @@ All processing happens locally using these open-source AI models:
 | Component | What it does | Size |
 |-----------|-------------|------|
 | [Whisper](https://github.com/ggerganov/whisper.cpp) | Speech-to-text | ~1.6 GB |
-| [Qwen 3](https://huggingface.co/Qwen) | Meeting summaries & chat | ~5–9 GB |
+| [Qwen 3](https://huggingface.co/Qwen) | Meeting summaries & chat | ~2.5–9 GB |
 | [Silero VAD](https://github.com/snakers4/silero-vad) | Detects when someone is speaking | ~1.2 MB |
-| [ERes2Net](https://github.com/modelscope/3D-Speaker) | Identifies different speakers | ~15 MB |
+| [3D-Speaker](https://github.com/modelscope/3D-Speaker) | Identifies different speakers (ERes2Net or CAM++) | ~26 MB |
 
 Models are **not** downloaded automatically — you choose which ones to install from the built-in model manager in **Settings → Models**.
 
@@ -113,6 +117,7 @@ Not sure which models to pick? Use this guide based on your RAM:
 
 | Model | Size | RAM needed | Best for |
 |-------|------|-----------|----------|
+| Qwen 3 4B | ~2.5 GB | 6–8 GB | **Low-RAM machines** with <8 GB — good quality, 100+ languages |
 | Qwen 3 8B | ~5 GB | 8–12 GB | **Laptops** with 8–16 GB RAM |
 | Qwen 3 14B ⭐ | ~9 GB | 14–18 GB | **Recommended** — best quality for 16 GB+ machines |
 | Qwen 3 30B-A3B (MoE) | ~18 GB | 24–32 GB | Premium quality on 32 GB+ machines (only 3B active per token) |
@@ -121,7 +126,7 @@ Not sure which models to pick? Use this guide based on your RAM:
 
 | Your machine | ASR model | LLM model | Total disk |
 |-------------|-----------|-----------|-----------|
-| **8 GB RAM** (older laptop) | `large-v3-turbo-q5_0` | Qwen 3 8B | ~6 GB |
+| **8 GB RAM** (older laptop) | `large-v3-turbo-q5_0` | Qwen 3 4B | ~3.5 GB |
 | **16 GB RAM** (most machines) | `large-v3-turbo` | Qwen 3 14B | ~11 GB |
 | **32 GB+ RAM** (pro machine) | `large-v3-turbo` | Qwen 3 30B-A3B | ~20 GB |
 
@@ -155,10 +160,12 @@ Not sure which models to pick? Use this guide based on your RAM:
 - [x] Conversational chat ("What did Maria say about the deadline?")
 - [x] Custom summary templates (create your own prompts)
 - [x] Runtime model selection (switch ASR/LLM models without restarting)
+- [x] Meeting notes panel (timestamped notes alongside the transcript)
+- [x] Streaming summary generation (token-by-token)
+- [x] Hardware-aware model recommendations
 - [ ] System audio capture (transcribe the other side of the call)
 - [ ] Encrypted local storage
-- [ ] Setup wizard with hardware profile detection
-- [ ] More summary templates (1:1, sprint review, interview, sales call)
+- [ ] Setup wizard (guided first-run experience)
 
 ---
 
@@ -172,7 +179,7 @@ Not sure which models to pick? Use this guide based on your RAM:
 | Speech-to-text | [whisper.cpp](https://github.com/ggerganov/whisper.cpp) |
 | Summaries | [llama.cpp](https://github.com/ggerganov/llama.cpp) |
 | Voice activity | [Silero VAD](https://github.com/snakers4/silero-vad) via ONNX |
-| Speaker ID | [3D-Speaker ERes2Net](https://github.com/modelscope/3D-Speaker) via ONNX |
+| Speaker ID | [3D-Speaker](https://github.com/modelscope/3D-Speaker) (ERes2Net / CAM++) via ONNX |
 | Storage | SQLite with FTS5 full-text search |
 
 ---
