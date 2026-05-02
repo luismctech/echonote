@@ -111,6 +111,7 @@ jobs:
           clang \
           libclang-dev \
           patchelf \
+          rpm \
           pkg-config
 
     # --- Frontend ---

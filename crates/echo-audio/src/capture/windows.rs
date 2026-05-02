@@ -91,7 +91,8 @@ fn enumerate_loopback_device() -> Result<Vec<DeviceInfo>, DomainError> {
         DomainError::AudioDeviceUnavailable("no default output device for WASAPI loopback".into())
     })?;
     let name = device
-        .name()
+        .description()
+        .map(|d| d.name().to_string())
         .unwrap_or_else(|_| "System Audio (WASAPI Loopback)".to_string());
 
     Ok(vec![DeviceInfo {
@@ -154,7 +155,10 @@ fn start_capture(spec: &CaptureSpec) -> Result<StartedStream, DomainError> {
     let device = host.default_output_device().ok_or_else(|| {
         DomainError::AudioDeviceUnavailable("no default output device for WASAPI loopback".into())
     })?;
-    let device_name = device.name().unwrap_or_else(|_| "<unnamed>".to_string());
+    let device_name = device
+        .description()
+        .map(|d| d.name().to_string())
+        .unwrap_or_else(|_| "<unnamed>".to_string());
     let supported = pick_output_config(&device, spec.preferred_format)?;
     let format = AudioFormat {
         sample_rate_hz: supported.sample_rate(),
