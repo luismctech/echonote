@@ -157,7 +157,7 @@ fn start_capture(spec: &CaptureSpec) -> Result<StartedStream, DomainError> {
     let device_name = device.name().unwrap_or_else(|_| "<unnamed>".to_string());
     let supported = pick_output_config(&device, spec.preferred_format)?;
     let format = AudioFormat {
-        sample_rate_hz: supported.sample_rate().0,
+        sample_rate_hz: supported.sample_rate(),
         channels: supported.channels(),
     };
     let sample_format = supported.sample_format();
@@ -242,10 +242,10 @@ fn pick_output_config(
         ))
     })?;
 
-    let min = cfg.min_sample_rate().0;
-    let max = cfg.max_sample_rate().0;
+    let min = cfg.min_sample_rate();
+    let max = cfg.max_sample_rate();
     let target = preferred.sample_rate_hz.clamp(min, max);
-    Ok(cfg.with_sample_rate(cpal::SampleRate(target)))
+    Ok(cfg.with_sample_rate(target))
 }
 
 fn run_audio_thread(
