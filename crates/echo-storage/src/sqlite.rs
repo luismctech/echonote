@@ -318,6 +318,7 @@ impl MeetingStore for SqliteMeetingStore {
             r#"SELECT id, title, started_at, ended_at, duration_ms,
                        language, segment_count
                   FROM meetings
+                 WHERE ended_at IS NOT NULL
               ORDER BY started_at DESC
                  LIMIT ?"#,
         )
