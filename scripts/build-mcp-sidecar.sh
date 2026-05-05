@@ -8,7 +8,14 @@ PROFILE="${1:-release}"
 
 cargo build --profile "$PROFILE" -p echo-mcp
 
-SRC="target/${PROFILE}/echo-mcp"
+# Cargo outputs dev profile to target/debug/, not target/dev/
+if [ "$PROFILE" = "dev" ]; then
+  OUT_DIR="debug"
+else
+  OUT_DIR="$PROFILE"
+fi
+
+SRC="target/${OUT_DIR}/echo-mcp"
 DEST="src-tauri/binaries/echo-mcp-${TRIPLE}"
 
 mkdir -p src-tauri/binaries
