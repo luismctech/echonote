@@ -265,6 +265,7 @@ export function LivePane({
             <PanelLeft className="h-3.5 w-3.5 inline-block" />
           </button>
         </div>
+      </header>
 
       {/* ── Post-stop refining progress ── */}
       {stream.kind === "stopping" && refineStage != null && refineStage >= 0 && (
