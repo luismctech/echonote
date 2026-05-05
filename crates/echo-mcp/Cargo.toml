@@ -1,0 +1,27 @@
+[package]
+name = "echo-mcp"
+description = "MCP (Model Context Protocol) server exposing EchoNote meetings to LLM clients."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+
+[[bin]]
+name = "echo-mcp"
+path = "src/main.rs"
+
+[dependencies]
+echo-domain.workspace = true
+echo-storage.workspace = true
+echo-app.workspace = true
+
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-util"] }
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
+dirs = "6"

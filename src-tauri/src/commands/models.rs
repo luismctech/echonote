@@ -510,6 +510,8 @@ pub async fn set_active_llm(state: State<'_, AppState>, model_id: String) -> Res
     // We use an interior-mutability pattern via a small helper below
     // to update the path.
     state.set_llm_model_path(dest);
+    // Persist so the selection survives app restart.
+    super::save_preference(&state.data_root, "llm", rel_path);
 
     tracing::info!(model_id = %model_id, "active LLM switched");
     Ok(())
@@ -566,6 +568,8 @@ pub async fn set_active_embedder(
     }
 
     state.set_embed_model_path(dest);
+    // Persist so the selection survives app restart.
+    super::save_preference(&state.data_root, "embedder", rel_path);
     tracing::info!(model_id = %model_id, "active embedder switched");
     Ok(())
 }
@@ -621,6 +625,8 @@ pub async fn set_active_asr(state: State<'_, AppState>, model_id: String) -> Res
     state.transcriber.unload().await;
 
     state.set_asr_model_path(dest);
+    // Persist so the selection survives app restart.
+    super::save_preference(&state.data_root, "asr", rel_path);
 
     tracing::info!(model_id = %model_id, "active ASR switched");
     Ok(())

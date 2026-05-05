@@ -1,7 +1,7 @@
 {
   "name": "echonote",
   "private": true,
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Private, local-first meeting transcription and AI summaries.",
   "type": "module",
   "packageManager": "pnpm@10.13.1",
@@ -26,6 +26,7 @@
     "@tauri-apps/plugin-process": "^2.3.1",
     "@tauri-apps/plugin-updater": "^2.10.1",
     "i18next": "^26.0.7",
+    "lucide-react": "^1.14.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-i18next": "^17.0.4",

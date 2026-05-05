@@ -1,5 +1,6 @@
 import { useEffect } from "react";
 import { useTranslation } from "react-i18next";
+import { Check } from "lucide-react";
 
 import { LogoGlow } from "../../../components/Logo";
 
@@ -27,9 +28,7 @@ export function CompletionStep({ onComplete }: Readonly<{ onComplete: () => void
 
       {/* Animated check */}
       <div className="flex h-14 w-14 items-center justify-center rounded-full bg-emerald-100 text-emerald-600 dark:bg-emerald-900/40 dark:text-emerald-400">
-        <svg width="28" height="28" viewBox="0 0 16 16" fill="currentColor">
-          <path d="M13.78 4.22a.75.75 0 0 1 0 1.06l-6.25 6.25a.75.75 0 0 1-1.06 0L3.22 8.28a.75.75 0 0 1 1.06-1.06L7 9.94l5.72-5.72a.75.75 0 0 1 1.06 0z" />
-        </svg>
+        <Check className="h-7 w-7" />
       </div>
 
       <button

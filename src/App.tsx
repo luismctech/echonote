@@ -14,6 +14,7 @@
 
 import { useCallback, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { LayoutGrid } from "lucide-react";
 
 import { LogoMark } from "./components/Logo";
 import { useToast } from "./components/Toaster";
@@ -21,6 +22,7 @@ import { OnboardingFlow } from "./features/onboarding/OnboardingFlow";
 import { HealthProbe } from "./features/live/HealthProbe";
 import { LivePane } from "./features/live/LivePane";
 import { MeetingDetail } from "./features/meetings/MeetingDetail";
+import { McpInstaller } from "./features/settings/McpInstaller";
 import { ModelManager } from "./features/settings/ModelManager";
 import { LanguageSwitcher } from "./features/settings/LanguageSwitcher";
 import { ThemeSwitcher } from "./features/settings/ThemeSwitcher";
@@ -103,6 +105,7 @@ export function App() {
   const [diarize, setDiarize] = useState(false);
   const [language, setLanguage] = useState<string>("es");
   const [showModels, setShowModels] = useState(false);
+  const [showMcp, setShowMcp] = useState(false);
   const [focusMode, setFocusMode] = useState(false);
   const modelManager = useModelManager();
   openModelsRef.current = () => { modelManager.refresh(); setShowModels(true); };
@@ -213,6 +216,14 @@ export function App() {
         <div className="flex items-center gap-2">
           <ThemeSwitcher />
           <LanguageSwitcher />
+          <button
+            type="button"
+            onClick={() => setShowMcp(true)}
+            className="rounded-md border px-2 py-1 text-content-tertiary transition-colors hover:bg-surface-sunken hover:text-violet-600 dark:hover:text-violet-400"
+            title={t("mcp.title")}
+          >
+            <LayoutGrid className="h-3.5 w-3.5" />
+          </button>
           <ModelStatusBadge
             models={modelManager.models}
             downloading={modelManager.downloading !== null}
@@ -224,6 +235,10 @@ export function App() {
 
       {showModels && (
         <ModelManager state={modelManager} onClose={() => setShowModels(false)} onReplayOnboarding={() => { setShowModels(false); resetOnboarding(); }} />
+      )}
+
+      {showMcp && (
+        <McpInstaller onClose={() => setShowMcp(false)} />
       )}
 
       <div className="grid min-h-0 flex-1 grid-cols-1 gap-4 md:grid-cols-[auto_1fr]">

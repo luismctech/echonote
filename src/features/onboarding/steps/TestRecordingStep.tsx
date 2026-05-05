@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { AudioLines } from "lucide-react";
 
 import { startStreaming, stopStreaming, getMeetingId, deleteMeeting } from "../../../ipc/client";
 import type { TranscriptEvent } from "../../../types/streaming";
@@ -12,10 +13,17 @@ export function TestRecordingStep({ onNext }: Readonly<{ onNext: () => void }>) 
   const [transcript, setTranscript] = useState<string[]>([]);
   const [elapsed, setElapsed] = useState(0);
   const sessionRef = useRef<string | null>(null);
+  const meetingIdRef = useRef<string | null>(null);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const startTimeRef = useRef(0);
 
   const handleEvent = useCallback((evt: TranscriptEvent) => {
+    if (evt.type === "started" && sessionRef.current) {
+      // Resolve meetingId as soon as the recorder has created it
+      getMeetingId(sessionRef.current)
+        .then((mid) => { meetingIdRef.current = mid ?? null; })
+        .catch(() => {});
+    }
     if (evt.type === "chunk") {
       const text = evt.segments.map((s) => s.text.trim()).filter(Boolean).join(" ");
       if (text) setTranscript((prev) => [...prev.slice(-8), text]);
@@ -43,12 +51,11 @@ export function TestRecordingStep({ onNext }: Readonly<{ onNext: () => void }>) 
       setTimeout(async () => {
         const sid = sessionRef.current;
         if (sid) {
-          // Look up meeting ID before stopping so the mapping is still alive
-          const meetingId = await getMeetingId(sid).catch(() => null);
           await stopStreaming(sid).catch(() => {});
-          // Delete the test meeting so it doesn't appear in history
-          if (meetingId) await deleteMeeting(meetingId).catch(() => {});
+          const mid = meetingIdRef.current;
+          if (mid) await deleteMeeting(mid).catch(() => {});
           sessionRef.current = null;
+          meetingIdRef.current = null;
         }
         if (timerRef.current) clearInterval(timerRef.current);
         setPhase("done");
@@ -64,9 +71,9 @@ export function TestRecordingStep({ onNext }: Readonly<{ onNext: () => void }>) 
     return () => {
       const sid = sessionRef.current;
       if (sid) {
-        getMeetingId(sid)
-          .then((mid) => stopStreaming(sid).then(() => mid))
-          .then((mid) => { if (mid) deleteMeeting(mid); })
+        const mid = meetingIdRef.current;
+        stopStreaming(sid)
+          .then(() => { if (mid) return deleteMeeting(mid); })
           .catch(() => {});
       }
       if (timerRef.current) clearInterval(timerRef.current);
@@ -79,13 +86,7 @@ export function TestRecordingStep({ onNext }: Readonly<{ onNext: () => void }>) 
     <div className="flex flex-1 flex-col items-center justify-center gap-8 px-8">
       {/* Waveform icon */}
       <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-surface-sunken text-content-tertiary">
-        <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
-          <line x1="4" y1="8" x2="4" y2="16" />
-          <line x1="8" y1="5" x2="8" y2="19" />
-          <line x1="12" y1="3" x2="12" y2="21" />
-          <line x1="16" y1="5" x2="16" y2="19" />
-          <line x1="20" y1="8" x2="20" y2="16" />
-        </svg>
+        <AudioLines className="h-8 w-8" />
       </div>
 
       <div className="flex flex-col items-center gap-3 text-center">

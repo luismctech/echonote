@@ -13,6 +13,7 @@
 pub mod export;
 pub mod hardware;
 pub mod llm;
+pub mod mcp;
 pub mod meetings;
 pub mod models;
 pub mod recommendation;
@@ -637,6 +638,14 @@ fn preferred_llm_model(root: &Path) -> &'static str {
         "models/llm/qwen2.5-7b-instruct-q4_k_m.gguf",
         "models/llm/qwen2.5-3b-instruct-q4_k_m.gguf",
     ];
+    // Honour persisted preference if present and still downloaded.
+    if let Some(pref_path) = load_preference(root, "llm") {
+        for &candidate in CANDIDATES {
+            if candidate == pref_path && root.join(candidate).exists() {
+                return candidate;
+            }
+        }
+    }
     for rel in CANDIDATES {
         if root.join(rel).exists() {
             return rel;
@@ -646,10 +655,24 @@ fn preferred_llm_model(root: &Path) -> &'static str {
 }
 
 fn preferred_embed_model(root: &Path) -> &'static str {
+    // If the user persisted a preference, honour it.
+    if let Some(pref_path) = load_preference(root, "embedder") {
+        // The preference stores the relative path directly.
+        // Match against known static paths to return &'static str.
+        const KNOWN: &[&str] = &[
+            "models/embedder/campplus_en_voxceleb.onnx",
+            "models/embedder/eres2net_en_voxceleb.onnx",
+        ];
+        for &candidate in KNOWN {
+            if candidate == pref_path && root.join(candidate).exists() {
+                return candidate;
+            }
+        }
+    }
     // CAM++ has lower EER and better multilingual coverage than ERes2Net,
     // so prefer it when already installed.
     const CANDIDATES: &[&str] = &[
-        "models/embedder/camplusplus_en_voxceleb.onnx",
+        "models/embedder/campplus_en_voxceleb.onnx",
         "models/embedder/eres2net_en_voxceleb.onnx",
     ];
     for rel in CANDIDATES {
@@ -675,6 +698,14 @@ fn preferred_asr_model(root: &Path) -> &'static str {
         "models/asr/ggml-small.en.bin",
         "models/asr/ggml-tiny.en.bin",
     ];
+    // Honour persisted preference if present and still downloaded.
+    if let Some(pref_path) = load_preference(root, "asr") {
+        for &candidate in CANDIDATES {
+            if candidate == pref_path && root.join(candidate).exists() {
+                return candidate;
+            }
+        }
+    }
     for rel in CANDIDATES {
         if root.join(rel).exists() {
             return rel;
@@ -709,4 +740,38 @@ pub(crate) fn workspace_root() -> PathBuf {
         .parent()
         .map(PathBuf::from)
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+}
+
+// ---------------------------------------------------------------------------
+// Model preference persistence
+// ---------------------------------------------------------------------------
+
+/// Preferences file path: `<data_root>/model_preferences.json`
+fn preferences_path(root: &Path) -> PathBuf {
+    root.join("model_preferences.json")
+}
+
+/// Load a persisted model preference by key (e.g. "embedder", "asr", "llm").
+/// Returns `None` if the file doesn't exist or the key is absent.
+fn load_preference(root: &Path, key: &str) -> Option<String> {
+    let path = preferences_path(root);
+    let content = std::fs::read_to_string(&path).ok()?;
+    let map: serde_json::Map<String, serde_json::Value> = serde_json::from_str(&content).ok()?;
+    map.get(key)?.as_str().map(String::from)
+}
+
+/// Persist a model preference. Merges with existing preferences.
+pub(crate) fn save_preference(root: &Path, key: &str, value: &str) {
+    let path = preferences_path(root);
+    let mut map: serde_json::Map<String, serde_json::Value> = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+    map.insert(
+        key.to_string(),
+        serde_json::Value::String(value.to_string()),
+    );
+    if let Ok(json) = serde_json::to_string_pretty(&map) {
+        let _ = std::fs::write(&path, json);
+    }
 }

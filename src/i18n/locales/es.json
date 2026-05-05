@@ -299,5 +299,40 @@
       "dark": "Modo oscuro",
       "system": "Según el sistema"
     }
+  },
+  "mcp": {
+    "title": "Integraciones MCP",
+    "description": "Conecta asistentes de código con IA a tus transcripciones de reuniones a través del Model Context Protocol.",
+    "close": "Cerrar",
+    "detecting": "Detectando clientes instalados…",
+    "detected": "Clientes detectados",
+    "notDetected": "No detectados",
+    "connected": "Conectado",
+    "notInstalled": "No encontrado",
+    "install": "Instalar",
+    "installing": "Instalando…",
+    "remove": "Quitar",
+    "removing": "Quitando…",
+    "manualConfig": "Configuración manual",
+    "manualHint": "Copia este fragmento JSON en el archivo de configuración MCP de tu cliente.",
+    "toolsAvailable": "Herramientas disponibles",
+    "toolsRead": "Lectura",
+    "toolsWrite": "Escritura",
+    "tools": {
+      "listMeetings": "Listar reuniones",
+      "getMeeting": "Obtener reunión",
+      "searchMeetings": "Buscar transcripciones",
+      "getSummary": "Obtener resumen",
+      "listNotes": "Listar notas",
+      "getSpeakers": "Obtener speakers",
+      "exportMeeting": "Exportar reunión",
+      "listTemplates": "Listar plantillas",
+      "getStatus": "Estado de la app",
+      "renameMeeting": "Renombrar reunión",
+      "deleteMeeting": "Eliminar reunión",
+      "renameSpeaker": "Renombrar speaker",
+      "addNote": "Agregar nota",
+      "deleteNote": "Eliminar nota"
+    }
   }
 }

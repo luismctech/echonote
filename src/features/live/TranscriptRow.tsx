@@ -33,7 +33,7 @@ export const TranscriptRow = memo(function TranscriptRow({
         />
       )}
       <span className="flex-1 min-w-0 break-all">{line.text}</span>
-      <span className="shrink-0 text-content-placeholder">
+      <span className="shrink-0 text-zinc-400">
         {line.language ?? "?"} · rtf {line.rtf.toFixed(2)}
       </span>
     </>

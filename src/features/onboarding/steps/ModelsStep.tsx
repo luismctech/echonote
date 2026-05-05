@@ -1,6 +1,8 @@
 import { useEffect, useMemo } from "react";
 import { useTranslation } from "react-i18next";
+import { Download } from "lucide-react";
 
+import { ModelProviderLogo } from "../../../components/ModelProviderLogo";
 import { useHardwareRecommendation } from "../../../hooks/useHardwareRecommendation";
 import { useModelManager } from "../../../hooks/useModelManager";
 import type { ModelInfo } from "../../../types/models";
@@ -62,11 +64,7 @@ export function ModelsStep({ onNext }: Readonly<{ onNext: () => void }>) {
     <div className="flex min-h-0 flex-1 flex-col items-center gap-6 overflow-hidden px-8 pt-8 pb-4">
       {/* Download icon */}
       <div className="flex h-16 w-16 shrink-0 items-center justify-center rounded-2xl bg-surface-sunken text-content-tertiary">
-        <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-          <polyline points="7 10 12 15 17 10" />
-          <line x1="12" y1="15" x2="12" y2="3" />
-        </svg>
+        <Download className="h-8 w-8" />
       </div>
 
       <div className="flex flex-col items-center gap-2 text-center">
@@ -119,16 +117,12 @@ export function ModelsStep({ onNext }: Readonly<{ onNext: () => void }>) {
                       : "border-subtle bg-surface-sunken"
                   }`}
                 >
-                  {/* Status indicator */}
-                  <div className="flex h-8 w-8 shrink-0 items-center justify-center">
-                    {model.present ? (
-                      <svg width="20" height="20" viewBox="0 0 16 16" fill="none" className="text-emerald-600 dark:text-emerald-400">
-                        <path d="M13.78 4.22a.75.75 0 0 1 0 1.06l-6.25 6.25a.75.75 0 0 1-1.06 0L3.22 8.28a.75.75 0 0 1 1.06-1.06L7 9.94l5.72-5.72a.75.75 0 0 1 1.06 0z" fill="currentColor" />
-                      </svg>
-                    ) : isDownloading ? (
+                  {/* Provider logo / download spinner */}
+                  <div className="flex h-7 w-7 shrink-0 items-center justify-center">
+                    {isDownloading ? (
                       <div className="h-5 w-5 animate-spin rounded-full border-2 border-accent-400 border-t-transparent" />
                     ) : (
-                      <div className="h-5 w-5 rounded-full border-2 border-content-placeholder/30" />
+                      <ModelProviderLogo modelId={model.id} size={28} />
                     )}
                   </div>
 

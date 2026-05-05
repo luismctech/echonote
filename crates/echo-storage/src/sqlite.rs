@@ -318,6 +318,7 @@ impl MeetingStore for SqliteMeetingStore {
             r#"SELECT id, title, started_at, ended_at, duration_ms,
                        language, segment_count
                   FROM meetings
+                 WHERE ended_at IS NOT NULL
               ORDER BY started_at DESC
                  LIMIT ?"#,
         )
@@ -796,6 +797,22 @@ mod tests {
         AudioFormat::WHISPER
     }
 
+    /// Helper: finalize a meeting so it becomes visible to `list()`.
+    async fn finalize_meeting(store: &SqliteMeetingStore, id: MeetingId) {
+        store
+            .finalize(
+                id,
+                FinalizeMeeting {
+                    ended_at_rfc3339: Some(OffsetDateTime::now_utc().format(&Rfc3339).unwrap()),
+                    duration_ms: Some(1_000),
+                    language: None,
+                    segment_count: None,
+                },
+            )
+            .await
+            .unwrap();
+    }
+
     fn segment(start_ms: u32, end_ms: u32, text: &str) -> Segment {
         Segment {
             id: SegmentId::new(),
@@ -830,6 +847,8 @@ mod tests {
             .await
             .unwrap();
 
+        finalize_meeting(&store, id).await;
+
         let listed = store.list(0).await.unwrap();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].segment_count, 2);
@@ -861,6 +880,7 @@ mod tests {
         let s = segment(0, 500, "once");
         store.append_segments(id, &[s.clone()]).await.unwrap();
         store.append_segments(id, &[s.clone()]).await.unwrap();
+        finalize_meeting(&store, id).await;
         let listed = store.list(0).await.unwrap();
         assert_eq!(listed[0].segment_count, 1);
     }
@@ -919,6 +939,8 @@ mod tests {
             })
             .await
             .unwrap();
+        finalize_meeting(&store, a).await;
+        finalize_meeting(&store, b).await;
         let listed = store.list(0).await.unwrap();
         assert_eq!(listed.len(), 2);
         assert_eq!(listed[0].id, b, "newest first");
@@ -1436,6 +1458,7 @@ mod tests {
             store.close().await;
         }
         let store = SqliteMeetingStore::open(&path).await.unwrap();
+        finalize_meeting(&store, id).await;
         let listed = store.list(0).await.unwrap();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].id, id);

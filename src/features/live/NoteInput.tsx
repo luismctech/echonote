@@ -20,13 +20,14 @@ export function NoteInput({
 }: Readonly<{
   /** Current recording elapsed time in ms (for the timestamp badge). */
   elapsedMs: number;
-  /** Called with the note text when the user submits. */
-  onSubmit: (text: string) => void;
+  /** Called with the note text when the user submits. Returns true if persisted. */
+  onSubmit: (text: string) => Promise<boolean>;
   /** Whether the input is disabled (not recording). */
   disabled: boolean;
 }>) {
   const { t } = useTranslation();
   const [text, setText] = useState("");
+  const [submitting, setSubmitting] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
   // Cmd+N (macOS) / Ctrl+N (other) focuses the note input.
@@ -41,12 +42,17 @@ export function NoteInput({
     return () => window.removeEventListener("keydown", handler);
   }, []);
 
-  const handleSubmit = (e: FormEvent) => {
+  const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
     const trimmed = text.trim();
-    if (!trimmed) return;
-    onSubmit(trimmed);
-    setText("");
+    if (!trimmed || submitting) return;
+    setSubmitting(true);
+    try {
+      const ok = await onSubmit(trimmed);
+      if (ok) setText("");
+    } finally {
+      setSubmitting(false);
+    }
   };
 
   return (
@@ -68,7 +74,7 @@ export function NoteInput({
       />
       <button
         type="submit"
-        disabled={disabled || !text.trim()}
+        disabled={disabled || !text.trim() || submitting}
         className="shrink-0 rounded bg-emerald-600 px-2 py-1 text-micro font-medium text-white hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-40"
       >
         {t("live.addNote")}

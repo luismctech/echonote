@@ -350,13 +350,13 @@ export function useRecordingSession({
   }, [stream.kind]);
 
   const addNote = useCallback(
-    async (text: string) => {
+    async (text: string): Promise<boolean> => {
       if (
         (stream.kind !== "recording" && stream.kind !== "paused") ||
         !sessionStartedAtRef.current
       ) {
         console.warn("[addNote] guard failed:", stream.kind, sessionStartedAtRef.current);
-        return;
+        return false;
       }
       const timestampMs = Math.floor(Date.now() - sessionStartedAtRef.current);
       // Resolve the real database MeetingId (distinct from the streaming session id).
@@ -367,13 +367,15 @@ export function useRecordingSession({
       }
       if (!meetingId) {
         console.warn("[addNote] meeting id not yet available");
-        return;
+        return false;
       }
       try {
         const note = await ipcAddNote(meetingId, text, timestampMs);
         setNotes((prev) => [...prev, note]);
+        return true;
       } catch (err) {
         console.error("[addNote] IPC failed:", err);
+        return false;
       }
     },
     [stream],

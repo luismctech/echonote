@@ -1,6 +1,7 @@
 import { type RefObject, useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useVirtualizer } from "@tanstack/react-virtual";
+import { PanelLeft, Mic } from "lucide-react";
 
 import { LogoAnimated } from "../../components/Logo";
 import { ResizableHandleVertical } from "../../components/ResizableHandleVertical";
@@ -100,7 +101,7 @@ export function LivePane({
   onStop: () => void;
   onPause: () => void;
   onResume: () => void;
-  onAddNote: (text: string) => void;
+  onAddNote: (text: string) => Promise<boolean>;
   focusMode: boolean;
   onToggleFocusMode: () => void;
   /** Current refining stage index (0-2) when stream is stopping/persisted. -1 if not refining. */
@@ -261,10 +262,7 @@ export function LivePane({
             title={`Focus mode (${FOCUS_SHORTCUT})`}
             aria-label="Toggle focus mode"
           >
-            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" className="inline-block">
-              <rect x="1" y="1" width="14" height="14" rx="2" stroke="currentColor" strokeWidth="1.5" />
-              {!focusMode && <line x1="4" y1="1" x2="4" y2="15" stroke="currentColor" strokeWidth="1.5" />}
-            </svg>
+            <PanelLeft className="h-3.5 w-3.5 inline-block" />
           </button>
         </div>
       </header>
@@ -346,11 +344,7 @@ export function LivePane({
       <footer className="flex flex-shrink-0 items-center justify-between gap-4 rounded-md border border-subtle bg-surface-sunken px-4 py-2">
         {/* Left: audio level indicator */}
         <div className="flex items-center gap-2">
-          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" className="text-content-tertiary">
-            <path d="M8 1.5a2.5 2.5 0 0 0-2.5 2.5v4a2.5 2.5 0 0 0 5 0V4A2.5 2.5 0 0 0 8 1.5Z" stroke="currentColor" strokeWidth="1.2" />
-            <path d="M4 7.5a4 4 0 0 0 8 0" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
-            <line x1="8" y1="12" x2="8" y2="14.5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
-          </svg>
+          <Mic className="h-3.5 w-3.5 text-content-tertiary" />
           {/* Simple level bars */}
           <div className="flex items-end gap-0.5">
             {Array.from({ length: 5 }).map((_, i) => (

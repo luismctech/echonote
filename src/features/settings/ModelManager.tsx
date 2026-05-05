@@ -7,8 +7,10 @@
  */
 
 import { useTranslation } from "react-i18next";
+import { RefreshCw, Trash2 } from "lucide-react";
 
 import { Modal } from "../../components/Modal";
+import { ModelProviderLogo } from "../../components/ModelProviderLogo";
 import type { UseModelManager, DownloadProgress } from "../../hooks/useModelManager";
 import type { ModelInfo } from "../../types/models";
 import type { ModelRecommendation } from "../../types/hardware";
@@ -53,7 +55,7 @@ export function ModelManager({
   }
 
   return (
-    <Modal open onClose={onClose} className="w-full max-w-lg">
+    <Modal open onClose={onClose} className="w-full max-w-2xl">
       <div className="flex max-h-[80vh] w-full flex-col gap-3 overflow-hidden rounded-xl border bg-surface-elevated p-5 shadow-xl">
         <header className="flex shrink-0 items-center justify-between">
           <h2 className="text-ui-lg font-semibold">{t("models.title")}</h2>
@@ -77,7 +79,7 @@ export function ModelManager({
         {loading ? (
           <p className="py-6 text-center text-ui-md text-content-tertiary">{t("models.loading")}</p>
         ) : (
-          <div className="flex min-h-0 flex-col gap-5 overflow-y-auto">
+          <div className="flex min-h-0 flex-col gap-5 overflow-y-auto pb-4">
             {sections.map((s) => (
               <ModelSection
                 key={s.key}
@@ -102,9 +104,7 @@ export function ModelManager({
             onClick={onReplayOnboarding}
             className="flex items-center gap-1.5 text-ui-xs text-content-tertiary transition-colors hover:text-content-secondary"
           >
-            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" className="h-3.5 w-3.5">
-              <path fillRule="evenodd" d="M13.836 2.477a.75.75 0 0 1 .75.75v3.182a.75.75 0 0 1-.75.75h-3.182a.75.75 0 0 1 0-1.5h1.37l-.84-.841a4.5 4.5 0 0 0-7.08.932.75.75 0 0 1-1.3-.75 6 6 0 0 1 9.44-1.242l.842.84V3.227a.75.75 0 0 1 .75-.75Zm-.911 7.5A.75.75 0 0 1 13.199 11a6 6 0 0 1-9.44 1.241l-.84-.84v1.371a.75.75 0 0 1-1.5 0V9.591a.75.75 0 0 1 .75-.75H5.35a.75.75 0 0 1 0 1.5H3.98l.841.841a4.5 4.5 0 0 0 7.08-.932.75.75 0 0 1 1.025-.273Z" clipRule="evenodd" />
-            </svg>
+            <RefreshCw className="h-3.5 w-3.5" />
             {t("models.replayOnboarding")}
           </button>
         </div>
@@ -235,16 +235,12 @@ function ModelRow({
           : "border-subtle bg-surface-sunken"
       }`}
     >
-      {/* Status indicator */}
-      <div className="flex h-8 w-8 shrink-0 items-center justify-center">
-        {model.present ? (
-          <svg width="20" height="20" viewBox="0 0 16 16" fill="none" className="text-emerald-600 dark:text-emerald-400">
-            <path d="M13.78 4.22a.75.75 0 0 1 0 1.06l-6.25 6.25a.75.75 0 0 1-1.06 0L3.22 8.28a.75.75 0 0 1 1.06-1.06L7 9.94l5.72-5.72a.75.75 0 0 1 1.06 0z" fill="currentColor" />
-          </svg>
-        ) : isDownloading ? (
+      {/* Provider logo / download spinner */}
+      <div className="flex h-7 w-7 shrink-0 items-center justify-center">
+        {isDownloading ? (
           <div className="h-5 w-5 animate-spin rounded-full border-2 border-accent-400 border-t-transparent" />
         ) : (
-          <div className="h-5 w-5 rounded-full border-2 border-content-placeholder/30" />
+          <ModelProviderLogo modelId={model.id} size={28} />
         )}
       </div>
 
@@ -315,9 +311,7 @@ function ModelRow({
             className="rounded-full p-1.5 text-content-placeholder hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-950/40 dark:hover:text-red-400"
             title={t("models.delete")}
           >
-            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" className="h-3.5 w-3.5">
-              <path fillRule="evenodd" d="M5 3.25V4H2.75a.75.75 0 0 0 0 1.5h.3l.815 8.15A1.5 1.5 0 0 0 5.357 15h5.285a1.5 1.5 0 0 0 1.493-1.35l.815-8.15h.3a.75.75 0 0 0 0-1.5H11v-.75A2.25 2.25 0 0 0 8.75 1h-1.5A2.25 2.25 0 0 0 5 3.25Zm2.25-.75a.75.75 0 0 0-.75.75V4h3v-.75a.75.75 0 0 0-.75-.75h-1.5ZM6.05 6a.75.75 0 0 1 .787.713l.275 5.5a.75.75 0 0 1-1.498.075l-.275-5.5A.75.75 0 0 1 6.05 6Zm3.9 0a.75.75 0 0 1 .712.787l-.275 5.5a.75.75 0 0 1-1.498-.075l.275-5.5A.75.75 0 0 1 9.95 6Z" clipRule="evenodd" />
-            </svg>
+            <Trash2 className="h-3.5 w-3.5" />
           </button>
         </div>
       )}

@@ -103,6 +103,9 @@ jobs:
     - name: pnpm build (Vite production bundle)
       run: pnpm build
 
+    - name: Build MCP sidecar (required by Tauri externalBin)
+      run: bash scripts/build-mcp-sidecar.sh dev
+
     - name: cargo clippy
       run: cargo clippy --workspace --all-targets -- -D warnings
 
@@ -180,6 +183,9 @@ jobs:
 
     - name: pnpm build (needed so src-tauri can resolve ../dist)
       run: pnpm build
+
+    - name: Build MCP sidecar (required by Tauri externalBin)
+      run: bash scripts/build-mcp-sidecar.sh dev
 
     - name: cargo check
       run: cargo check --workspace --all-targets --locked

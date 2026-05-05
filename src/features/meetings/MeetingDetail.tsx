@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useVirtualizer } from "@tanstack/react-virtual";
+import { Pencil } from "lucide-react";
 import { CopyButton } from "../../components/CopyButton";
 import { ResizableHandleVertical } from "../../components/ResizableHandleVertical";
 
@@ -63,13 +64,9 @@ function EditableTitle({
         title={t("meeting.editTitle")}
       >
         <span>{value}</span>
-        <svg
+        <Pencil
           className="h-3.5 w-3.5 shrink-0 text-content-placeholder opacity-0 transition-opacity group-hover:opacity-100"
-          viewBox="0 0 16 16"
-          fill="currentColor"
-        >
-          <path d="M12.146.854a.5.5 0 0 1 .708 0l2.292 2.292a.5.5 0 0 1 0 .708l-9.5 9.5a.5.5 0 0 1-.168.11l-4 1.5a.5.5 0 0 1-.632-.632l1.5-4a.5.5 0 0 1 .11-.168l9.5-9.5zM11.207 2.5 13.5 4.793 14.793 3.5 12.5 1.207 11.207 2.5zm1.586 3L10.5 3.207 3 10.707V11h.5a.5.5 0 0 1 .5.5v.5h.5a.5.5 0 0 1 .5.5v.5h.293l7.5-7.5z" />
-        </svg>
+        />
       </button>
     );
   }
