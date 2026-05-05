@@ -160,7 +160,7 @@ jobs:
         releaseBody: |
           ## What's Changed
 
-          See [CHANGELOG](https://github.com/luismctech/echonote/blob/develop/CHANGELOG.md) for details.
+          See the [release notes](https://github.com/luismctech/echonote/blob/main/README.md) for details.
 
           ### Install
 
@@ -169,10 +169,55 @@ jobs:
           | macOS (Apple Silicon) | `EchoNote_x.x.x_macOS-AppleSilicon.dmg` |
           | macOS (Intel) | `EchoNote_x.x.x_macOS-Intel.dmg` |
           | Windows | `EchoNote_x.x.x_Windows-x64.exe` |
-          | Linux | `EchoNote_x.x.x_Linux-x64.AppImage` |
+          | Linux (AppImage) | `EchoNote_x.x.x_Linux-x64.AppImage` |
+          | Linux (Debian/Ubuntu) | `EchoNote_x.x.x_Linux-x64.deb` |
+          | Linux (Fedora/RHEL) | `EchoNote_x.x.x_Linux-x64.rpm` |
         releaseDraft: true
         prerelease: ${{ contains(github.ref_name, '-') }}
         args: ${{ matrix.tauri-args }}
         updaterJsonPreferNsis: true
+
+  # ---------------------------------------------------------------------------
+  # Add user-friendly artifact names to the release.
+  # Tauri generates technical names like EchoNote_0.5.0_aarch64.dmg — this job
+  # downloads those and re-uploads copies with clear platform names.
+  # ---------------------------------------------------------------------------
+  friendly-names:
+    name: Add friendly artifact names
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+    - name: Download and re-upload with friendly names
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        TAG: ${{ github.ref_name }}
+      run: |
+        set -euo pipefail
+        VERSION="${TAG#v}"
+        RELEASE_URL="https://github.com/${{ github.repository }}/releases/download/${TAG}"
+
+        # Map: original-name → friendly-name
+        declare -A RENAMES=(
+          ["EchoNote_${VERSION}_aarch64.dmg"]="EchoNote_${VERSION}_macOS-AppleSilicon.dmg"
+          ["EchoNote_${VERSION}_x64.dmg"]="EchoNote_${VERSION}_macOS-Intel.dmg"
+          ["EchoNote_${VERSION}_x64-setup.exe"]="EchoNote_${VERSION}_Windows-x64.exe"
+          ["EchoNote_${VERSION}_amd64.AppImage"]="EchoNote_${VERSION}_Linux-x64.AppImage"
+          ["EchoNote_${VERSION}_amd64.deb"]="EchoNote_${VERSION}_Linux-x64.deb"
+          ["EchoNote-${VERSION}-1.x86_64.rpm"]="EchoNote_${VERSION}_Linux-x64.rpm"
+        )
+
+        mkdir -p artifacts
+        for ORIGINAL in "${!RENAMES[@]}"; do
+          FRIENDLY="${RENAMES[$ORIGINAL]}"
+          echo "→ ${ORIGINAL} → ${FRIENDLY}"
+          if curl -fSL -o "artifacts/${FRIENDLY}" "${RELEASE_URL}/${ORIGINAL}" 2>/dev/null; then
+            gh release upload "${TAG}" "artifacts/${FRIENDLY}" \
+              --repo "${{ github.repository }}" --clobber
+          else
+            echo "  ⚠ ${ORIGINAL} not found, skipping"
+          fi
+        done
 
 
