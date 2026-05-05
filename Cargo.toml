@@ -69,7 +69,7 @@ clap = { version = "4.5", features = ["derive", "env"] }
 # Audio
 cpal = "0.17"
 hound = "3.5"
-rubato = "0.16"
+rubato = "2.0"
 # macOS-only system audio capture (ScreenCaptureKit). Pulled in conditionally
 # by echo-audio via [target.'cfg(target_os = "macos")'.dependencies].
 screencapturekit = "1.5"
