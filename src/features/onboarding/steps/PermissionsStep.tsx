@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { Mic, Check } from "lucide-react";
 
 import { startStreaming, stopStreaming, getMeetingId, deleteMeeting } from "../../../ipc/client";
 
@@ -16,16 +17,21 @@ export function PermissionsStep({ onNext }: Readonly<{ onNext: () => void }>) {
   const checkPermissions = useCallback(async () => {
     setStatus("checking");
     try {
-      // Start a minimal session — macOS will prompt for mic access if needed
+      // Wait for the "started" event before querying meetingId — the
+      // recorder only populates the session→meeting mapping after
+      // processing this event asynchronously.
+      let resolveStarted: () => void;
+      const started = new Promise<void>((r) => { resolveStarted = r; });
+
       const sessionId = await startStreaming(
         { chunkMs: 1_000, silenceRmsThreshold: 0.5 },
-        () => { /* discard events */ },
+        (evt) => { if (evt.type === "started") resolveStarted(); },
       );
-      // Grab the meeting id before stopping so we can clean it up
+
+      await started;
+
       const meetingId = await getMeetingId(sessionId);
-      // Immediately stop — we only wanted the permission prompt
       await stopStreaming(sessionId);
-      // Delete the empty meeting so it doesn't pollute history
       if (meetingId) await deleteMeeting(meetingId).catch(() => {});
       setStatus("granted");
     } catch {
@@ -56,11 +62,7 @@ export function PermissionsStep({ onNext }: Readonly<{ onNext: () => void }>) {
             ? "bg-rose-50 text-rose-600 dark:bg-rose-950/40 dark:text-rose-400"
             : "bg-surface-sunken text-content-tertiary"
       }`}>
-        <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-          <rect x="9" y="2" width="6" height="11" rx="3" />
-          <path d="M5 10a7 7 0 0 0 14 0" />
-          <line x1="12" y1="19" x2="12" y2="22" />
-        </svg>
+        <Mic className="h-8 w-8" />
       </div>
 
       <div className="flex flex-col items-center gap-3 text-center">
@@ -76,7 +78,7 @@ export function PermissionsStep({ onNext }: Readonly<{ onNext: () => void }>) {
 
         {status === "granted" && (
           <div className="flex items-center gap-2 text-ui-md font-medium text-emerald-600 dark:text-emerald-400">
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M13.78 4.22a.75.75 0 0 1 0 1.06l-6.25 6.25a.75.75 0 0 1-1.06 0L3.22 8.28a.75.75 0 0 1 1.06-1.06L7 9.94l5.72-5.72a.75.75 0 0 1 1.06 0z" /></svg>
+            <Check className="h-4 w-4" />
             {t("onboarding.permissionsGranted")}
           </div>
         )}

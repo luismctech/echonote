@@ -7,6 +7,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { Pencil, Trash2 } from "lucide-react";
 
 import type { CustomTemplate, CustomTemplateId } from "../../types/custom-template";
 import {
@@ -206,9 +207,7 @@ export function TemplateManager({
                       className="rounded-md p-1 text-content-tertiary hover:bg-surface-inset hover:text-content-primary"
                       title={t("templates.edit")}
                     >
-                      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" className="h-3.5 w-3.5">
-                        <path d="M13.488 2.513a1.75 1.75 0 0 0-2.475 0L3.84 9.686a2.25 2.25 0 0 0-.602 1.07l-.56 2.243a.75.75 0 0 0 .912.912l2.243-.56a2.25 2.25 0 0 0 1.07-.602l7.174-7.174a1.75 1.75 0 0 0 0-2.474l-.588-.588ZM11.72 3.22a.25.25 0 0 1 .354 0l.588.588a.25.25 0 0 1 0 .354L11.95 4.874 10.807 3.93l.913-.71ZM10.1 4.636l1.143.944-5.498 5.498a.75.75 0 0 1-.357.2l-1.396.35.349-1.397a.75.75 0 0 1 .2-.357l5.56-5.238Z" />
-                      </svg>
+                      <Pencil className="h-3.5 w-3.5" />
                     </button>
                     <button
                       type="button"
@@ -216,9 +215,7 @@ export function TemplateManager({
                       className="rounded-md p-1 text-content-placeholder hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-950/40 dark:hover:text-red-400"
                       title={t("templates.delete")}
                     >
-                      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" className="h-3.5 w-3.5">
-                        <path fillRule="evenodd" d="M5 3.25V4H2.75a.75.75 0 0 0 0 1.5h.3l.815 8.15A1.5 1.5 0 0 0 5.357 15h5.285a1.5 1.5 0 0 0 1.493-1.35l.815-8.15h.3a.75.75 0 0 0 0-1.5H11v-.75A2.25 2.25 0 0 0 8.75 1h-1.5A2.25 2.25 0 0 0 5 3.25Zm2.25-.75a.75.75 0 0 0-.75.75V4h3v-.75a.75.75 0 0 0-.75-.75h-1.5ZM6.05 6a.75.75 0 0 1 .787.713l.275 5.5a.75.75 0 0 1-1.498.075l-.275-5.5A.75.75 0 0 1 6.05 6Zm3.9 0a.75.75 0 0 1 .712.787l-.275 5.5a.75.75 0 0 1-1.498-.075l.275-5.5A.75.75 0 0 1 9.95 6Z" clipRule="evenodd" />
-                      </svg>
+                      <Trash2 className="h-3.5 w-3.5" />
                     </button>
                   </div>
                 </div>

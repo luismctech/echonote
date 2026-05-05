@@ -1,5 +1,6 @@
 import { useCallback, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { ArrowLeft } from "lucide-react";
 
 import { WelcomeStep } from "./steps/WelcomeStep";
 import { PrivacyStep } from "./steps/PrivacyStep";
@@ -78,10 +79,7 @@ export function OnboardingFlow({ onComplete }: Readonly<{ onComplete: () => void
               onClick={goBack}
               className="flex items-center gap-1 text-ui-sm text-content-tertiary transition-colors hover:text-content-secondary"
             >
-              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-                <line x1="12" y1="8" x2="4" y2="8" />
-                <polyline points="8 4 4 8 8 12" />
-              </svg>
+              <ArrowLeft className="h-3.5 w-3.5" />
               {t("onboarding.back")}
             </button>
           ) : (

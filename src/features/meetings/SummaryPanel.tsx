@@ -18,6 +18,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import Markdown from "react-markdown";
+import { Settings, FileText } from "lucide-react";
 import { CopyButton } from "../../components/CopyButton";
 import { LogoAnimated } from "../../components/Logo";
 import { formatDate } from "../../lib/format";
@@ -74,9 +75,7 @@ export function SummaryPanel({
             className="rounded-md p-1 text-content-tertiary hover:bg-surface-inset hover:text-content-primary"
             title={t("templates.manage")}
           >
-            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" className="h-3.5 w-3.5">
-              <path fillRule="evenodd" d="M6.455 1.45A.5.5 0 0 1 6.952 1h2.096a.5.5 0 0 1 .497.45l.186 1.858a4.996 4.996 0 0 1 1.466.848l1.703-.769a.5.5 0 0 1 .63.207l1.048 1.814a.5.5 0 0 1-.133.656l-1.517 1.09a5.026 5.026 0 0 1 0 1.694l1.517 1.09a.5.5 0 0 1 .133.656l-1.048 1.814a.5.5 0 0 1-.63.207l-1.703-.769a4.996 4.996 0 0 1-1.466.848l-.186 1.858a.5.5 0 0 1-.497.45H6.952a.5.5 0 0 1-.497-.45l-.186-1.858a4.993 4.993 0 0 1-1.466-.848l-1.703.769a.5.5 0 0 1-.63-.207L1.422 12.4a.5.5 0 0 1 .133-.656l1.517-1.09a5.026 5.026 0 0 1 0-1.694l-1.517-1.09a.5.5 0 0 1-.133-.656l1.048-1.814a.5.5 0 0 1 .63-.207l1.703.769a4.993 4.993 0 0 1 1.466-.848l.186-1.858ZM8 10.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5Z" clipRule="evenodd" />
-            </svg>
+            <Settings className="h-3.5 w-3.5" />
           </button>
           <label className="flex cursor-pointer items-center gap-1 text-ui-xs text-content-tertiary">
             <input
@@ -134,13 +133,7 @@ export function SummaryPanel({
         {!loading && !generating && summary && <SummaryBody summary={summary} />}
         {!loading && !generating && !summary && (
           <div className="flex flex-col items-center justify-center gap-3 py-12 text-center">
-            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" className="h-10 w-10 text-content-placeholder opacity-40">
-              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-              <polyline points="14 2 14 8 20 8" />
-              <line x1="16" y1="13" x2="8" y2="13" />
-              <line x1="16" y1="17" x2="8" y2="17" />
-              <polyline points="10 9 9 9 8 9" />
-            </svg>
+            <FileText className="h-10 w-10 text-content-placeholder opacity-40" />
             <p className="text-ui-sm text-content-placeholder">{t("summary.empty")}</p>
           </div>
         )}
