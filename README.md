@@ -1,198 +1,242 @@
 <p align="center">
-  <img src="src-tauri/icons/128x128.png" width="80" alt="EchoNote logo" />
+  <img src="src-tauri/icons/128x128.png" width="96" alt="EchoNote logo" />
 </p>
 <h1 align="center">EchoNote</h1>
-
-[![CI](https://github.com/luismctech/echonote/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/luismctech/echonote/actions/workflows/ci.yml)
-[![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](./LICENSE)
-[![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey)]()
-
-**EchoNote** is a free, open-source desktop app that transcribes and summarizes your meetings using AI — entirely on your device. No cloud services, no bots joining your calls, no subscriptions.
-
----
-
-## Why EchoNote?
-
-Most meeting transcription tools send your audio to the cloud. EchoNote doesn't.
-
-- **Your data stays on your machine.** Audio, transcripts, summaries, and chat history never leave your device.
-- **No bot joins your call.** EchoNote captures audio directly from your microphone — no awkward "Otter.ai is joining" moments.
-- **No subscription.** It's free and open-source. Download it, run it, own it.
-- **Works offline.** No internet connection required after the initial model download.
+<p align="center">
+  <strong>Private, on-device meeting transcription & AI summaries.</strong><br/>
+  No cloud. No bots. No subscriptions.
+</p>
+<p align="center">
+  <a href="https://github.com/luismctech/echonote/releases/latest"><img src="https://img.shields.io/github/v/release/luismctech/echonote?style=flat-square&label=Download&color=28a745" alt="Download" /></a>
+  <a href="https://github.com/luismctech/echonote/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/luismctech/echonote/ci.yml?branch=main&style=flat-square&label=CI" alt="CI" /></a>
+  <a href="./LICENSE"><img src="https://img.shields.io/badge/License-AGPL--3.0-blue?style=flat-square" alt="License" /></a>
+  <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey?style=flat-square" alt="Platform" />
+</p>
 
 ---
 
-## Features
+## Quick Start
 
-| Feature | Description |
-|---------|-------------|
-| **Live transcription** | Real-time speech-to-text as you speak, powered by [Whisper](https://github.com/ggerganov/whisper.cpp) |
-| **Speaker identification** | Automatically detects and labels different speakers in the conversation |
-| **AI summaries** | Generate meeting summaries with one click using a local LLM (no cloud API) |
-| **Streaming summaries** | Summary tokens appear in real-time as the LLM generates them |
-| **Notes panel** | Take timestamped notes side-by-side with the live transcript |
-| **Notes in AI context** | Optionally include your notes when generating summaries or chatting |
-| **Custom summary templates** | Create your own prompt templates for tailored summaries (1:1, sprint review, sales call, or anything you need) |
-| **Model selection** | Download multiple ASR or LLM models and switch between them at runtime — no restart required |
-| **Theme switcher** | Light, dark, and system-follow modes with persistent preference |
-| **Hardware-aware recommendations** | The app detects your RAM and recommends the optimal models automatically |
-| **Meeting search** | Full-text search across all your past meetings |
-| **Conversational chat** | Ask follow-up questions about any meeting using the local LLM |
-| **Multiple languages** | Supports 90+ languages via Whisper; optimized for English and Spanish |
-| **Cross-platform** | Available for macOS (Apple Silicon & Intel), Windows, and Linux |
-| **Sleep prevention** | Automatically prevents OS sleep while recording so you never lose a session |
-| **Setup wizard** | Guided onboarding: permissions, hardware check, model downloads, and test recording |
-| **Auto-updates** | The app checks for new versions on launch |
+1. **Download** the installer for your OS → [**Latest Release**](https://github.com/luismctech/echonote/releases/latest)
+2. **Install & open** the app — a setup wizard walks you through permissions and model downloads.
+3. **Hit Record** — live transcription starts instantly. When you're done, click **Summarize**.
 
----
+That's it. Everything runs on your machine.
 
-## Download
+### Download
 
-Get the latest release for your platform from [**GitHub Releases**](https://github.com/luismctech/echonote/releases/latest).
-
-| Platform | File | How to install |
-|----------|------|----------------|
-| macOS (Apple Silicon) | `EchoNote_x.x.x_macOS-AppleSilicon.dmg` | Open `.dmg`, drag to Applications |
-| macOS (Intel) | `EchoNote_x.x.x_macOS-Intel.dmg` | Open `.dmg`, drag to Applications |
+| Platform | File | Install |
+|----------|------|---------|
+| macOS (Apple Silicon) | `EchoNote_x.x.x_macOS-AppleSilicon.dmg` | Open `.dmg` → drag to Applications |
+| macOS (Intel) | `EchoNote_x.x.x_macOS-Intel.dmg` | Open `.dmg` → drag to Applications |
 | Windows | `EchoNote_x.x.x_Windows-x64.exe` | Run the installer |
-| Linux | `EchoNote_x.x.x_Linux-x64.AppImage` | `chmod +x` and run (includes auto-update) |
-| Linux (Debian/Ubuntu) | `EchoNote_x.x.x_Linux-x64.deb` | `sudo dpkg -i EchoNote_*.deb` (manual update) |
+| Linux | `EchoNote_x.x.x_Linux-x64.AppImage` | `chmod +x && ./EchoNote_*.AppImage` |
+| Linux (Debian/Ubuntu) | `EchoNote_x.x.x_Linux-x64.deb` | `sudo dpkg -i EchoNote_*.deb` |
 
-### First launch notes
+### ⚠️ Important — Read Before First Launch
 
-#### macOS — "app is damaged" warning
+> **The app is not code-signed yet**, so your OS will show a security warning the first time you open it.
+> This is expected for open-source apps — the full source code is available in this repository.
 
-The app is not yet code-signed with Apple. Run this once in Terminal:
+<table>
+<tr>
+<td width="33%">
+
+#### 🍎 macOS
+
+macOS will say the app is **"damaged"** or **"can't be opened"**. Run this **once** in Terminal:
 
 ```sh
 xattr -cr /Applications/EchoNote.app
 ```
 
-Then open the app normally. This is safe — the full source code is available in this repository.
+Then open the app normally.
 
-#### Windows — SmartScreen warning
+</td>
+<td width="33%">
 
-Windows SmartScreen may warn about an unrecognized app. Click **"More info"** → **"Run anyway"**. This is normal for new open-source apps without a code signing certificate.
+#### 🪟 Windows
 
-#### Linux — AppImage permissions
+Windows SmartScreen will show an **"unrecognized app"** warning.
+
+Click **"More info"** → **"Run anyway"**.
+
+</td>
+<td width="33%">
+
+#### 🐧 Linux
+
+Make the AppImage executable first:
 
 ```sh
 chmod +x EchoNote_*.AppImage
 ./EchoNote_*.AppImage
 ```
 
+</td>
+</tr>
+</table>
+
 ---
 
-## How it works
+## Why EchoNote?
 
-1. **Start a meeting** — Click record; EchoNote captures audio from your microphone.
-2. **See the transcript live** — Words appear in real-time as speakers talk.
-3. **Review later** — All meetings are saved locally. Browse, search, and re-read any past meeting.
-4. **Get a summary** — Click "Summarize" to generate an AI-powered summary on your device.
+Most meeting tools send your audio to the cloud. EchoNote doesn't.
 
-All processing happens locally using these open-source AI models:
+| | EchoNote | Cloud-based tools |
+|---|:---:|:---:|
+| Data stays on your machine | ✅ | ❌ |
+| Works offline | ✅ | ❌ |
+| No bot joins your call | ✅ | ❌ |
+| No subscription / free forever | ✅ | ❌ |
+| Open source & auditable | ✅ | ❌ |
 
-| Component | What it does | Size |
-|-----------|-------------|------|
-| [Whisper](https://github.com/ggerganov/whisper.cpp) | Speech-to-text | ~148 MB – 1.6 GB |
-| [Qwen 3](https://huggingface.co/Qwen) | Meeting summaries & chat | ~2.6 – 9.2 GB |
-| [Silero VAD](https://github.com/snakers4/silero-vad) | Detects when someone is speaking | ~1.2 MB |
-| [3D-Speaker](https://github.com/modelscope/3D-Speaker) | Identifies different speakers (ERes2Net or CAM++) | ~26 MB |
+---
+
+## Features
+
+### Core
+
+- **Live transcription** — Real-time speech-to-text powered by [Whisper](https://github.com/ggerganov/whisper.cpp), supporting 90+ languages.
+- **Speaker identification** — Automatically detects and labels different speakers using neural embeddings.
+- **AI summaries** — One-click meeting summaries generated by a local LLM. Tokens stream in real-time.
+- **Conversational chat** — Ask follow-up questions about any meeting ("What did Maria say about the deadline?").
+- **Meeting notes** — Take timestamped notes alongside the live transcript; include them in AI context.
+- **Full-text search** — Instantly search across all past meetings.
+
+### Customization
+
+- **Custom summary templates** — Create prompt templates for any format: 1:1s, sprint reviews, sales calls.
+- **Model selection** — Download and switch between multiple ASR and LLM models at runtime — no restart needed.
+- **Hardware-aware recommendations** — EchoNote detects your RAM and suggests the optimal models automatically.
+- **Theme switcher** — Light, dark, and system-follow modes.
+
+### Integrations
+
+- **MCP server** — Expose your meeting transcripts, notes, and summaries to AI coding assistants (VS Code, Cursor, Windsurf, Claude Desktop) via [Model Context Protocol](https://modelcontextprotocol.io/). One-click install from Settings.
+
+### Reliability
+
+- **Works with Teams, Zoom, etc.** — Captures audio at the device's native sample rate, so it coexists with apps that use exclusive audio formats.
+- **Sleep prevention** — Automatically prevents OS sleep during recording.
+- **Auto-updates** — The app checks for new versions on launch.
+- **Setup wizard** — Guided onboarding: permissions, hardware check, model downloads, and test recording.
+
+---
+
+## How It Works
+
+```
+🎤 Microphone → Silero VAD → Whisper → Speaker ID → Live Transcript
+                                                          ↓
+                                              Qwen 3 LLM → Summary / Chat
+```
+
+All processing happens locally using open-source models:
+
+| Model | Purpose | Size |
+|-------|---------|------|
+| [Whisper](https://github.com/ggerganov/whisper.cpp) | Speech-to-text | 148 MB – 1.6 GB |
+| [Qwen 3](https://huggingface.co/Qwen) | Summaries & chat | 2.6 – 9.2 GB |
+| [Silero VAD](https://github.com/snakers4/silero-vad) | Voice activity detection | ~1.2 MB |
+| [3D-Speaker](https://github.com/modelscope/3D-Speaker) | Speaker embeddings (ERes2Net / CAM++) | ~26 MB |
 | [pyannote](https://github.com/pyannote/pyannote-audio) | Speaker segmentation | ~17 MB |
 
-Models are **not** downloaded automatically — you choose which ones to install from the built-in model manager in **Settings → Models**.
+Models are downloaded on-demand from the built-in model manager (**Settings → Models**).
 
-### Choosing the right models for your hardware
-
-Not sure which models to pick? Use this guide based on your RAM:
+<details>
+<summary><strong>Which models should I choose?</strong></summary>
 
 #### ASR (Speech-to-Text)
 
-| Model | Label | Size | RAM needed | Best for |
-|-------|-------|------|-----------|----------|
-| `base` | Whisper Base | ~148 MB | 1 GB | Quick testing, very low-end machines |
-| `small` | Whisper Small | ~488 MB | 2 GB | Decent quality on older hardware |
-| `distil-large-v3` | Whisper Fast | ~756 MB | 3 GB | Distilled model — faster inference, good quality |
-| `large-v3-turbo-q5_0` | Whisper Turbo Lite | ~574 MB | 2 GB | Quantized turbo — lighter footprint, nearly same quality |
-| `large-v3-turbo` ⭐ | Whisper Turbo | ~1.6 GB | 4 GB | **Recommended** — best speed/quality balance, 90+ languages |
+| Model | Size | RAM | Best for |
+|-------|------|-----|----------|
+| Whisper Base | ~148 MB | 1 GB | Quick testing, low-end machines |
+| Whisper Small | ~488 MB | 2 GB | Decent quality on older hardware |
+| Whisper Fast (distil-large-v3) | ~756 MB | 3 GB | Distilled — faster inference, good quality |
+| Whisper Turbo Lite (q5_0) | ~574 MB | 2 GB | Quantized — lighter, nearly same quality |
+| **Whisper Turbo** ⭐ | ~1.6 GB | 4 GB | **Recommended** — best speed/quality, 90+ languages |
 
 #### LLM (Summaries & Chat)
 
-| Model | Label | Size | RAM needed | Best for |
-|-------|-------|------|-----------|----------|
-| Qwen 3 4B | Qwen 3 Lite | ~2.6 GB | 6–8 GB | **Low-RAM machines** with <8 GB — good quality, 100+ languages |
-| Qwen 3 8B | Qwen 3 Medium | ~5.2 GB | 8–12 GB | **Laptops** with 8–16 GB RAM |
-| Qwen 3 14B ⭐ | Qwen 3 Large | ~9.2 GB | 14–18 GB | **Recommended** — best quality for 16 GB+ machines |
+| Model | Size | RAM | Best for |
+|-------|------|-----|----------|
+| Qwen 3 Lite (4B) | ~2.6 GB | 6–8 GB | Machines with <8 GB RAM |
+| Qwen 3 Medium (8B) | ~5.2 GB | 8–12 GB | Laptops with 8–16 GB RAM |
+| **Qwen 3 Large (14B)** ⭐ | ~9.2 GB | 14–18 GB | **Recommended** — best quality for 16 GB+ |
 
-#### Quick recommendations
+#### Quick Pick
 
-| Your machine | ASR model | LLM model | Total disk |
-|-------------|-----------|-----------|-----------|
-| **8 GB RAM** (older laptop) | Whisper Turbo Lite | Qwen 3 Lite | ~3.2 GB |
-| **16 GB RAM** (most machines) | Whisper Turbo | Qwen 3 Large | ~10.8 GB |
-| **32 GB+ RAM** (pro machine) | Whisper Turbo | Qwen 3 Large | ~10.8 GB |
+| Your RAM | ASR | LLM | Disk needed |
+|----------|-----|-----|-------------|
+| **8 GB** | Whisper Turbo Lite | Qwen 3 Lite | ~3.2 GB |
+| **16 GB** | Whisper Turbo | Qwen 3 Large | ~10.8 GB |
+| **32 GB+** | Whisper Turbo | Qwen 3 Large | ~10.8 GB |
 
----
-
-## System requirements
-
-- **macOS** 12.3+ (Monterey or later), Apple Silicon recommended
-- **Windows** 10/11 (64-bit)
-- **Linux** — Debian/Ubuntu 22.04+ or any distro with AppImage support
-- **RAM:** 8 GB minimum, 16 GB recommended
-- **Disk:** ~3 GB for the app + base models; ~12 GB with the full LLM
+</details>
 
 ---
 
-## Privacy & security
+## System Requirements
 
-- **Zero network access** during meetings — all transcription and AI runs locally.
-- **No telemetry.** EchoNote does not collect usage data, analytics, or crash reports.
-- **Local storage only.** Meetings are stored in a SQLite database on your machine.
-- **Open source.** You can audit every line of code in this repository.
+| | Minimum | Recommended |
+|---|---|---|
+| **macOS** | 12.3+ (Monterey) | Apple Silicon, 16 GB RAM |
+| **Windows** | 10/11 (64-bit) | 16 GB RAM |
+| **Linux** | Ubuntu 22.04+ / AppImage-compatible | 16 GB RAM |
+| **Disk** | ~3 GB (app + base models) | ~12 GB (with full LLM) |
+
+---
+
+## Privacy & Security
+
+- **Zero network access** during meetings — all AI runs locally.
+- **No telemetry.** No usage data, analytics, or crash reports.
+- **Local storage only.** Meetings live in a SQLite database on your machine.
+- **Open source.** Audit every line of code in this repository.
 
 ---
 
 ## Roadmap
 
-- [x] Live transcription with Whisper
+- [x] Live transcription with Whisper (90+ languages)
 - [x] Speaker identification (diarization)
-- [x] Meeting persistence and search
-- [x] Local LLM summaries
-- [x] Conversational chat ("What did Maria say about the deadline?")
-- [x] Custom summary templates (create your own prompts)
-- [x] Runtime model selection (switch ASR/LLM models without restarting)
-- [x] Meeting notes panel (timestamped notes alongside the transcript)
-- [x] Streaming summary generation (token-by-token)
+- [x] Meeting persistence and full-text search
+- [x] Local LLM summaries with streaming
+- [x] Conversational chat with meeting context
+- [x] Custom summary templates
+- [x] Runtime model selection
+- [x] Timestamped meeting notes
 - [x] Hardware-aware model recommendations
+- [x] Setup wizard & onboarding
+- [x] Light / dark / system themes
+- [x] MCP server for AI coding assistants
 - [ ] System audio capture (transcribe the other side of the call)
-- [ ] Encrypted local storage
-- [x] Setup wizard (guided first-run onboarding)
-- [x] Light / dark / system theme switcher
+- [ ] Encrypted local storage (SQLCipher)
 
 ---
 
-## Built with
+## Built With
 
 | Layer | Technology |
 |-------|------------|
-| Desktop app | [Tauri 2](https://tauri.app/) (Rust + native webview) |
+| Desktop shell | [Tauri 2](https://tauri.app/) (Rust + native webview) |
 | Backend | Rust 1.88+ |
-| Frontend | React 18, TypeScript, Tailwind CSS, i18n (English / Spanish) |
+| Frontend | React 18, TypeScript, Tailwind CSS, i18n (en / es) |
 | Speech-to-text | [whisper.cpp](https://github.com/ggerganov/whisper.cpp) |
-| Summaries | [llama.cpp](https://github.com/ggerganov/llama.cpp) |
+| Summaries & chat | [llama.cpp](https://github.com/ggerganov/llama.cpp) (Qwen 3) |
 | Voice activity | [Silero VAD](https://github.com/snakers4/silero-vad) via ONNX |
-| Speaker ID | [3D-Speaker](https://github.com/modelscope/3D-Speaker) (ERes2Net / CAM++) via ONNX |
+| Speaker ID | [3D-Speaker](https://github.com/modelscope/3D-Speaker) + [pyannote](https://github.com/pyannote/pyannote-audio) via ONNX |
 | Storage | SQLite with FTS5 full-text search |
 
 ---
 
 ## Contributing
 
-EchoNote is open-source and contributions are welcome — see [CONTRIBUTING.md](./CONTRIBUTING.md) for guidelines.
+Contributions are welcome — see [CONTRIBUTING.md](./CONTRIBUTING.md) for guidelines.
 
 ---
 
-## License
-
-[AGPL-3.0](./LICENSE) © 2026 Luis MC
+<p align="center">
+  <a href="./LICENSE">AGPL-3.0</a> © 2026 Luis MC
+</p>
