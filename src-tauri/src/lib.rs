@@ -68,6 +68,10 @@ pub fn run() {
             commands::llm::summarize_with_custom_template,
             commands::hardware::get_hardware_profile,
             commands::recommendation::get_model_recommendation,
+            commands::mcp::detect_mcp_clients,
+            commands::mcp::install_mcp_client,
+            commands::mcp::uninstall_mcp_client,
+            commands::mcp::get_mcp_config_snippet,
         ]);
 
     // In dev builds, export TypeScript bindings so the frontend can

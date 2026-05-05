@@ -299,5 +299,40 @@
       "dark": "Dark mode",
       "system": "System default"
     }
+  },
+  "mcp": {
+    "title": "MCP Integrations",
+    "description": "Connect AI coding assistants to your meeting transcripts via the Model Context Protocol.",
+    "close": "Close",
+    "detecting": "Detecting installed clients…",
+    "detected": "Detected clients",
+    "notDetected": "Not detected",
+    "connected": "Connected",
+    "notInstalled": "Not found",
+    "install": "Install",
+    "installing": "Installing…",
+    "remove": "Remove",
+    "removing": "Removing…",
+    "manualConfig": "Manual configuration",
+    "manualHint": "Copy this JSON snippet into your client's MCP config file.",
+    "toolsAvailable": "Available tools",
+    "toolsRead": "Read",
+    "toolsWrite": "Write",
+    "tools": {
+      "listMeetings": "List meetings",
+      "getMeeting": "Get meeting",
+      "searchMeetings": "Search transcripts",
+      "getSummary": "Get summary",
+      "listNotes": "List notes",
+      "getSpeakers": "Get speakers",
+      "exportMeeting": "Export meeting",
+      "listTemplates": "List templates",
+      "getStatus": "App status",
+      "renameMeeting": "Rename meeting",
+      "deleteMeeting": "Delete meeting",
+      "renameSpeaker": "Rename speaker",
+      "addNote": "Add note",
+      "deleteNote": "Delete note"
+    }
   }
 }

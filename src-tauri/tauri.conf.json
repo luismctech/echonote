@@ -7,7 +7,7 @@
     "frontendDist": "../dist",
     "devUrl": "http://localhost:1420",
     "beforeDevCommand": "pnpm dev",
-    "beforeBuildCommand": "pnpm build"
+    "beforeBuildCommand": "pnpm build && bash scripts/build-mcp-sidecar.sh"
   },
   "app": {
     "withGlobalTauri": false,
@@ -38,6 +38,7 @@
     "active": true,
     "targets": ["app", "dmg", "nsis", "deb", "rpm", "appimage"],
     "createUpdaterArtifacts": true,
+    "externalBin": ["binaries/echo-mcp"],
     "category": "Productivity",
     "macOS": {
       "minimumSystemVersion": "11.0"

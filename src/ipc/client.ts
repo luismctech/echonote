@@ -459,3 +459,40 @@ export async function getHardwareProfile(): Promise<HardwareProfile> {
 export async function getModelRecommendation(): Promise<ModelRecommendation> {
   return invoke<ModelRecommendation>("get_model_recommendation");
 }
+
+// ---------------------------------------------------------------------------
+// MCP (Model Context Protocol) installer
+// ---------------------------------------------------------------------------
+
+export interface McpClient {
+  id: string;
+  label: string;
+  detected: boolean;
+  installed: boolean;
+  configPath: string | null;
+}
+
+export interface McpInstallResult {
+  success: boolean;
+  message: string;
+}
+
+/** Detect all known MCP clients and their install status. */
+export async function detectMcpClients(): Promise<McpClient[]> {
+  return invoke<McpClient[]>("detect_mcp_clients");
+}
+
+/** Install the EchoNote MCP server entry into a client's config. */
+export async function installMcpClient(clientId: string): Promise<McpInstallResult> {
+  return invoke<McpInstallResult>("install_mcp_client", { clientId });
+}
+
+/** Remove the EchoNote MCP server entry from a client's config. */
+export async function uninstallMcpClient(clientId: string): Promise<McpInstallResult> {
+  return invoke<McpInstallResult>("uninstall_mcp_client", { clientId });
+}
+
+/** Get the JSON config snippet for manual copy-paste. */
+export async function getMcpConfigSnippet(): Promise<string> {
+  return invoke<string>("get_mcp_config_snippet");
+}
