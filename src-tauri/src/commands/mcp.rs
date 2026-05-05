@@ -68,6 +68,7 @@ fn home() -> Option<PathBuf> {
     dirs::home_dir()
 }
 
+#[allow(dead_code)] // Used only on macOS via cfg-gated callers.
 fn data_dir() -> Option<PathBuf> {
     dirs::data_dir()
 }
