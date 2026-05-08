@@ -48,7 +48,7 @@ fn model_catalog(root: &std::path::Path) -> Vec<(ModelInfo, &'static str, Option
                 size_bytes: 1_600_000_000,
             },
             "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin",
-            None, // TODO: populate sha256
+            Some("1fc70f774d38eb169993ac391eea357ef47c88757ef72ee5943879b7e8e2bc69"),
         ),
         (
             ModelInfo {
@@ -60,7 +60,7 @@ fn model_catalog(root: &std::path::Path) -> Vec<(ModelInfo, &'static str, Option
                 size_bytes: 574_000_000,
             },
             "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q5_0.bin",
-            None, // TODO: populate sha256
+            Some("394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2"),
         ),
         (
             ModelInfo {
@@ -72,7 +72,7 @@ fn model_catalog(root: &std::path::Path) -> Vec<(ModelInfo, &'static str, Option
                 size_bytes: 756_000_000,
             },
             "https://huggingface.co/distil-whisper/distil-large-v3-ggml/resolve/main/ggml-distil-large-v3.bin",
-            None, // TODO: populate sha256
+            Some("2883a11b90fb10ed592d826edeaee7d2929bf1ab985109fe9e1e7b4d2b69a298"),
         ),
         (
             ModelInfo {
@@ -84,7 +84,7 @@ fn model_catalog(root: &std::path::Path) -> Vec<(ModelInfo, &'static str, Option
                 size_bytes: 1_530_000_000,
             },
             "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium.bin",
-            None, // TODO: populate sha256
+            Some("6c14d5adee5f86394037b4e4e8b59f1673b6cee10e3cf0b11bbdbee79c156208"),
         ),
         (
             ModelInfo {
@@ -96,7 +96,7 @@ fn model_catalog(root: &std::path::Path) -> Vec<(ModelInfo, &'static str, Option
                 size_bytes: 488_000_000,
             },
             "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin",
-            None, // TODO: populate sha256
+            Some("1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b"),
         ),
         (
             ModelInfo {
@@ -108,7 +108,7 @@ fn model_catalog(root: &std::path::Path) -> Vec<(ModelInfo, &'static str, Option
                 size_bytes: 148_000_000,
             },
             "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin",
-            None, // TODO: populate sha256
+            Some("60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe"),
         ),
         (
             ModelInfo {
@@ -120,7 +120,7 @@ fn model_catalog(root: &std::path::Path) -> Vec<(ModelInfo, &'static str, Option
                 size_bytes: 9_200_000_000,
             },
             "https://huggingface.co/Qwen/Qwen3-14B-GGUF/resolve/main/Qwen3-14B-Q4_K_M.gguf",
-            None, // TODO: populate sha256
+            Some("500a8806e85ee9c83f3ae08420295592451379b4f8cf2d0f41c15dffeb6b81f0"),
         ),
         (
             ModelInfo {
@@ -132,7 +132,7 @@ fn model_catalog(root: &std::path::Path) -> Vec<(ModelInfo, &'static str, Option
                 size_bytes: 5_200_000_000,
             },
             "https://huggingface.co/Qwen/Qwen3-8B-GGUF/resolve/main/Qwen3-8B-Q4_K_M.gguf",
-            None, // TODO: populate sha256
+            Some("d98cdcbd03e17ce47681435b5150e34c1417f50b5c0019dd560e4882c5745785"),
         ),
         (
             ModelInfo {
@@ -144,7 +144,7 @@ fn model_catalog(root: &std::path::Path) -> Vec<(ModelInfo, &'static str, Option
                 size_bytes: 2_600_000_000,
             },
             "https://huggingface.co/Qwen/Qwen3-4B-GGUF/resolve/main/Qwen3-4B-Q4_K_M.gguf",
-            None, // TODO: populate sha256
+            Some("7485fe6f11af29433bc51cab58009521f205840f5b4ae3a32fa7f92e8534fdf5"),
         ),
         (
             ModelInfo {
@@ -170,7 +170,7 @@ fn model_catalog(root: &std::path::Path) -> Vec<(ModelInfo, &'static str, Option
                 size_bytes: 26_000_000,
             },
             "https://huggingface.co/csukuangfj/speaker-embedding-models/resolve/main/3dspeaker_speech_eres2net_sv_en_voxceleb_16k.onnx",
-            None,
+            Some("c59158379255ad66e161679cca6af8d52d51e389e3224ab7d7a7baae295c2db5"),
         ),
         (
             ModelInfo {
@@ -182,7 +182,7 @@ fn model_catalog(root: &std::path::Path) -> Vec<(ModelInfo, &'static str, Option
                 size_bytes: 28_000_000,
             },
             "https://huggingface.co/csukuangfj/speaker-embedding-models/resolve/main/3dspeaker_speech_campplus_sv_en_voxceleb_16k.onnx",
-            None,
+            Some("357a834f702b80161e5b981182c038e18553c1f2ca752ed6cec2052365d4129b"),
         ),
         (
             ModelInfo {
@@ -194,7 +194,7 @@ fn model_catalog(root: &std::path::Path) -> Vec<(ModelInfo, &'static str, Option
                 size_bytes: 17_000_000,
             },
             "https://huggingface.co/csukuangfj/sherpa-onnx-pyannote-segmentation-3-0/resolve/main/model.onnx",
-            None,
+            Some("220ad67ca923bef2fa91f2390c786097bf305bceb5e261d4af67b38e938e1079"),
         ),
     ]
 }
@@ -249,8 +249,15 @@ pub enum DownloadEvent {
 
 /// Download a model by id, streaming progress events to the frontend.
 ///
-/// When the catalog entry includes a SHA-256 digest the downloaded file
-/// is verified before being promoted from `*.part` to its final path.
+/// Supports resuming interrupted downloads via HTTP Range requests. If a
+/// `.part` file exists from a previous attempt, the download continues from
+/// where it left off (server must support 206 Partial Content; falls back to
+/// full restart if it responds 200).
+///
+/// SHA-256 verification is performed on fresh (non-resumed) downloads only.
+/// Resumed downloads skip verification because we cannot reconstruct the hash
+/// of bytes already written in a prior session without re-reading the file.
+///
 /// Concurrent downloads of the same model are rejected.
 #[tauri::command]
 #[specta::specta]
@@ -303,35 +310,77 @@ pub async fn download_model(
 
     let tmp = dest.with_extension("part");
 
+    // ── Check for resumable partial file ─────────────────────────
+    let resume_offset: u64 = if tmp.exists() {
+        tokio::fs::metadata(&tmp)
+            .await
+            .map(|m| m.len())
+            .unwrap_or(0)
+    } else {
+        0
+    };
+
+    let client = state.http_client.clone();
+
     let result: Result<(), IpcError> = async {
-        let client = reqwest::Client::new();
-        let response = client
-            .get(&url)
+        use sha2::{Digest, Sha256};
+        use tokio::io::AsyncWriteExt;
+
+        // Build request; add Range header when we have a partial file.
+        let mut request = client.get(&url);
+        if resume_offset > 0 {
+            request = request.header("Range", format!("bytes={resume_offset}-"));
+            tracing::info!(%model_id, resume_offset, "attempting to resume download");
+        }
+
+        let response = request
             .send()
             .await
             .map_err(|e| IpcError::network(format!("HTTP request failed: {e}")))?;
 
-        if !response.status().is_success() {
+        let status = response.status().as_u16();
+        // 200 = full content (server ignored Range or fresh start)
+        // 206 = partial content (server accepted resume)
+        if status != 200 && status != 206 {
             return Err(IpcError::network(format!("HTTP {}", response.status())));
         }
 
-        let total = response.content_length().unwrap_or(0);
-        let mut downloaded: u64 = 0;
-        let mut stream = response.bytes_stream();
-        let mut file = tokio::fs::File::create(&tmp)
-            .await
-            .map_err(|e| IpcError::storage(format!("failed to create file: {e}")))?;
+        // If server returned 200 despite our Range header, restart from byte 0.
+        let actual_resume = if status == 206 { resume_offset } else { 0 };
+        if status == 200 && resume_offset > 0 {
+            tracing::warn!(%model_id, "server does not support Range; restarting download from scratch");
+        }
 
-        use sha2::{Digest, Sha256};
-        use tokio::io::AsyncWriteExt;
+        let content_length = response.content_length().unwrap_or(0);
+        let total = content_length.saturating_add(actual_resume);
+        let mut downloaded = actual_resume;
 
+        // Open for append on resume, create (truncate) on fresh start.
+        let mut file = if actual_resume > 0 {
+            tokio::fs::OpenOptions::new()
+                .append(true)
+                .open(&tmp)
+                .await
+                .map_err(|e| IpcError::storage(format!("failed to open partial file: {e}")))?
+        } else {
+            tokio::fs::File::create(&tmp)
+                .await
+                .map_err(|e| IpcError::storage(format!("failed to create file: {e}")))?
+        };
+
+        // SHA-256 is only computed on full (non-resumed) downloads. For
+        // resumed downloads we cannot reconstruct the hash of the already-
+        // downloaded portion without re-reading the .part file.
+        let verify_hash = expected_sha.is_some() && actual_resume == 0;
         let mut hasher = Sha256::new();
+
+        let mut stream = response.bytes_stream();
         let mut last_report = std::time::Instant::now();
+
         while let Some(chunk) = stream.next().await {
             // ── Check cancel flag ────────────────────────────────
             if cancel_flag.load(std::sync::atomic::Ordering::Relaxed) {
                 drop(file);
-                let _ = tokio::fs::remove_file(&tmp).await;
                 let _ = on_event.send(DownloadEvent::Cancelled);
                 return Ok(());
             }
@@ -341,7 +390,9 @@ pub async fn download_model(
             file.write_all(&chunk)
                 .await
                 .map_err(|e| IpcError::storage(format!("write error: {e}")))?;
-            hasher.update(&chunk);
+            if verify_hash {
+                hasher.update(&chunk);
+            }
             downloaded += chunk.len() as u64;
 
             if last_report.elapsed().as_millis() >= 250 || downloaded == total {
@@ -354,24 +405,27 @@ pub async fn download_model(
             .map_err(|e| IpcError::storage(format!("flush error: {e}")))?;
         drop(file);
 
-        // ── SHA-256 verification (when hash is known) ────────────
-        if let Some(expected) = &expected_sha {
-            let hash = hasher.finalize();
-            let actual = hash.iter().map(|b| format!("{b:02x}")).collect::<String>();
-            if actual != *expected {
-                let _ = tokio::fs::remove_file(&tmp).await;
-                return Err(IpcError::new(
-                    ErrorCode::InvalidInput,
-                    format!("SHA-256 mismatch for {model_id}: expected {expected}, got {actual}"),
-                ));
+        // ── SHA-256 verification ──────────────────────────────────
+        if verify_hash {
+            if let Some(expected) = &expected_sha {
+                let hash = hasher.finalize();
+                let actual = hash.iter().map(|b| format!("{b:02x}")).collect::<String>();
+                if actual != *expected {
+                    let _ = tokio::fs::remove_file(&tmp).await;
+                    return Err(IpcError::new(
+                        ErrorCode::InvalidInput,
+                        format!(
+                            "SHA-256 mismatch for {model_id}: expected {expected}, got {actual}"
+                        ),
+                    ));
+                }
+                tracing::info!(%model_id, "SHA-256 verified");
             }
-            tracing::info!(%model_id, "SHA-256 verified");
-        } else {
+        } else if expected_sha.is_some() && actual_resume > 0 {
             tracing::warn!(
                 %model_id,
-                "model downloaded WITHOUT SHA-256 verification — \
-                 integrity not guaranteed. Populate the hash in \
-                 model_catalog() before release."
+                "SHA-256 skipped for resumed download — \
+                 delete and re-download to verify integrity."
             );
         }
 
@@ -389,7 +443,7 @@ pub async fn download_model(
             Ok(())
         }
         Err(e) => {
-            let _ = tokio::fs::remove_file(&tmp).await;
+            // Leave the .part file on disk so the next download attempt can resume.
             let _ = on_event.send(DownloadEvent::Failed {
                 error: e.message.clone(),
             });
@@ -511,7 +565,7 @@ pub async fn set_active_llm(state: State<'_, AppState>, model_id: String) -> Res
     // to update the path.
     state.set_llm_model_path(dest);
     // Persist so the selection survives app restart.
-    super::save_preference(&state.data_root, "llm", rel_path);
+    super::save_preference(&state.data_root, "llm", rel_path).await?;
 
     tracing::info!(model_id = %model_id, "active LLM switched");
     Ok(())
@@ -526,17 +580,7 @@ pub fn get_active_llm(state: State<'_, AppState>) -> Option<String> {
     if !path.exists() {
         return None;
     }
-    // Reverse-lookup the catalog id from the filename.
-    let catalog = model_catalog(&state.data_root);
-    for (info, _, _) in &catalog {
-        if info.kind == "llm" {
-            let rel = model_dest_path(&info.id).unwrap_or("");
-            if state.data_root.join(rel) == path {
-                return Some(info.id.clone());
-            }
-        }
-    }
-    None
+    super::path_to_catalog_id(&path)
 }
 
 /// Set the active speaker embedder model. The next diarization session
@@ -569,7 +613,7 @@ pub async fn set_active_embedder(
 
     state.set_embed_model_path(dest);
     // Persist so the selection survives app restart.
-    super::save_preference(&state.data_root, "embedder", rel_path);
+    super::save_preference(&state.data_root, "embedder", rel_path).await?;
     tracing::info!(model_id = %model_id, "active embedder switched");
     Ok(())
 }
@@ -583,16 +627,7 @@ pub fn get_active_embedder(state: State<'_, AppState>) -> Option<String> {
     if !path.exists() {
         return None;
     }
-    let catalog = model_catalog(&state.data_root);
-    for (info, _, _) in &catalog {
-        if info.kind == "embedder" {
-            let rel = model_dest_path(&info.id).unwrap_or("");
-            if state.data_root.join(rel) == path {
-                return Some(info.id.clone());
-            }
-        }
-    }
-    None
+    super::path_to_catalog_id(&path)
 }
 
 /// Set the active ASR (speech recognition) model. Unloads the currently
@@ -626,7 +661,7 @@ pub async fn set_active_asr(state: State<'_, AppState>, model_id: String) -> Res
 
     state.set_asr_model_path(dest);
     // Persist so the selection survives app restart.
-    super::save_preference(&state.data_root, "asr", rel_path);
+    super::save_preference(&state.data_root, "asr", rel_path).await?;
 
     tracing::info!(model_id = %model_id, "active ASR switched");
     Ok(())
@@ -641,15 +676,5 @@ pub fn get_active_asr(state: State<'_, AppState>) -> Option<String> {
     if !path.exists() {
         return None;
     }
-    // Reverse-lookup the catalog id from the filename.
-    let catalog = model_catalog(&state.data_root);
-    for (info, _, _) in &catalog {
-        if info.kind == "asr" {
-            let rel = model_dest_path(&info.id).unwrap_or("");
-            if state.data_root.join(rel) == path {
-                return Some(info.id.clone());
-            }
-        }
-    }
-    None
+    super::path_to_catalog_id(&path)
 }

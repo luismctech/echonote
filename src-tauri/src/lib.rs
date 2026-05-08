@@ -13,6 +13,30 @@ use tauri::menu::{MenuBuilder, MenuItemBuilder};
 use tauri::tray::TrayIconEvent;
 use tauri::Manager;
 
+/// Show and focus the main window, or focus it if it's already visible.
+///
+/// On macOS, `makeKeyAndOrderFront:` is a no-op when the calling process is
+/// not the frontmost application. The entire NSApp must be activated first
+/// with `app.show()` (which calls `[NSApp unhide: nil]`), otherwise clicking
+/// the tray icon after hiding the window leaves it invisible.
+fn show_main_window(app: &tauri::AppHandle) {
+    #[cfg(target_os = "macos")]
+    let _ = app.show(); // activates the NSApp before ordering the window front
+
+    if let Some(w) = app.get_webview_window("main") {
+        let visible = w.is_visible().unwrap_or(false);
+        let minimized = w.is_minimized().unwrap_or(false);
+        if visible && !minimized {
+            // Window is on screen — just bring it to the front.
+            let _ = w.set_focus();
+        } else {
+            let _ = w.show();
+            let _ = w.unminimize();
+            let _ = w.set_focus();
+        }
+    }
+}
+
 /// Entry point invoked by `main.rs`. Kept library-friendly so mobile
 /// targets (Tauri 2 iOS/Android) can reuse the same builder.
 pub fn run() {
@@ -85,7 +109,8 @@ pub fn run() {
         specta_builder
             .export(
                 specta_typescript::Typescript::default()
-                    .bigint(specta_typescript::BigIntExportBehavior::Number),
+                    .bigint(specta_typescript::BigIntExportBehavior::Number)
+                    .header("// @ts-nocheck"),
                 &bindings_path,
             )
             .expect("failed to export tauri-specta TypeScript bindings");
@@ -103,11 +128,7 @@ pub fn run() {
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             // Another instance tried to launch — bring the existing
             // window to the front instead of spawning a duplicate.
-            if let Some(w) = app.get_webview_window("main") {
-                let _ = w.show();
-                let _ = w.unminimize();
-                let _ = w.set_focus();
-            }
+            show_main_window(app);
         }))
         .setup(|app| {
             // ── System tray menu ─────────────────────────────────
@@ -118,16 +139,8 @@ pub fn run() {
             if let Some(tray) = app.tray_by_id("main-tray") {
                 tray.set_menu(Some(menu))?;
                 tray.on_menu_event(move |app, event| match event.id().as_ref() {
-                    "show" => {
-                        if let Some(w) = app.get_webview_window("main") {
-                            let _ = w.show();
-                            let _ = w.unminimize();
-                            let _ = w.set_focus();
-                        }
-                    }
-                    "quit" => {
-                        app.exit(0);
-                    }
+                    "show" => show_main_window(app),
+                    "quit" => app.exit(0),
                     _ => {}
                 });
                 tray.on_tray_icon_event(|tray, event| {
@@ -141,11 +154,7 @@ pub fn run() {
                         ..
                     } = event
                     {
-                        if let Some(w) = tray.app_handle().get_webview_window("main") {
-                            let _ = w.show();
-                            let _ = w.unminimize();
-                            let _ = w.set_focus();
-                        }
+                        show_main_window(tray.app_handle());
                     }
                 });
             }

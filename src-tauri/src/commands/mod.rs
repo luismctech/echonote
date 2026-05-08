@@ -138,6 +138,9 @@ pub fn health_check() -> HealthStatus {
 pub struct AppState {
     pub(crate) capture: Arc<dyn AudioCapture>,
     pub(crate) resampler: Arc<dyn Resampler>,
+    /// Shared HTTP client with connect timeout. Reused across all model
+    /// downloads to amortise TLS handshake and connection-pool overhead.
+    pub(crate) http_client: reqwest::Client,
     /// Lazily-loaded whisper transcriber (concrete so `LazyModel<T>` stays `Sized`).
     pub(crate) transcriber: LazyModel<WhisperCppTranscriber>,
     /// Path to the local ASR model. Behind a `RwLock` so
@@ -271,6 +274,10 @@ impl AppState {
     /// Build the shared state. Async because opening the SQLite database
     /// runs migrations, which is I/O.
     pub async fn initialize(app_data_dir: Option<PathBuf>) -> Result<Self, IpcError> {
+        let http_client = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(30))
+            .build()
+            .map_err(|e| IpcError::internal(format!("failed to build HTTP client: {e}")))?;
         // In release builds prefer the Tauri app-data directory so
         // downloaded models land in an OS-writable location instead of
         // the (non-existent) compile-time source tree.
@@ -341,6 +348,7 @@ impl AppState {
         Ok(Self {
             capture: Arc::new(RoutingAudioCapture::with_default_adapters()),
             resampler: Arc::new(RubatoResamplerAdapter::new()),
+            http_client,
             transcriber: LazyModel::new(),
             model_path: std::sync::RwLock::new(model_path),
             embed_model_path: std::sync::RwLock::new(embed_model_path),
@@ -734,6 +742,33 @@ fn resolve_asset_path(
     root.join(default_relative)
 }
 
+/// Reverse-lookup: given an absolute model path, return its catalog id.
+///
+/// Avoids calling `model_catalog()` (which does 13+ `stat()` calls) in the
+/// `get_active_*` getters, which are invoked by the frontend on every panel
+/// refresh.
+pub(crate) fn path_to_catalog_id(path: &Path) -> Option<String> {
+    let name = path.file_name()?.to_str()?;
+    let id = match name {
+        "ggml-large-v3-turbo.bin" => "asr-large-v3-turbo",
+        "ggml-large-v3-turbo-q5_0.bin" => "asr-large-v3-turbo-q5",
+        "ggml-distil-large-v3.bin" => "asr-distil-large-v3",
+        "ggml-medium.bin" => "asr-medium",
+        "ggml-small.bin" => "asr-small",
+        "ggml-base.bin" => "asr-base",
+        "Qwen3-30B-A3B-Q4_K_M.gguf" => "llm-qwen3-30b",
+        "Qwen3-14B-Q4_K_M.gguf" => "llm-qwen3-14b",
+        "Qwen3-8B-Q4_K_M.gguf" => "llm-qwen3-8b",
+        "Qwen3-4B-Q4_K_M.gguf" => "llm-qwen3-4b",
+        "silero_vad.onnx" => "vad-silero",
+        "eres2net_en_voxceleb.onnx" => "embedder-eres2net",
+        "campplus_en_voxceleb.onnx" => "embedder-camplusplus",
+        "pyannote_segmentation_3.onnx" => "segmenter-pyannote",
+        _ => return None,
+    };
+    Some(id.to_string())
+}
+
 /// Best-effort workspace root: the directory above `src-tauri/`.
 pub(crate) fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -761,9 +796,10 @@ fn load_preference(root: &Path, key: &str) -> Option<String> {
 }
 
 /// Persist a model preference. Merges with existing preferences.
-pub(crate) fn save_preference(root: &Path, key: &str, value: &str) {
+pub(crate) async fn save_preference(root: &Path, key: &str, value: &str) -> Result<(), IpcError> {
     let path = preferences_path(root);
-    let mut map: serde_json::Map<String, serde_json::Value> = std::fs::read_to_string(&path)
+    let mut map: serde_json::Map<String, serde_json::Value> = tokio::fs::read_to_string(&path)
+        .await
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_default();
@@ -771,7 +807,10 @@ pub(crate) fn save_preference(root: &Path, key: &str, value: &str) {
         key.to_string(),
         serde_json::Value::String(value.to_string()),
     );
-    if let Ok(json) = serde_json::to_string_pretty(&map) {
-        let _ = std::fs::write(&path, json);
-    }
+    let json = serde_json::to_string_pretty(&map)
+        .map_err(|e| IpcError::internal(format!("failed to serialize preferences: {e}")))?;
+    tokio::fs::write(&path, json)
+        .await
+        .map_err(|e| IpcError::storage(format!("failed to write preferences: {e}")))?;
+    Ok(())
 }

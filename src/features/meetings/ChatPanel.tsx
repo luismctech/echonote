@@ -32,6 +32,7 @@ import {
 import { useTranslation } from "react-i18next";
 import i18next from "i18next";
 import Markdown from "react-markdown";
+import rehypeSanitize from "rehype-sanitize";
 import { Clock } from "lucide-react";
 
 import type { UseChat, DisplayMessage } from "../../hooks/useChat";
@@ -320,7 +321,7 @@ function AssistantContent({
 
   return (
     <div className="prose prose-sm max-w-none [&_p]:my-1 [&_ul]:my-1 [&_ol]:my-1 [&_li]:my-0 [&_h1]:text-ui-md [&_h2]:text-ui-md [&_h3]:text-ui-sm [&_h4]:text-ui-sm [&_pre]:text-ui-sm">
-      <Markdown components={mdComponents}>
+      <Markdown rehypePlugins={[rehypeSanitize]} components={mdComponents}>
         {cleaned}
       </Markdown>
       {hadCitations === false && (

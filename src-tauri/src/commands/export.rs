@@ -105,9 +105,16 @@ pub async fn export_meeting(
 
     let content = rendering::render(&meeting, summary.as_ref(), format.into());
 
-    tokio::fs::write(&safe_dest, content.as_bytes())
+    // Write atomically: write to a temp file then rename to avoid leaving a
+    // partial file at the destination if the process is interrupted mid-write.
+    let tmp = safe_dest.with_extension("tmp");
+    tokio::fs::write(&tmp, content.as_bytes())
         .await
-        .map_err(|e| IpcError::storage(format!("write file: {e}")))?;
+        .map_err(|e| IpcError::storage(format!("write temp file: {e}")))?;
+    if let Err(e) = tokio::fs::rename(&tmp, &safe_dest).await {
+        drop(tokio::fs::remove_file(&tmp).await);
+        return Err(IpcError::storage(format!("rename failed: {e}")));
+    }
 
     Ok(())
 }

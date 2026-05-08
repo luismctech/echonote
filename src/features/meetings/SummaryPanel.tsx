@@ -18,6 +18,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import Markdown from "react-markdown";
+import rehypeSanitize from "rehype-sanitize";
 import { Settings, FileText } from "lucide-react";
 import { CopyButton } from "../../components/CopyButton";
 import { LogoAnimated } from "../../components/Logo";
@@ -120,7 +121,7 @@ export function SummaryPanel({
         )}
         {!loading && generating && streamingText && (
           <div className="prose prose-sm max-w-none text-ui-md leading-relaxed">
-            <Markdown>{streamingText}</Markdown>
+            <Markdown rehypePlugins={[rehypeSanitize]}>{streamingText}</Markdown>
             <span className="ml-0.5 inline-block h-3 w-1.5 animate-pulse rounded-sm bg-emerald-500" />
           </div>
         )}
@@ -329,7 +330,7 @@ function renderTemplateBody(summary: Summary, t: (key: string) => string) {
     case "freeText":
       return (
         <div className="prose prose-sm max-w-none">
-          <Markdown>{summary.text || t("summary.emptySummary")}</Markdown>
+          <Markdown rehypePlugins={[rehypeSanitize]}>{summary.text || t("summary.emptySummary")}</Markdown>
         </div>
       );
 
@@ -340,7 +341,7 @@ function renderTemplateBody(summary: Summary, t: (key: string) => string) {
             {summary.templateName}
           </p>
           <div className="prose prose-sm max-w-none">
-            <Markdown>{summary.text || t("summary.emptySummary")}</Markdown>
+            <Markdown rehypePlugins={[rehypeSanitize]}>{summary.text || t("summary.emptySummary")}</Markdown>
           </div>
         </div>
       );
