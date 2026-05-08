@@ -11,7 +11,7 @@ use tokio::sync::Mutex as AsyncMutex;
 
 use crate::ipc_error::{ErrorCode, IpcError};
 
-use echo_app::StreamingPipeline;
+use echo_app::{NaivePunctuator, StreamingPipeline};
 use echo_domain::{
     AudioFormat, AudioSource, CaptureSpec, StreamingOptions, StreamingSessionId, TranscriptEvent,
     Vad,
@@ -157,6 +157,7 @@ pub async fn start_streaming(
     } else {
         tracing::info!("neural VAD disabled by request; using RMS gate");
     }
+    pipeline = pipeline.with_punctuator(Arc::new(NaivePunctuator));
 
     let handle = pipeline
         .start_with_spec(spec, streaming_options)

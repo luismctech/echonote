@@ -247,12 +247,39 @@ fn run_full(
         let seg = state.get_segment(i).ok_or_else(|| {
             DomainError::Invariant(format!("whisper segment {i} reported but missing"))
         })?;
+
+        // ── Filter 1: no-speech probability ─────────────────────────
+        // whisper-rs note: set_no_speech_thold() is documented as "not
+        // implemented" in whisper.cpp ≤ v1.3 — the param exists but is
+        // not enforced by the engine. We therefore apply the threshold
+        // post-hoc on the segment-level probability the model emits.
+        // 0.6 catches residual hallucinations that survive the existing
+        // entropy / logprob guards without being too aggressive on real
+        // speech fragments with low acoustic confidence.
+        let no_speech_prob = seg.no_speech_probability();
+        if no_speech_prob > NO_SPEECH_POST_THOLD {
+            debug!(no_speech_prob, "dropping high-no-speech-prob segment");
+            continue;
+        }
+
         let text = seg.to_str_lossy().map_err(map_whisper_err)?.into_owned();
-        // Drop canonical YouTube/Amara outros — see `is_known_hallucination`.
+
+        // ── Filter 2: known-hallucination phrase list ────────────────
         if is_known_hallucination(&text) {
             debug!(text = %text, "dropping known whisper hallucination");
             continue;
         }
+
+        // ── Filter 3: greedy repetition-loop detection ───────────────
+        // At temperature = 0 the greedy decoder can get stuck repeating
+        // the same word or phrase. `is_repetitive_loop` catches these
+        // collapsed outputs (4+ consecutive repetitions of an n-gram)
+        // before they reach the transcript.
+        if is_repetitive_loop(&text) {
+            debug!(text = %text, "dropping repetitive-loop segment");
+            continue;
+        }
+
         // whisper.cpp returns timestamps in centiseconds (10 ms units).
         let start_ms = (seg.start_timestamp().max(0) as u32).saturating_mul(10);
         let end_ms = (seg.end_timestamp().max(0) as u32).saturating_mul(10);
@@ -291,6 +318,16 @@ fn run_full(
     })
 }
 
+/// Post-hoc no-speech probability threshold applied per segment after
+/// `state.full()` returns. Segments whose `no_speech_prob` exceeds this
+/// are dropped before they reach the transcript.
+///
+/// Rationale: `set_no_speech_thold` in whisper.cpp ≤ v1.3 is documented
+/// as "not implemented" — the engine does not enforce it, so we must
+/// apply the gate ourselves. 0.6 is deliberately conservative: it only
+/// drops segments the model itself rates as very likely non-speech.
+const NO_SPEECH_POST_THOLD: f32 = 0.6;
+
 fn map_whisper_err(err: WhisperError) -> DomainError {
     DomainError::Invariant(format!("whisper.cpp: {err}"))
 }
@@ -317,6 +354,43 @@ fn install_logging_hooks_once() {
     INIT.get_or_init(|| {
         install_logging_hooks();
     });
+}
+
+/// Return `true` when `text` shows signs of a greedy decoder repetition
+/// loop: any word-level n-gram (size 1–3) that appears **4 or more
+/// consecutive times** in the same segment.
+///
+/// Example pathological outputs this catches:
+/// - "Thank you thank you thank you thank you thank you"
+/// - "the the the the the the meeting"
+/// - "I think I think I think I think so"
+///
+/// Minimum segment length: 4 words (shorter segments are never loops).
+fn is_repetitive_loop(text: &str) -> bool {
+    let words: Vec<&str> = text.split_whitespace().collect();
+    let n = words.len();
+    if n < 4 {
+        return false;
+    }
+    for gram_size in 1..=3_usize {
+        if gram_size * 4 > n {
+            break;
+        }
+        let mut i = 0;
+        while i + gram_size * 4 <= n {
+            let mut reps = 0usize;
+            let mut j = i;
+            while j + gram_size <= n && words[j..j + gram_size] == words[i..i + gram_size] {
+                reps += 1;
+                j += gram_size;
+            }
+            if reps >= 4 {
+                return true;
+            }
+            i += 1;
+        }
+    }
+    false
 }
 
 /// Return `true` when `text` is one of the canonical phrases Whisper
@@ -403,7 +477,7 @@ fn is_known_hallucination(text: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::is_known_hallucination;
+    use super::{is_known_hallucination, is_repetitive_loop};
 
     #[test]
     fn drops_canonical_spanish_youtube_outros() {
@@ -471,6 +545,41 @@ mod tests {
         ));
         assert!(is_known_hallucination("silence."));
         assert!(is_known_hallucination("Música"));
+    }
+
+    #[test]
+    fn detects_single_word_loop() {
+        assert!(is_repetitive_loop("the the the the"));
+        assert!(is_repetitive_loop(
+            "thank you thank you thank you thank you"
+        ));
+    }
+
+    #[test]
+    fn detects_bigram_loop() {
+        assert!(is_repetitive_loop(
+            "I think I think I think I think so maybe"
+        ));
+        assert!(is_repetitive_loop(
+            "thank you thank you thank you thank you very much"
+        ));
+    }
+
+    #[test]
+    fn keeps_legitimate_speech_with_repetition() {
+        // Natural repetition under the threshold.
+        assert!(!is_repetitive_loop("yes yes I agree yes"));
+        assert!(!is_repetitive_loop("very very good"));
+        assert!(!is_repetitive_loop(
+            "he said that that was not the right answer"
+        ));
+    }
+
+    #[test]
+    fn short_segments_never_loop() {
+        assert!(!is_repetitive_loop(""));
+        assert!(!is_repetitive_loop("ok"));
+        assert!(!is_repetitive_loop("thank you"));
     }
 
     #[test]
