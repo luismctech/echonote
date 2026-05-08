@@ -9,7 +9,7 @@
 <p align="center">
   <a href="https://github.com/luismctech/echonote/releases/latest"><img src="https://img.shields.io/github/v/release/luismctech/echonote?style=flat-square&label=Download&color=28a745" alt="Download" /></a>
   <a href="https://github.com/luismctech/echonote/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/luismctech/echonote/ci.yml?branch=main&style=flat-square&label=CI" alt="CI" /></a>
-  <a href="./LICENSE"><img src="https://img.shields.io/badge/License-AGPL--3.0-blue?style=flat-square" alt="License" /></a>
+  <a href="./LICENSE"><img src="https://img.shields.io/badge/License-PolyForm%20NC%201.0-blue?style=flat-square" alt="License" /></a>
   <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey?style=flat-square" alt="Platform" />
 </p>
 
@@ -238,5 +238,5 @@ Contributions are welcome — see [CONTRIBUTING.md](./CONTRIBUTING.md) for guide
 ---
 
 <p align="center">
-  <a href="./LICENSE">AGPL-3.0</a> © 2026 Luis MC
+  <a href="./LICENSE">PolyForm Noncommercial 1.0.0</a> © 2026 Luis MC
 </p>
