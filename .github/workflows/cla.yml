@@ -24,7 +24,7 @@ jobs:
           path-to-signatures: "signatures/cla.json"
           path-to-document: "https://github.com/luismctech/echonote/blob/main/CLA.md"
           branch: "main"
-          allowlist: "luismctech,dependabot[bot],renovate[bot],bot*"
+          allowlist: "luismctech,dependabot*,renovate*,bot*"
           custom-notsigned-prcomment: |
             Thank you for your contribution! Before we can merge this PR, you need to sign our [Contributor License Agreement](https://github.com/luismctech/echonote/blob/main/CLA.md).
 
