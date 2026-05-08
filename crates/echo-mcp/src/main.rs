@@ -11,7 +11,7 @@
 
 use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use echo_app::use_cases::export::{self, ExportFormat};
 use echo_domain::{CustomTemplate, MeetingId, MeetingStore, NoteId, SpeakerId};
@@ -940,12 +940,52 @@ async fn handle_request(
 // Main
 // ---------------------------------------------------------------------------
 
+/// Reject paths that could let a misconfigured MCP client point the server
+/// at an arbitrary SQLite file. Allowed: absolute paths ending in `.db` or
+/// `.sqlite` that live inside the user's home directory.
+fn validate_db_path(path: &Path) -> Result<(), String> {
+    if !path.is_absolute() {
+        return Err(format!(
+            "database path must be absolute, got: {}",
+            path.display()
+        ));
+    }
+    match path.extension().and_then(|e| e.to_str()) {
+        Some("db") | Some("sqlite") | Some("sqlite3") => {}
+        other => {
+            return Err(format!(
+                "database path must have a .db or .sqlite extension, got: {other:?}"
+            ));
+        }
+    }
+    let home = dirs::home_dir().ok_or("cannot determine home directory")?;
+    let parent = path.parent().ok_or("path has no parent directory")?;
+    // Canonicalize the parent directory (the db file may not exist yet for
+    // a fresh install). Fall back to the raw path when it doesn't exist yet.
+    let canonical = parent
+        .canonicalize()
+        .unwrap_or_else(|_| parent.to_path_buf());
+    if !canonical.starts_with(&home) {
+        return Err(format!(
+            "database path must be within the home directory ({}), got: {}",
+            home.display(),
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
 fn parse_args() -> PathBuf {
     let args: Vec<String> = std::env::args().collect();
     for i in 0..args.len() {
         if args[i] == "--db" {
-            if let Some(path) = args.get(i + 1) {
-                return PathBuf::from(path);
+            if let Some(raw) = args.get(i + 1) {
+                let path = PathBuf::from(raw);
+                if let Err(e) = validate_db_path(&path) {
+                    eprintln!("Invalid --db argument: {e}");
+                    std::process::exit(1);
+                }
+                return path;
             }
         }
     }
