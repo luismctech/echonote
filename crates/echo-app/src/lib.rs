@@ -12,10 +12,12 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs, rust_2018_idioms, clippy::all)]
 
+pub mod punct;
 pub mod sanitize;
 pub mod services;
 pub mod use_cases;
 
+pub use punct::NaivePunctuator;
 pub use services::meeting_recorder::MeetingRecorder;
 pub use services::wer::{compute as compute_wer, normalize as normalize_for_wer, WerStats};
 pub use use_cases::chat_with_transcript::{

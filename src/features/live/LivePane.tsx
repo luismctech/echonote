@@ -1,7 +1,7 @@
 import { type RefObject, useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { PanelLeft, Mic } from "lucide-react";
+import { PanelLeft, Mic, Pause, Play } from "lucide-react";
 
 import { LogoAnimated } from "../../components/Logo";
 import { ResizableHandleVertical } from "../../components/ResizableHandleVertical";
@@ -396,8 +396,9 @@ export function LivePane({
             <button
               type="button"
               onClick={onPause}
-              className="rounded-full bg-amber-600/10 px-3 py-1.5 text-ui-sm font-medium text-amber-700 ring-1 ring-amber-500/30 transition-colors hover:bg-amber-600/20 dark:text-amber-400"
+              className="relative z-10 flex items-center gap-1.5 rounded-full bg-amber-600/10 px-3 py-1.5 text-ui-sm font-medium text-amber-700 ring-1 ring-amber-500/30 transition-colors hover:bg-amber-600/20 dark:text-amber-400"
             >
+              <Pause className="h-3.5 w-3.5" />
               {t("live.pause")}
             </button>
           )}
@@ -405,8 +406,9 @@ export function LivePane({
             <button
               type="button"
               onClick={onResume}
-              className="rounded-full bg-emerald-600/10 px-3 py-1.5 text-ui-sm font-medium text-emerald-700 ring-1 ring-emerald-500/30 transition-colors hover:bg-emerald-600/20 dark:text-emerald-400"
+              className="relative z-10 flex items-center gap-1.5 rounded-full bg-emerald-600 px-5 py-1.5 text-ui-sm font-medium text-white shadow-sm transition-colors hover:bg-emerald-500"
             >
+              <Play className="h-3.5 w-3.5 fill-white" />
               {t("live.resume")}
             </button>
           )}
@@ -416,9 +418,9 @@ export function LivePane({
               onClick={onStop}
               className="relative flex items-center gap-2 rounded-full bg-rose-600 px-5 py-1.5 text-ui-sm font-medium text-white shadow-sm transition-colors hover:bg-rose-500"
             >
-              {/* Active ring radiating while recording */}
+              {/* Active ring radiating while recording — pointer-events-none so it never intercepts clicks on adjacent buttons */}
               {stream.kind === "recording" && (
-                <span className="absolute inset-0 rounded-full border-2 border-rose-400 animate-rec-ring" />
+                <span className="pointer-events-none absolute inset-0 rounded-full border-2 border-rose-400 animate-rec-ring" />
               )}
               <span className="relative inline-flex h-2.5 w-2.5 rounded-sm bg-white/90" />
               <span className="relative">{stream.kind === "stopping" ? t("live.stopping") : t("live.stop")}</span>
@@ -426,8 +428,14 @@ export function LivePane({
           )}
         </div>
 
-        {/* Right: timer echo */}
+        {/* Right: timer + paused badge */}
         <div className="flex items-center gap-2">
+          {canResume && (
+            <span className="flex items-center gap-1 rounded-full bg-amber-500/15 px-2.5 py-1 text-micro font-semibold text-amber-600 ring-1 ring-amber-500/30 animate-pulse dark:text-amber-400">
+              <Pause className="h-2.5 w-2.5 fill-current" />
+              {t("live.paused")}
+            </span>
+          )}
           {isActive && (
             <span className="font-mono text-ui-xs tabular-nums text-content-tertiary">
               {formatTimer(stats.audioMs)}

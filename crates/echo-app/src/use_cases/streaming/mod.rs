@@ -32,9 +32,9 @@ use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 
 use echo_domain::{
-    AudioCapture, AudioFormat, CaptureSpec, Diarizer, DomainError, Resampler, Sample, SpeakerId,
-    StreamingOptions, StreamingSessionId, TranscribeOptions, Transcriber, TranscriptEvent, Vad,
-    VoiceState,
+    AudioCapture, AudioFormat, CaptureSpec, Diarizer, DomainError, Punctuator, Resampler, Sample,
+    SpeakerId, StreamingOptions, StreamingSessionId, TranscribeOptions, Transcriber,
+    TranscriptEvent, Vad, VoiceState,
 };
 
 /// Capacity of the event channel. ~10 minutes of headroom for a
@@ -82,6 +82,11 @@ pub struct StreamingPipeline {
     /// pipeline must feed it every chunk for its temporal model to
     /// stay coherent.
     vad: Option<Box<dyn Vad>>,
+    /// Optional punctuation restorer applied to every segment text
+    /// after transcription. When `None` segments are emitted as-is
+    /// (Whisper large-v3-turbo produces reasonable punctuation on its
+    /// own; the restorer is most valuable for small/fast models).
+    punctuator: Option<Arc<dyn Punctuator>>,
 }
 
 impl StreamingPipeline {
@@ -97,6 +102,7 @@ impl StreamingPipeline {
             transcriber,
             diarizer: None,
             vad: None,
+            punctuator: None,
         }
     }
 
@@ -119,6 +125,15 @@ impl StreamingPipeline {
     #[must_use]
     pub fn with_vad(mut self, vad: Box<dyn Vad>) -> Self {
         self.vad = Some(vad);
+        self
+    }
+
+    /// Attach a punctuation restorer. Applied to every segment text
+    /// after transcription succeeds. Useful with small/fast models
+    /// whose raw output lacks consistent punctuation.
+    #[must_use]
+    pub fn with_punctuator(mut self, punctuator: Arc<dyn Punctuator>) -> Self {
+        self.punctuator = Some(punctuator);
         self
     }
 
@@ -168,6 +183,7 @@ impl StreamingPipeline {
             self.transcriber,
             self.diarizer,
             self.vad,
+            self.punctuator,
             session_id,
             spec,
             options,
@@ -272,6 +288,7 @@ async fn run_pipeline(
     transcriber: Arc<dyn Transcriber>,
     mut diarizer: Option<Box<dyn Diarizer>>,
     mut vad: Option<Box<dyn Vad>>,
+    punctuator: Option<Arc<dyn Punctuator>>,
     session_id: StreamingSessionId,
     spec: CaptureSpec,
     options: StreamingOptions,
@@ -378,6 +395,7 @@ async fn run_pipeline(
                 &transcriber,
                 &mut diarizer,
                 &mut vad,
+                punctuator.as_deref(),
                 session_id,
                 chunk_index,
                 offset_ms,
@@ -409,6 +427,7 @@ async fn run_pipeline(
             &transcriber,
             &mut diarizer,
             &mut vad,
+            punctuator.as_deref(),
             session_id,
             chunk_index,
             offset_ms,
@@ -446,6 +465,7 @@ async fn process_chunk(
     transcriber: &Arc<dyn Transcriber>,
     diarizer: &mut Option<Box<dyn Diarizer>>,
     vad: &mut Option<Box<dyn Vad>>,
+    punctuator: Option<&dyn Punctuator>,
     session_id: StreamingSessionId,
     chunk_index: u32,
     offset_ms: u32,
@@ -535,6 +555,15 @@ async fn process_chunk(
 
     match result {
         Ok(mut transcript) => {
+            // Apply punctuation restoration before emitting so consumers
+            // receive clean, consistently-punctuated text regardless of
+            // which ASR model was active.
+            if let Some(p) = punctuator {
+                let lang = transcript.language.as_deref();
+                for seg in &mut transcript.segments {
+                    seg.text = p.punctuate(&seg.text, lang);
+                }
+            }
             // Make segment timestamps absolute relative to the session start.
             for seg in &mut transcript.segments {
                 seg.start_ms = seg.start_ms.saturating_add(offset_ms);

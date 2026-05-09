@@ -193,6 +193,18 @@ pub fn run() {
                     let _ = w.hide();
                 }
             }
+            // macOS: dock icon clicked while all windows are hidden.
+            // Without this handler the app stays invisible even though
+            // it is still running, making the dock click feel broken.
+            // RunEvent::Reopen is a macOS-only variant; the cfg guard
+            // prevents a compile error on Windows and Linux.
+            #[cfg(target_os = "macos")]
+            tauri::RunEvent::Reopen {
+                has_visible_windows,
+                ..
+            } if !has_visible_windows => {
+                show_main_window(app_handle);
+            }
             tauri::RunEvent::Exit => {
                 // Ordered shutdown: drain streaming sessions, close SQLite.
                 let state = app_handle.state::<commands::AppState>();

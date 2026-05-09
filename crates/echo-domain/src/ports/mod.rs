@@ -11,6 +11,7 @@ pub mod audio;
 pub mod chat;
 pub mod diarizer;
 pub mod llm;
+pub mod punctuator;
 pub mod resampler;
 pub mod segmenter;
 pub mod storage;

@@ -165,7 +165,38 @@ fn detect_claude_desktop() -> bool {
 }
 
 fn detect_claude_code() -> bool {
-    which_exists("claude")
+    // GUI apps on macOS don't inherit the user's shell PATH, so `which` misses
+    // binaries installed in user-local directories like ~/.local/bin. Check the
+    // known installation paths first, then fall back to `which` for edge cases.
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(h) = home() {
+            // npm / official installer puts the binary here
+            if h.join(".local/bin/claude").exists() {
+                return true;
+            }
+            // Claude Code also creates this directory for its own data
+            if h.join(".local/share/claude").exists() {
+                return true;
+            }
+        }
+        // Homebrew or manual install
+        if PathBuf::from("/opt/homebrew/bin/claude").exists()
+            || PathBuf::from("/usr/local/bin/claude").exists()
+        {
+            return true;
+        }
+        which_exists("claude")
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        if let Some(h) = home() {
+            if h.join(".local/bin/claude").exists() {
+                return true;
+            }
+        }
+        which_exists("claude")
+    }
 }
 
 fn detect_vscode() -> bool {
