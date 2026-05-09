@@ -211,7 +211,7 @@ export function MeetingDetail({
       )}
 
       {/* ── Tab bar ── */}
-      <nav className="flex gap-1 border-b border-subtle" aria-label="Meeting sections">
+      <nav className="flex gap-1 border-b border-subtle" aria-label={t("meeting.sectionsNav")}>
         {tabs.map((tab) => (
           <button
             key={tab.id}

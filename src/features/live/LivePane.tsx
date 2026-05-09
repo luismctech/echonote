@@ -225,12 +225,12 @@ export function LivePane({
               aria-label={t("live.langTooltip")}
             >
               <option value="">{t("live.langAuto")}</option>
-              <option value="es">es</option>
-              <option value="en">en</option>
-              <option value="pt">pt</option>
-              <option value="fr">fr</option>
-              <option value="de">de</option>
-              <option value="it">it</option>
+              <option value="es">{t("languages.es")}</option>
+              <option value="en">{t("languages.en")}</option>
+              <option value="pt">{t("languages.pt")}</option>
+              <option value="fr">{t("languages.fr")}</option>
+              <option value="de">{t("languages.de")}</option>
+              <option value="it">{t("languages.it")}</option>
             </select>
           </label>
 
@@ -259,8 +259,8 @@ export function LivePane({
                 ? "bg-accent-100 text-accent-700 dark:text-accent-400"
                 : "text-content-tertiary hover:text-content-secondary"
             }`}
-            title={`Focus mode (${FOCUS_SHORTCUT})`}
-            aria-label="Toggle focus mode"
+            title={t("live.focusMode", { shortcut: FOCUS_SHORTCUT })}
+            aria-label={t("live.toggleFocusMode")}
           >
             <PanelLeft className="h-3.5 w-3.5 inline-block" />
           </button>

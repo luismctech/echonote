@@ -28,7 +28,7 @@
     "langHint": "Pista para whisper. 'auto' deja que el modelo detecte.",
     "langLabel": "Idioma",
     "langTooltip": "Idioma de transcripción",
-    "langAuto": "auto",
+    "langAuto": "Auto",
     "diarize": "Diarizar",
     "starting": "Iniciando…",
     "start": "Iniciar",
@@ -43,6 +43,8 @@
     "fatal": "fatal:",
     "dismiss": "cerrar",
     "listening": "Escuchando… habla por el micrófono.",
+    "focusMode": "Modo enfoque ({{shortcut}})",
+    "toggleFocusMode": "Alternar modo enfoque",
     "pressStart": "Pulsa Iniciar o {{shortcut}} para comenzar una sesión.",
     "modelLoads": "el modelo se carga en el primer inicio",
     "silence": "silencio",
@@ -74,7 +76,8 @@
     "copySummary": "Copiar resumen",
     "copyTranscript": "Copiar transcripción",
     "copyNotes": "Copiar notas",
-    "editTitle": "Clic para renombrar"
+    "editTitle": "Clic para renombrar",
+    "sectionsNav": "Secciones de la reunión"
   },
   "export": {
     "markdown": "Markdown (.md)",
@@ -195,7 +198,15 @@
     "namePlaceholder": "Nombre de la plantilla…",
     "promptPlaceholder": "Escribe tu prompt de resumen aquí… La transcripción de la reunión se agregará automáticamente.",
     "manage": "Gestionar plantillas",
-    "customGroup": "Personalizadas"
+    "customGroup": "Personalizadas",
+    "builtIn": {
+      "general": "General",
+      "oneOnOne": "1:1",
+      "sprintReview": "Revisión de Sprint",
+      "interview": "Entrevista",
+      "salesCall": "Llamada de Ventas",
+      "lecture": "Clase / Conferencia"
+    }
   },
   "onboarding": {
     "welcomeSubtitle": "Transcripción privada y resúmenes inteligentes para tus reuniones.",
@@ -258,6 +269,7 @@
     "modelMissingDetail": "Descarga el modelo faltante desde el panel de Modelos para usar esta función.",
     "openModels": "Abrir Modelos",
     "outsideTauri": "Fuera de Tauri — IPC no disponible con pnpm dev. Usa pnpm tauri:dev.",
+    "unknownError": "Error desconocido",
     "healthFailed": "Falló la verificación del backend."
   },
   "toast": {
@@ -291,6 +303,14 @@
     "failed": "Error al actualizar",
     "checking": "Buscando actualizaciones…",
     "upToDate": "¡Estás al día!"
+  },
+  "languages": {
+    "es": "Español",
+    "en": "English",
+    "pt": "Português",
+    "fr": "Français",
+    "de": "Deutsch",
+    "it": "Italiano"
   },
   "settings": {
     "switchLanguage": "Cambiar idioma",

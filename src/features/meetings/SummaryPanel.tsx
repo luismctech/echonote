@@ -24,7 +24,7 @@ import { CopyButton } from "../../components/CopyButton";
 import { LogoAnimated } from "../../components/Logo";
 import { formatDate } from "../../lib/format";
 import type { Summary, TemplateId } from "../../types/summary";
-import { TEMPLATE_IDS, TEMPLATE_LABELS } from "../../types/summary";
+import { TEMPLATE_IDS, TEMPLATE_LABEL_KEYS } from "../../types/summary";
 import type { UseMeetingSummary, SelectedTemplate } from "../../hooks/useMeetingSummary";
 import type { CustomTemplate } from "../../types/custom-template";
 import { listCustomTemplates } from "../../ipc/client";
@@ -183,7 +183,7 @@ function TemplateSelector({
     >
       {TEMPLATE_IDS.map((id) => (
         <option key={id} value={id}>
-          {TEMPLATE_LABELS[id]}
+          {t(TEMPLATE_LABEL_KEYS[id])}
         </option>
       ))}
       {customTemplates.length > 0 && (

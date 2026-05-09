@@ -14,6 +14,7 @@
  * transcript backgrounds without per-theme overrides.
  */
 
+import type { TFunction } from "i18next";
 import type { Speaker } from "../types/speaker";
 
 /**
@@ -52,10 +53,17 @@ export function paletteFor(slot: number): SpeakerPaletteEntry {
  * Rust side: trimmed user label when present, otherwise
  * `Speaker {slot+1}`. Whitespace-only labels fall back to anonymous
  * so the UI never renders an empty chip.
+ *
+ * When a `t` function is provided, the fallback uses i18n; otherwise
+ * it falls back to English for non-React contexts (export, copy).
  */
-export function displayName(speaker: Pick<Speaker, "slot" | "label">): string {
+export function displayName(
+  speaker: Pick<Speaker, "slot" | "label">,
+  t?: TFunction,
+): string {
   const label = speaker.label?.trim();
   if (label && label.length > 0) return label;
+  if (t) return t("speakers.speaker", { n: speaker.slot + 1 });
   return `Speaker ${speaker.slot + 1}`;
 }
 

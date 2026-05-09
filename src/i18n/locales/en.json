@@ -28,7 +28,7 @@
     "langHint": "Hint passed to whisper. 'auto' lets the model detect.",
     "langLabel": "Lang",
     "langTooltip": "Transcription language",
-    "langAuto": "auto",
+    "langAuto": "Auto",
     "diarize": "Diarize",
     "starting": "Starting…",
     "start": "Start",
@@ -43,6 +43,8 @@
     "fatal": "fatal:",
     "dismiss": "dismiss",
     "listening": "Listening… speak into the microphone.",
+    "focusMode": "Focus mode ({{shortcut}})",
+    "toggleFocusMode": "Toggle focus mode",
     "pressStart": "Press Start or {{shortcut}} to begin a session.",
     "modelLoads": "model loads on first start",
     "silence": "silence",
@@ -74,7 +76,8 @@
     "copySummary": "Copy summary",
     "copyTranscript": "Copy transcript",
     "copyNotes": "Copy notes",
-    "editTitle": "Click to rename"
+    "editTitle": "Click to rename",
+    "sectionsNav": "Meeting sections"
   },
   "export": {
     "markdown": "Markdown (.md)",
@@ -195,7 +198,15 @@
     "namePlaceholder": "Template name…",
     "promptPlaceholder": "Write your summary prompt here… The meeting transcript will be appended automatically.",
     "manage": "Manage templates",
-    "customGroup": "Custom"
+    "customGroup": "Custom",
+    "builtIn": {
+      "general": "General",
+      "oneOnOne": "1:1",
+      "sprintReview": "Sprint Review",
+      "interview": "Interview",
+      "salesCall": "Sales Call",
+      "lecture": "Lecture"
+    }
   },
   "onboarding": {
     "welcomeSubtitle": "Private transcription and smart summaries for your meetings.",
@@ -258,6 +269,7 @@
     "modelMissingDetail": "Download the missing model from the Models panel to use this feature.",
     "openModels": "Open Models",
     "outsideTauri": "Running outside Tauri — IPC is unavailable in pnpm dev. Use pnpm tauri:dev.",
+    "unknownError": "Unknown error",
     "healthFailed": "Backend health check failed."
   },
   "toast": {
@@ -291,6 +303,14 @@
     "failed": "Update failed",
     "checking": "Checking for updates…",
     "upToDate": "You're up to date!"
+  },
+  "languages": {
+    "es": "Español",
+    "en": "English",
+    "pt": "Português",
+    "fr": "Français",
+    "de": "Deutsch",
+    "it": "Italiano"
   },
   "settings": {
     "switchLanguage": "Switch language",
