@@ -43,7 +43,7 @@ categories = ["multimedia", "multimedia::audio"]
 # -----------------------------------------------------------------------------
 [workspace.dependencies]
 # Runtime
-tokio = { version = "1.41", features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "fs", "signal"] }
+tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "fs", "signal"] }
 futures = "0.3"
 async-trait = "0.1"
 
