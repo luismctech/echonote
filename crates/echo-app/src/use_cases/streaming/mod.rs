@@ -149,6 +149,27 @@ impl StreamingPipeline {
         spec: CaptureSpec,
         options: StreamingOptions,
     ) -> Result<StreamingHandle, StreamingError> {
+        self.start_inner(PipelineSource::Spec(spec), options).await
+    }
+
+    /// Start transcription with an already-started audio stream. Use this
+    /// when the caller needs to start the capture itself (e.g. to retain
+    /// [`MixControls`] for a `Mixed` session) and then hand the stream off
+    /// to the pipeline.
+    pub async fn start_with_stream(
+        self,
+        stream: Box<dyn echo_domain::AudioStream>,
+        options: StreamingOptions,
+    ) -> Result<StreamingHandle, StreamingError> {
+        self.start_inner(PipelineSource::Prestarted(stream), options)
+            .await
+    }
+
+    async fn start_inner(
+        self,
+        source: PipelineSource,
+        options: StreamingOptions,
+    ) -> Result<StreamingHandle, StreamingError> {
         let session_id = StreamingSessionId::new();
         let (event_tx, event_rx) = mpsc::channel::<TranscriptEvent>(EVENT_CHANNEL_CAPACITY);
         let (stop_tx, stop_rx) = oneshot::channel::<()>();
@@ -185,7 +206,7 @@ impl StreamingPipeline {
             self.vad,
             self.punctuator,
             session_id,
-            spec,
+            source,
             options,
             event_tx,
             stop_rx,
@@ -200,6 +221,14 @@ impl StreamingPipeline {
             paused,
         })
     }
+}
+
+/// Describes how a pipeline session obtains its audio stream.
+enum PipelineSource {
+    /// Derive the stream by calling `capture.start(spec)` inside the pipeline task.
+    Spec(CaptureSpec),
+    /// Use a stream that was already started by the caller.
+    Prestarted(Box<dyn echo_domain::AudioStream>),
 }
 
 /// Whisper's canonical sample rate. Inlined here to avoid pulling
@@ -290,7 +319,7 @@ async fn run_pipeline(
     mut vad: Option<Box<dyn Vad>>,
     punctuator: Option<Arc<dyn Punctuator>>,
     session_id: StreamingSessionId,
-    spec: CaptureSpec,
+    source: PipelineSource,
     options: StreamingOptions,
     events: mpsc::Sender<TranscriptEvent>,
     mut stop_rx: oneshot::Receiver<()>,
@@ -304,18 +333,21 @@ async fn run_pipeline(
         v.reset();
     }
 
-    let mut stream = match capture.start(spec).await {
-        Ok(s) => s,
-        Err(e) => {
-            error!(error = %e, "capture.start failed");
-            let _ = events
-                .send(TranscriptEvent::Failed {
-                    session_id,
-                    message: format!("capture failed to start: {e}"),
-                })
-                .await;
-            return;
-        }
+    let mut stream = match source {
+        PipelineSource::Spec(spec) => match capture.start(spec).await {
+            Ok(s) => s,
+            Err(e) => {
+                error!(error = %e, "capture.start failed");
+                let _ = events
+                    .send(TranscriptEvent::Failed {
+                        session_id,
+                        message: format!("capture failed to start: {e}"),
+                    })
+                    .await;
+                return;
+            }
+        },
+        PipelineSource::Prestarted(s) => s,
     };
 
     let format = stream.format();

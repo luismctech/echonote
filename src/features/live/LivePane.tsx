@@ -1,11 +1,12 @@
 import { type RefObject, useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { PanelLeft, Mic, Pause, Play } from "lucide-react";
+import { PanelLeft, Mic, MonitorSpeaker, Pause, Play, X } from "lucide-react";
 
 import { LogoAnimated } from "../../components/Logo";
 import { ResizableHandleVertical } from "../../components/ResizableHandleVertical";
 import type { RecordingState } from "../../state/recording";
+import type { AudioSourceKind } from "../../types/streaming";
 import type { Note } from "../../types/meeting";
 import type { StreamLine } from "../../types/view";
 import { NoteInput } from "./NoteInput";
@@ -75,6 +76,13 @@ export function LivePane({
   onToggleDiarize,
   language,
   onChangeLanguage,
+  audioSource,
+  onChangeSource,
+  micActive,
+  sysActive,
+  onToggleMic,
+  onToggleSys,
+  externalDeviceName,
   onStart,
   onStop,
   onPause,
@@ -97,6 +105,16 @@ export function LivePane({
   onToggleDiarize: (next: boolean) => void;
   language: string;
   onChangeLanguage: (next: string) => void;
+  audioSource: AudioSourceKind;
+  onChangeSource: (next: AudioSourceKind) => void;
+  /** Active mic flag for Mixed mode (undefined when not Mixed). */
+  micActive?: boolean;
+  /** Active sys flag for Mixed mode (undefined when not Mixed). */
+  sysActive?: boolean;
+  onToggleMic?: (active: boolean) => void;
+  onToggleSys?: (active: boolean) => void;
+  /** Device name for the external-output banner (null = hide banner). */
+  externalDeviceName: string | null;
   onStart: () => void;
   onStop: () => void;
   onPause: () => void;
@@ -108,6 +126,10 @@ export function LivePane({
   refineStage?: number;
 }>) {
   const { t } = useTranslation();
+
+  const [bannerDismissed, setBannerDismissed] = useState(false);
+  const showExternalBanner =
+    externalDeviceName !== null && !bannerDismissed && audioSource !== "mixed";
 
   // Toggle is locked once a session is in flight
   const toggleLocked =
@@ -250,6 +272,27 @@ export function LivePane({
             <span className="text-content-secondary">{t("live.diarize")}</span>
           </label>
 
+          {/* Audio source selector */}
+          <label
+            className={`flex select-none items-center gap-1.5 text-ui-sm ${
+              toggleLocked ? "opacity-60" : "cursor-pointer"
+            }`}
+            title={t("live.sourceHint")}
+          >
+            <span className="text-content-tertiary">{t("live.sourceLabel")}</span>
+            <select
+              value={audioSource}
+              disabled={toggleLocked}
+              onChange={(e) => onChangeSource(e.target.value as AudioSourceKind)}
+              className="rounded border border-subtle bg-surface-elevated px-1.5 py-0.5 text-ui-sm text-content-primary"
+              aria-label={t("live.sourceLabel")}
+            >
+              <option value="microphone">{t("live.sourceMic")}</option>
+              <option value="systemOutput">{t("live.sourceSystem")}</option>
+              <option value="mixed">{t("live.sourceMixed")}</option>
+            </select>
+          </label>
+
           {/* Focus mode toggle — hides sidebar */}
           <button
             type="button"
@@ -266,6 +309,30 @@ export function LivePane({
           </button>
         </div>
       </header>
+
+      {/* ── External output device banner ── */}
+      {showExternalBanner && (
+        <div className="flex items-center justify-between gap-3 rounded-md border border-blue-500/30 bg-blue-50 px-3 py-2 text-ui-sm dark:bg-blue-950/30">
+          <span className="text-blue-700 dark:text-blue-300">
+            {t("live.externalDeviceDetected", { device: externalDeviceName })}{" "}
+            <button
+              type="button"
+              onClick={() => { onChangeSource("mixed"); setBannerDismissed(true); }}
+              className="ml-1 font-semibold underline underline-offset-2 hover:no-underline"
+            >
+              {t("live.enableMixed")}
+            </button>
+          </span>
+          <button
+            type="button"
+            onClick={() => setBannerDismissed(true)}
+            aria-label={t("live.dismissBanner")}
+            className="flex-shrink-0 rounded p-0.5 text-blue-500 hover:bg-blue-100 dark:hover:bg-blue-900"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      )}
 
       {/* ── Post-stop refining progress ── */}
       {stream.kind === "stopping" && refineStage != null && refineStage >= 0 && (
@@ -342,9 +409,13 @@ export function LivePane({
 
       {/* ── Bottom bar: controls + audio level ── */}
       <footer className="flex flex-shrink-0 items-center justify-between gap-4 rounded-md border border-subtle bg-surface-sunken px-4 py-2">
-        {/* Left: audio level indicator */}
+        {/* Left: audio level indicator + optional mix source toggles */}
         <div className="flex items-center gap-2">
-          <Mic className="h-3.5 w-3.5 text-content-tertiary" />
+          {audioSource === "systemOutput" ? (
+            <MonitorSpeaker className="h-3.5 w-3.5 text-content-tertiary" />
+          ) : (
+            <Mic className="h-3.5 w-3.5 text-content-tertiary" />
+          )}
           {/* Simple level bars */}
           <div className="flex items-end gap-0.5">
             {Array.from({ length: 5 }).map((_, i) => (
@@ -364,6 +435,37 @@ export function LivePane({
             <span className="font-mono text-micro tabular-nums text-content-tertiary">
               {stats.chunks} {t("stats.chunks")}
             </span>
+          )}
+          {/* Mix source toggles — visible only during an active Mixed session */}
+          {audioSource === "mixed" && isActive && (
+            <div className="flex items-center gap-1 border-l border-subtle pl-2">
+              <button
+                type="button"
+                title={t("live.toggleMic")}
+                onClick={() => onToggleMic?.(!micActive)}
+                className={`flex items-center gap-1 rounded-full px-2 py-0.5 text-micro ring-1 transition-colors ${
+                  micActive
+                    ? "bg-emerald-500/10 text-emerald-700 ring-emerald-500/30 dark:text-emerald-400"
+                    : "bg-content-placeholder/10 text-content-placeholder ring-content-placeholder/20 line-through"
+                }`}
+              >
+                <Mic className="h-2.5 w-2.5" />
+                {t("live.mic")}
+              </button>
+              <button
+                type="button"
+                title={t("live.toggleSys")}
+                onClick={() => onToggleSys?.(!sysActive)}
+                className={`flex items-center gap-1 rounded-full px-2 py-0.5 text-micro ring-1 transition-colors ${
+                  sysActive
+                    ? "bg-violet-500/10 text-violet-700 ring-violet-500/30 dark:text-violet-400"
+                    : "bg-content-placeholder/10 text-content-placeholder ring-content-placeholder/20 line-through"
+                }`}
+              >
+                <MonitorSpeaker className="h-2.5 w-2.5" />
+                {t("live.sys")}
+              </button>
+            </div>
           )}
         </div>
 

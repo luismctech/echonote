@@ -12,10 +12,11 @@
  * for the same reason.
  */
 
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { LayoutGrid } from "lucide-react";
 
+import { getOutputDeviceInfo } from "./ipc/client";
 import { LogoMark } from "./components/Logo";
 import { useToast } from "./components/Toaster";
 import { OnboardingFlow } from "./features/onboarding/OnboardingFlow";
@@ -98,24 +99,51 @@ export function App() {
     start: startRecording,
     reset: resetRecording,
     stop: stopRecording,
+    setMixSources: recordingSetMixSources,
   } = recording;
 
   // Diarize is opt-in to keep the existing whisper-only path unchanged
   // for users who haven't downloaded the embedder yet.
   const [diarize, setDiarize] = useState(false);
   const [language, setLanguage] = useState<string>("es");
+  const [audioSource, setAudioSource] = useState<import("./types/streaming").AudioSourceKind>("microphone");
+  const [micActive, setMicActive] = useState(true);
+  const [sysActive, setSysActive] = useState(true);
+  const [externalDeviceName, setExternalDeviceName] = useState<string | null>(null);
   const [showModels, setShowModels] = useState(false);
   const [showMcp, setShowMcp] = useState(false);
   const [focusMode, setFocusMode] = useState(false);
   const modelManager = useModelManager();
   openModelsRef.current = () => { modelManager.refresh(); setShowModels(true); };
 
+  // Detect external output device once the backend is ready.
+  useEffect(() => {
+    if (probe.kind !== "ok") return;
+    getOutputDeviceInfo()
+      .then((info) => {
+        if (info?.isHeadphones) setExternalDeviceName(info.name);
+      })
+      .catch(() => {});
+  }, [probe.kind]);
+
   // Pressing Start while viewing a stored meeting must also flip the
   // pane back to live so the user sees the new transcript.
   const handleStart = useCallback(async () => {
     goToLive();
-    await startRecording({ language, diarize });
-  }, [goToLive, startRecording, language, diarize]);
+    setMicActive(true);
+    setSysActive(true);
+    await startRecording({ language, diarize, source: audioSource });
+  }, [goToLive, startRecording, language, diarize, audioSource]);
+
+  const handleToggleMic = useCallback(async (active: boolean) => {
+    setMicActive(active);
+    await recordingSetMixSources(active, sysActive);
+  }, [recordingSetMixSources, sysActive]);
+
+  const handleToggleSys = useCallback(async (active: boolean) => {
+    setSysActive(active);
+    await recordingSetMixSources(micActive, active);
+  }, [recordingSetMixSources, micActive]);
 
   // Switching back to the live pane after a session finished must
   // also clear stale lines and reset the state machine to idle —
@@ -275,6 +303,13 @@ export function App() {
               onToggleDiarize={setDiarize}
               language={language}
               onChangeLanguage={setLanguage}
+              audioSource={audioSource}
+              onChangeSource={setAudioSource}
+              micActive={micActive}
+              sysActive={sysActive}
+              onToggleMic={handleToggleMic}
+              onToggleSys={handleToggleSys}
+              externalDeviceName={externalDeviceName}
               onStart={handleStart}
               onStop={stopRecording}
               onPause={recording.pause}

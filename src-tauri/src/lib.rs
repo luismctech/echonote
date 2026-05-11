@@ -60,6 +60,8 @@ pub fn run() {
             commands::streaming::pause_streaming,
             commands::streaming::resume_streaming,
             commands::streaming::get_meeting_id,
+            commands::streaming::get_output_device_info,
+            commands::streaming::set_mix_sources,
             commands::meetings::list_meetings,
             commands::meetings::get_meeting,
             commands::meetings::delete_meeting,

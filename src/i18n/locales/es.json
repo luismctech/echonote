@@ -55,7 +55,19 @@
     "notes": "Notas",
     "refineTranscript": "Afinando transcripción…",
     "refineSpeakers": "Detectando speakers…",
-    "refineSummary": "Generando resumen…"
+    "refineSummary": "Generando resumen…",
+    "sourceLabel": "Fuente",
+    "sourceHint": "Fuente de audio para la transcripción",
+    "sourceMic": "Micrófono",
+    "sourceSystem": "Audio del sistema",
+    "sourceMixed": "Mixto (mic + sistema)",
+    "externalDeviceDetected": "Dispositivo de salida externo detectado: {{device}}.",
+    "enableMixed": "Activar modo mixto",
+    "dismissBanner": "Cerrar aviso",
+    "toggleMic": "Activar/desactivar micrófono en la mezcla",
+    "toggleSys": "Activar/desactivar audio del sistema en la mezcla",
+    "mic": "Mic",
+    "sys": "Sys"
   },
   "health": {
     "warmingUp": "calentando…",

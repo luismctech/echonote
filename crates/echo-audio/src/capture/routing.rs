@@ -14,22 +14,23 @@
 //! │                       │  SystemOutput      ┌─────────────────────┐
 //! │                       ├──────────────────▶│ ScreenCaptureKit-   │
 //! │                       │                   │ Capture (macOS)     │
-//! └───────────────────────┘                   └─────────────────────┘
+//! │                       │  Mixed             └─────────────────────┘
+//! │                       ├──────────────────▶ Both adapters → MixedStream
+//! └───────────────────────┘
 //! ```
 //!
 //! On unsupported targets the system-output slot is `None` and any
-//! request for `AudioSource::SystemOutput` returns
-//! [`DomainError::AudioDeviceUnavailable`] with a clear message.
-//!
-//! The composite is intentionally *only* a router. Mixing two streams
-//! into a single [`AudioStream`] (mic + system in the same session)
-//! lands in a follow-up issue once the diarizer is wired and we know
-//! how the downstream API wants to label each speaker track.
+//! request for `AudioSource::SystemOutput` or `AudioSource::Mixed`
+//! returns [`DomainError::AudioDeviceUnavailable`] with a clear message.
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use echo_domain::{AudioCapture, AudioSource, AudioStream, CaptureSpec, DeviceInfo, DomainError};
+use echo_domain::{
+    AudioCapture, AudioFormat, AudioSource, AudioStream, CaptureSpec, DeviceInfo, DomainError,
+};
+
+use super::mixed::{MixControls, MixedStream};
 
 use crate::CpalMicrophoneCapture;
 
@@ -115,12 +116,56 @@ impl RoutingAudioCapture {
     fn pick(&self, source: AudioSource) -> Result<&Arc<dyn AudioCapture>, DomainError> {
         match source {
             AudioSource::Microphone => Ok(&self.microphone),
-            AudioSource::SystemOutput => self.system_output.as_ref().ok_or_else(|| {
-                DomainError::AudioDeviceUnavailable(
-                    "system audio capture is not available on this platform".into(),
-                )
-            }),
+            AudioSource::SystemOutput | AudioSource::Mixed => {
+                self.system_output.as_ref().ok_or_else(|| {
+                    DomainError::AudioDeviceUnavailable(
+                        "system audio capture is not available on this platform".into(),
+                    )
+                })
+            }
         }
+    }
+
+    /// Start both the microphone and system-audio streams and merge them
+    /// into a single [`MixedStream`]. Returns the stream and a
+    /// [`MixControls`] handle that can mute each source independently
+    /// during the live session.
+    pub async fn start_mixed(
+        &self,
+        spec: CaptureSpec,
+    ) -> Result<(Box<dyn AudioStream>, MixControls), DomainError> {
+        let sys_adapter = self.system_output.as_ref().ok_or_else(|| {
+            DomainError::AudioDeviceUnavailable(
+                "system audio capture is not available on this platform; \
+                 Mixed mode requires both microphone and system-audio support"
+                    .into(),
+            )
+        })?;
+
+        // Both sources are requested at 48 kHz stereo — the native rate of
+        // ScreenCaptureKit and most macOS CoreAudio configurations. The
+        // downstream pipeline resampler converts this to 16 kHz mono for Whisper.
+        let stereo_48k = AudioFormat {
+            sample_rate_hz: 48_000,
+            channels: 2,
+        };
+
+        let mic_spec = CaptureSpec {
+            source: AudioSource::Microphone,
+            device_id: spec.device_id.clone(),
+            preferred_format: stereo_48k,
+        };
+        let sys_spec = CaptureSpec {
+            source: AudioSource::SystemOutput,
+            device_id: None,
+            preferred_format: stereo_48k,
+        };
+
+        let mic_stream = self.microphone.start(mic_spec).await?;
+        let sys_stream = sys_adapter.clone().start(sys_spec).await?;
+
+        let (stream, controls) = MixedStream::new(mic_stream, sys_stream, stereo_48k);
+        Ok((Box::new(stream), controls))
     }
 }
 
@@ -133,10 +178,24 @@ impl Default for RoutingAudioCapture {
 #[async_trait]
 impl AudioCapture for RoutingAudioCapture {
     async fn list_devices(&self, source: AudioSource) -> Result<Vec<DeviceInfo>, DomainError> {
+        if source == AudioSource::Mixed {
+            // Synthesise a single logical "mixed" device.
+            return Ok(vec![DeviceInfo {
+                id: "mixed:default".to_string(),
+                name: "Mixed (Microphone + System Audio)".to_string(),
+                is_default: true,
+            }]);
+        }
         self.pick(source)?.list_devices(source).await
     }
 
     async fn start(&self, spec: CaptureSpec) -> Result<Box<dyn AudioStream>, DomainError> {
+        if spec.source == AudioSource::Mixed {
+            // Discard mix controls — callers that need live-toggle must use
+            // `start_mixed` directly so they can retain the control handles.
+            let (stream, _controls) = self.start_mixed(spec).await?;
+            return Ok(stream);
+        }
         let adapter = self.pick(spec.source)?.clone();
         adapter.start(spec).await
     }

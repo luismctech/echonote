@@ -55,7 +55,19 @@
     "notes": "Notes",
     "refineTranscript": "Refining transcript…",
     "refineSpeakers": "Detecting speakers…",
-    "refineSummary": "Generating summary…"
+    "refineSummary": "Generating summary…",
+    "sourceLabel": "Source",
+    "sourceHint": "Audio source for transcription",
+    "sourceMic": "Microphone",
+    "sourceSystem": "System audio",
+    "sourceMixed": "Mixed (mic + system)",
+    "externalDeviceDetected": "External output detected: {{device}}.",
+    "enableMixed": "Enable mixed mode",
+    "dismissBanner": "Dismiss",
+    "toggleMic": "Toggle microphone in mix",
+    "toggleSys": "Toggle system audio in mix",
+    "mic": "Mic",
+    "sys": "Sys"
   },
   "health": {
     "warmingUp": "warming up…",

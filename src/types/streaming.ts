@@ -19,14 +19,21 @@ export type AudioFormat = {
 /**
  * Where the backend should pull audio from.
  *
- * - `microphone`: default cpal input. Requires Microphone permission
- *   on macOS the first time it runs.
- * - `systemOutput`: the system audio mix (the "other side of the
- *   call"). macOS 13+ only — uses ScreenCaptureKit and requires
- *   Screen Recording permission. The backend ignores `deviceId` for
- *   this source.
+ * - `microphone`: default cpal input. Requires Microphone permission.
+ * - `systemOutput`: system audio loopback (macOS 13+, ScreenCaptureKit).
+ *   The backend ignores `deviceId` for this source.
+ * - `mixed`: microphone + system audio merged. Best with headphones:
+ *   mic captures the local speaker, system captures remote participants.
+ *   Use `setMixSources` to mute/unmute each channel during a session.
  */
-export type AudioSourceKind = "microphone" | "systemOutput";
+export type AudioSourceKind = "microphone" | "systemOutput" | "mixed";
+
+/** Information about the system's current default audio output device. */
+export type OutputDeviceInfo = {
+  name: string;
+  /** True when the device name suggests headphones / earbuds. */
+  isHeadphones: boolean;
+};
 
 export type StartStreamingOptions = {
   source?: AudioSourceKind;

@@ -620,9 +620,9 @@ async fn run_stream(
     // by named device. Surfacing `--device` for it would be misleading.
     let device_id = match source {
         AudioSource::Microphone => device,
-        AudioSource::SystemOutput => {
+        AudioSource::SystemOutput | AudioSource::Mixed => {
             if device.is_some() {
-                tracing::warn!("--device is ignored when --source system-output");
+                tracing::warn!("--device is ignored when --source system-output/mixed");
             }
             None
         }

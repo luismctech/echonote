@@ -9,9 +9,11 @@
 //! - **Linux**: [`linux::PulseMonitorCapture`] via PulseAudio monitor sources.
 
 pub mod cpal_microphone;
+pub mod mixed;
 pub mod routing;
 
 pub use cpal_microphone::CpalMicrophoneCapture;
+pub use mixed::{MixControls, MixedStream};
 pub use routing::RoutingAudioCapture;
 
 #[cfg(target_os = "macos")]
