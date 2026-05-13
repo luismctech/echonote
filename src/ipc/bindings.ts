@@ -79,6 +79,29 @@ async getMeetingId(sessionId: StreamingSessionId) : Promise<Result<MeetingId | n
 }
 },
 /**
+ * Return the name and headphone-heuristic for the default output device.
+ */
+async getOutputDeviceInfo() : Promise<Result<OutputDeviceInfo | null, IpcError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_output_device_info") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Toggle which sources contribute to the mix for an active `Mixed` session.
+ * Returns `false` when the session is not found or was not started in Mixed mode.
+ */
+async setMixSources(sessionId: StreamingSessionId, micActive: boolean, sysActive: boolean) : Promise<Result<boolean, IpcError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("set_mix_sources", { sessionId, micActive, sysActive }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * List meetings, newest first.
  */
 async listMeetings(limit: number | null) : Promise<Result<MeetingSummary[], IpcError>> {
@@ -884,7 +907,12 @@ export type IpcAudioSource =
 /**
  * System audio loopback (macOS 13+ via ScreenCaptureKit).
  */
-"systemOutput"
+"systemOutput" | 
+/**
+ * Microphone + system audio merged. Both sources run concurrently;
+ * each can be muted/unmuted live via `set_mix_sources`.
+ */
+"mixed"
 /**
  * Structured error returned by every Tauri command.
  * 
@@ -1151,6 +1179,19 @@ createdAt: string }
  * ordering aligned with creation time.
  */
 export type NoteId = string
+/**
+ * Information about the current system audio output device.
+ */
+export type OutputDeviceInfo = { 
+/**
+ * Human-readable name of the default output device.
+ */
+name: string; 
+/**
+ * Heuristic: `true` when the device name suggests headphones /
+ * earbuds / in-ear monitors rather than built-in or external speakers.
+ */
+isHeadphones: boolean }
 /**
  * One contiguous transcription span.
  * 

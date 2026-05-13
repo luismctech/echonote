@@ -1,7 +1,7 @@
 import { type RefObject, useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { PanelLeft, Mic, MonitorSpeaker, Pause, Play, X } from "lucide-react";
+import { ChevronDown, Globe, PanelLeft, Mic, MonitorSpeaker, Pause, Play, Users, X } from "lucide-react";
 
 import { LogoAnimated } from "../../components/Logo";
 import { ResizableHandleVertical } from "../../components/ResizableHandleVertical";
@@ -141,6 +141,12 @@ export function LivePane({
   const isActive =
     stream.kind === "recording" || stream.kind === "paused";
 
+  const sourceLabels: Record<AudioSourceKind, string> = {
+    microphone: t("live.sourceMic"),
+    systemOutput: t("live.sourceSystem"),
+    mixed: t("live.sourceMixed"),
+  };
+
   // Focus mode: hides the sidebar (history panel)
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -230,77 +236,115 @@ export function LivePane({
           )}
         </div>
 
-        <div className="flex items-center gap-3">
-          {/* Language selector */}
-          <label
-            className={`flex select-none items-center gap-1.5 text-ui-sm ${
-              toggleLocked ? "opacity-60" : "cursor-pointer"
+        <div className="flex items-center gap-2">
+          {/* Unified capture controls — language · voices · source */}
+          <div
+            className={`flex items-center divide-x divide-subtle rounded-lg border border-subtle bg-surface-elevated text-ui-sm ${
+              toggleLocked ? "opacity-60" : ""
             }`}
-            title={t("live.langHint")}
           >
-            <span className="text-content-tertiary">{t("live.langLabel")}</span>
-            <select
-              value={language}
-              disabled={toggleLocked}
-              onChange={(e) => onChangeLanguage(e.target.value)}
-              className="rounded border border-subtle bg-surface-elevated px-1.5 py-0.5 text-ui-sm text-content-primary"
-              aria-label={t("live.langTooltip")}
+            {/* Language */}
+            <label
+              className={`relative flex select-none items-center gap-1.5 px-2.5 py-1 ${
+                toggleLocked ? "" : "cursor-pointer"
+              }`}
+              title={t("live.langHint")}
             >
-              <option value="">{t("live.langAuto")}</option>
-              <option value="es">{t("languages.es")}</option>
-              <option value="en">{t("languages.en")}</option>
-              <option value="pt">{t("languages.pt")}</option>
-              <option value="fr">{t("languages.fr")}</option>
-              <option value="de">{t("languages.de")}</option>
-              <option value="it">{t("languages.it")}</option>
-            </select>
-          </label>
+              <Globe className="h-3.5 w-3.5 shrink-0 text-content-tertiary" aria-hidden />
+              <span className="relative inline-flex items-center pr-4 text-content-primary">
+                <span aria-hidden>
+                  {language === "" ? t("live.langAuto") : t(`languages.${language}`)}
+                </span>
+                <select
+                  value={language}
+                  disabled={toggleLocked}
+                  onChange={(e) => onChangeLanguage(e.target.value)}
+                  className="absolute inset-0 w-full cursor-pointer appearance-none border-0 bg-transparent p-0 text-ui-sm text-transparent opacity-0 focus:opacity-0 focus:outline-none focus:ring-0"
+                  aria-label={t("live.langTooltip")}
+                >
+                  <option value="">{t("live.langAuto")}</option>
+                  <option value="es">{t("languages.es")}</option>
+                  <option value="en">{t("languages.en")}</option>
+                  <option value="pt">{t("languages.pt")}</option>
+                  <option value="fr">{t("languages.fr")}</option>
+                  <option value="de">{t("languages.de")}</option>
+                  <option value="it">{t("languages.it")}</option>
+                </select>
+                <ChevronDown
+                  className="pointer-events-none absolute right-0 h-3 w-3 text-content-tertiary"
+                  aria-hidden
+                />
+              </span>
+            </label>
 
-          {/* Diarize toggle */}
-          <label
-            className={`flex select-none items-center gap-1.5 text-ui-sm ${
-              toggleLocked ? "opacity-60" : "cursor-pointer"
-            }`}
-          >
-            <input
-              type="checkbox"
-              checked={diarize}
+            {/* Voices (formerly Diarize) */}
+            <button
+              type="button"
+              onClick={() => !toggleLocked && onToggleDiarize(!diarize)}
               disabled={toggleLocked}
-              onChange={(e) => onToggleDiarize(e.target.checked)}
-              className=""
-            />
-            <span className="text-content-secondary">{t("live.diarize")}</span>
-          </label>
-
-          {/* Audio source selector */}
-          <label
-            className={`flex select-none items-center gap-1.5 text-ui-sm ${
-              toggleLocked ? "opacity-60" : "cursor-pointer"
-            }`}
-            title={t("live.sourceHint")}
-          >
-            <span className="text-content-tertiary">{t("live.sourceLabel")}</span>
-            <select
-              value={audioSource}
-              disabled={toggleLocked}
-              onChange={(e) => onChangeSource(e.target.value as AudioSourceKind)}
-              className="rounded border border-subtle bg-surface-elevated px-1.5 py-0.5 text-ui-sm text-content-primary"
-              aria-label={t("live.sourceLabel")}
+              role="switch"
+              aria-checked={diarize}
+              title={t("live.diarizeHint")}
+              className={`flex select-none items-center gap-1.5 px-2.5 py-1 transition-colors ${
+                toggleLocked ? "" : "cursor-pointer hover:bg-surface-sunken"
+              } ${
+                diarize
+                  ? "text-emerald-700 dark:text-emerald-400"
+                  : "text-content-secondary"
+              }`}
             >
-              <option value="microphone">{t("live.sourceMic")}</option>
-              <option value="systemOutput">{t("live.sourceSystem")}</option>
-              <option value="mixed">{t("live.sourceMixed")}</option>
-            </select>
-          </label>
+              <Users
+                className={`h-3.5 w-3.5 ${diarize ? "text-emerald-600 dark:text-emerald-400" : "text-content-tertiary"}`}
+                aria-hidden
+              />
+              <span>{t("live.diarize")}</span>
+              <span
+                className={`ml-0.5 inline-block h-2 w-2 rounded-full ${
+                  diarize
+                    ? "bg-emerald-500 shadow-[0_0_0_2px_rgba(16,185,129,0.18)]"
+                    : "border border-content-placeholder/50"
+                }`}
+                aria-hidden
+              />
+            </button>
+
+            {/* Audio source */}
+            <label
+              className={`relative flex select-none items-center gap-1.5 px-2.5 py-1 ${
+                toggleLocked ? "" : "cursor-pointer"
+              }`}
+              title={t("live.sourceHint")}
+            >
+              <Mic className="h-3.5 w-3.5 shrink-0 text-content-tertiary" aria-hidden />
+              <span className="relative inline-flex items-center pr-4 text-content-primary">
+                <span aria-hidden>{sourceLabels[audioSource]}</span>
+                <select
+                  value={audioSource}
+                  disabled={toggleLocked}
+                  onChange={(e) => onChangeSource(e.target.value as AudioSourceKind)}
+                  className="absolute inset-0 w-full cursor-pointer appearance-none border-0 bg-transparent p-0 text-ui-sm text-transparent opacity-0 focus:opacity-0 focus:outline-none focus:ring-0"
+                  aria-label={t("live.sourceLabel")}
+                >
+                  <option value="microphone">{t("live.sourceMic")}</option>
+                  <option value="systemOutput">{t("live.sourceSystem")}</option>
+                  <option value="mixed">{t("live.sourceMixed")}</option>
+                </select>
+                <ChevronDown
+                  className="pointer-events-none absolute right-0 h-3 w-3 text-content-tertiary"
+                  aria-hidden
+                />
+              </span>
+            </label>
+          </div>
 
           {/* Focus mode toggle — hides sidebar */}
           <button
             type="button"
             onClick={onToggleFocusMode}
-            className={`rounded px-1.5 py-0.5 text-ui-xs transition-colors ${
+            className={`rounded-lg border px-2 py-1 text-ui-xs transition-colors ${
               focusMode
-                ? "bg-accent-100 text-accent-700 dark:text-accent-400"
-                : "text-content-tertiary hover:text-content-secondary"
+                ? "border-accent-400 bg-accent-100 text-accent-700 dark:border-accent-700 dark:bg-accent-900/30 dark:text-accent-400"
+                : "border-subtle text-content-tertiary hover:text-content-secondary"
             }`}
             title={t("live.focusMode", { shortcut: FOCUS_SHORTCUT })}
             aria-label={t("live.toggleFocusMode")}

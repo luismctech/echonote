@@ -1,7 +1,8 @@
 {
   "app": {
     "title": "EchoNote",
-    "subtitle": "Private, local-first meeting transcription and AI summaries."
+    "subtitle": "Private, local-first meeting transcription and AI summaries.",
+    "privacyChip": "100% local"
   },
   "sidebar": {
     "meetings": "Meetings",
@@ -26,10 +27,11 @@
     "title": "Live transcript",
     "description": "5-second windows · whisper.cpp · {{label}}",
     "langHint": "Hint passed to whisper. 'auto' lets the model detect.",
-    "langLabel": "Lang",
+    "langLabel": "Language",
     "langTooltip": "Transcription language",
     "langAuto": "Auto",
-    "diarize": "Diarize",
+    "diarize": "Voices",
+    "diarizeHint": "Identify and separate each person speaking",
     "starting": "Starting…",
     "start": "Start",
     "recording": "Recording…",
@@ -210,6 +212,7 @@
     "namePlaceholder": "Template name…",
     "promptPlaceholder": "Write your summary prompt here… The meeting transcript will be appended automatically.",
     "manage": "Manage templates",
+    "manageShort": "Templates",
     "customGroup": "Custom",
     "builtIn": {
       "general": "General",

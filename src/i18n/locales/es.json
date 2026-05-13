@@ -1,7 +1,8 @@
 {
   "app": {
     "title": "EchoNote",
-    "subtitle": "Transcripción de reuniones privada y local con resúmenes de IA."
+    "subtitle": "Transcripción de reuniones privada y local con resúmenes de IA.",
+    "privacyChip": "100% local"
   },
   "sidebar": {
     "meetings": "Reuniones",
@@ -29,7 +30,8 @@
     "langLabel": "Idioma",
     "langTooltip": "Idioma de transcripción",
     "langAuto": "Auto",
-    "diarize": "Diarizar",
+    "diarize": "Voces",
+    "diarizeHint": "Identifica y separa a cada persona que habla",
     "starting": "Iniciando…",
     "start": "Iniciar",
     "recording": "Grabando…",
@@ -210,6 +212,7 @@
     "namePlaceholder": "Nombre de la plantilla…",
     "promptPlaceholder": "Escribe tu prompt de resumen aquí… La transcripción de la reunión se agregará automáticamente.",
     "manage": "Gestionar plantillas",
+    "manageShort": "Plantillas",
     "customGroup": "Personalizadas",
     "builtIn": {
       "general": "General",

@@ -229,17 +229,22 @@ export function App() {
 
   return (
     <main className="flex h-full w-full flex-col gap-3 overflow-hidden px-4 py-3 sm:px-6 sm:py-4">
-      <header className="flex flex-shrink-0 items-end justify-between gap-4">
-        <div className="flex items-center gap-2.5">
-          <LogoMark size={28} className="flex-shrink-0" />
-          <div className="flex flex-col">
-            <h1 className="text-[22px] font-semibold leading-tight tracking-tight">
-              {t("app.title")}
-            </h1>
-            <p className="hidden text-ui-sm text-content-tertiary sm:block">
-              {t("app.subtitle")}
-            </p>
-          </div>
+      <header className="flex flex-shrink-0 items-center justify-between gap-4">
+        <div className="flex items-center gap-3">
+          <LogoMark size={32} className="flex-shrink-0 drop-shadow-[0_0_12px_rgba(59,232,165,0.25)]" />
+          <h1 className="text-[28px] font-semibold leading-none tracking-[-0.02em] text-content-primary">
+            {t("app.title")}
+          </h1>
+          <span
+            className="inline-flex items-center gap-1.5 rounded-full bg-emerald-50/60 px-2 py-0.5 text-micro font-medium text-emerald-700 ring-1 ring-emerald-200/60 dark:bg-emerald-900/20 dark:text-emerald-400 dark:ring-emerald-800/40"
+            title={t("app.subtitle")}
+          >
+            <span
+              className="h-1.5 w-1.5 rounded-full bg-emerald-500 shadow-[0_0_0_2px_rgba(16,185,129,0.18)]"
+              aria-hidden
+            />
+            {t("app.privacyChip")}
+          </span>
         </div>
         <div className="flex items-center gap-2">
           <ThemeSwitcher />
