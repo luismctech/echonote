@@ -130,6 +130,13 @@ impl RoutingAudioCapture {
     /// into a single [`MixedStream`]. Returns the stream and a
     /// [`MixControls`] handle that can mute each source independently
     /// during the live session.
+    ///
+    /// The mixer normalizes each source independently (channel downmix +
+    /// sample-rate conversion) to [`AudioFormat::WHISPER`] (16 kHz mono)
+    /// before combining them. This makes the mix correct even when the
+    /// mic and system streams negotiate different native formats — the
+    /// common case on macOS, where built-in mics expose mono 48 kHz while
+    /// ScreenCaptureKit delivers stereo 48 kHz.
     pub async fn start_mixed(
         &self,
         spec: CaptureSpec,
@@ -142,10 +149,12 @@ impl RoutingAudioCapture {
             )
         })?;
 
-        // Both sources are requested at 48 kHz stereo — the native rate of
-        // ScreenCaptureKit and most macOS CoreAudio configurations. The
-        // downstream pipeline resampler converts this to 16 kHz mono for Whisper.
-        let stereo_48k = AudioFormat {
+        // Each source is started at its native preferred rate (48 kHz
+        // stereo is a reasonable hint for both cpal and ScreenCaptureKit;
+        // adapters fall back to whatever the device actually supports).
+        // The MixedStream then downmixes + resamples each stream to the
+        // canonical Whisper target so the per-sample mix is time-aligned.
+        let hint = AudioFormat {
             sample_rate_hz: 48_000,
             channels: 2,
         };
@@ -153,18 +162,18 @@ impl RoutingAudioCapture {
         let mic_spec = CaptureSpec {
             source: AudioSource::Microphone,
             device_id: spec.device_id.clone(),
-            preferred_format: stereo_48k,
+            preferred_format: hint,
         };
         let sys_spec = CaptureSpec {
             source: AudioSource::SystemOutput,
             device_id: None,
-            preferred_format: stereo_48k,
+            preferred_format: hint,
         };
 
         let mic_stream = self.microphone.start(mic_spec).await?;
         let sys_stream = sys_adapter.clone().start(sys_spec).await?;
 
-        let (stream, controls) = MixedStream::new(mic_stream, sys_stream, stereo_48k);
+        let (stream, controls) = MixedStream::new(mic_stream, sys_stream, AudioFormat::WHISPER)?;
         Ok((Box::new(stream), controls))
     }
 }
