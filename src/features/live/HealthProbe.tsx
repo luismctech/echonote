@@ -48,7 +48,7 @@ export function HealthProbe({ probe, onClickVersion }: Readonly<{ probe: Probe; 
           type="button"
           onClick={onClickVersion}
           className={`${base} cursor-pointer border-emerald-300 bg-emerald-50 text-emerald-800 hover:bg-emerald-100 dark:border-emerald-900 dark:bg-emerald-950/40 dark:text-emerald-300 dark:hover:bg-emerald-950/60`}
-          title={`v${probe.status.version} · ${probe.status.target} · ${probe.status.commit}`}
+          title={t("health.tooltip", { version: probe.status.version, target: probe.status.target, commit: probe.status.commit })}
         >
           <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
           {t("health.ok", { version: probe.status.version })}

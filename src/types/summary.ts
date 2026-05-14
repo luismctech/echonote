@@ -139,13 +139,14 @@ export const TEMPLATE_IDS = [
 
 export type TemplateId = (typeof TEMPLATE_IDS)[number];
 
-export const TEMPLATE_LABELS: Record<TemplateId, string> = {
-  general: "General",
-  oneOnOne: "1:1",
-  sprintReview: "Sprint Review",
-  interview: "Interview",
-  salesCall: "Sales Call",
-  lecture: "Lecture",
+/** i18n key for each built-in template label. */
+export const TEMPLATE_LABEL_KEYS: Record<TemplateId, string> = {
+  general: "templates.builtIn.general",
+  oneOnOne: "templates.builtIn.oneOnOne",
+  sprintReview: "templates.builtIn.sprintReview",
+  interview: "templates.builtIn.interview",
+  salesCall: "templates.builtIn.salesCall",
+  lecture: "templates.builtIn.lecture",
 };
 
 /**

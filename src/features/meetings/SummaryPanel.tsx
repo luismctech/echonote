@@ -18,13 +18,14 @@
 import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import Markdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import rehypeSanitize from "rehype-sanitize";
-import { Settings, FileText } from "lucide-react";
+import { ChevronDown, FileText, SquarePen, StickyNote } from "lucide-react";
 import { CopyButton } from "../../components/CopyButton";
 import { LogoAnimated } from "../../components/Logo";
 import { formatDate } from "../../lib/format";
 import type { Summary, TemplateId } from "../../types/summary";
-import { TEMPLATE_IDS, TEMPLATE_LABELS } from "../../types/summary";
+import { TEMPLATE_IDS, TEMPLATE_LABEL_KEYS } from "../../types/summary";
 import type { UseMeetingSummary, SelectedTemplate } from "../../hooks/useMeetingSummary";
 import type { CustomTemplate } from "../../types/custom-template";
 import { listCustomTemplates } from "../../ipc/client";
@@ -63,31 +64,57 @@ export function SummaryPanel({
         <span className="type-section-header text-content-placeholder">
           {t("summary.label")}
         </span>
-        <div className="flex items-center gap-1.5">
-          <TemplateSelector
-            value={selectedTemplate}
-            onChange={setSelectedTemplate}
-            disabled={loading || generating}
-            customTemplates={customTemplates}
-          />
-          <button
-            type="button"
-            onClick={() => setShowTemplateManager(true)}
-            className="rounded-md p-1 text-content-tertiary hover:bg-surface-inset hover:text-content-primary"
-            title={t("templates.manage")}
+        <div className="flex items-center gap-2">
+          {/* Unified summary controls — template · manage · include notes */}
+          <div
+            className={`flex items-center divide-x divide-subtle rounded-lg border border-subtle bg-surface-elevated text-ui-sm ${
+              loading || generating ? "opacity-60" : ""
+            }`}
           >
-            <Settings className="h-3.5 w-3.5" />
-          </button>
-          <label className="flex cursor-pointer items-center gap-1 text-ui-xs text-content-tertiary">
-            <input
-              type="checkbox"
-              checked={includeNotes}
-              onChange={(e) => setIncludeNotes(e.target.checked)}
+            <TemplateSelector
+              value={selectedTemplate}
+              onChange={setSelectedTemplate}
               disabled={loading || generating}
-              className=""
+              customTemplates={customTemplates}
             />
-            {t("summary.includeNotes")}
-          </label>
+            <button
+              type="button"
+              onClick={() => setShowTemplateManager(true)}
+              disabled={loading || generating}
+              className="flex select-none items-center gap-1.5 px-2.5 py-1 text-content-secondary transition-colors hover:bg-surface-sunken hover:text-content-primary disabled:cursor-not-allowed"
+              title={t("templates.manage")}
+            >
+              <SquarePen className="h-3.5 w-3.5 text-content-tertiary" aria-hidden />
+              <span>{t("templates.manageShort")}</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setIncludeNotes(!includeNotes)}
+              disabled={loading || generating}
+              role="switch"
+              aria-checked={includeNotes}
+              title={t("summary.includeNotes")}
+              className={`flex select-none items-center gap-1.5 px-2.5 py-1 transition-colors hover:bg-surface-sunken disabled:cursor-not-allowed ${
+                includeNotes
+                  ? "text-emerald-700 dark:text-emerald-400"
+                  : "text-content-secondary"
+              }`}
+            >
+              <StickyNote
+                className={`h-3.5 w-3.5 ${includeNotes ? "text-emerald-600 dark:text-emerald-400" : "text-content-tertiary"}`}
+                aria-hidden
+              />
+              <span>{t("summary.includeNotes")}</span>
+              <span
+                className={`ml-0.5 inline-block h-2 w-2 rounded-full ${
+                  includeNotes
+                    ? "bg-emerald-500 shadow-[0_0_0_2px_rgba(16,185,129,0.18)]"
+                    : "border border-content-placeholder/50"
+                }`}
+                aria-hidden
+              />
+            </button>
+          </div>
           {summary && <CopyButton getText={getSummaryText} title={t("meeting.copySummary")} />}
           <SummaryActions
             summary={summary}
@@ -121,7 +148,7 @@ export function SummaryPanel({
         )}
         {!loading && generating && streamingText && (
           <div className="prose prose-sm max-w-none text-ui-md leading-relaxed">
-            <Markdown rehypePlugins={[rehypeSanitize]}>{streamingText}</Markdown>
+            <Markdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeSanitize]}>{streamingText}</Markdown>
             <span className="ml-0.5 inline-block h-3 w-1.5 animate-pulse rounded-sm bg-emerald-500" />
           </div>
         )}
@@ -174,28 +201,48 @@ function TemplateSelector({
     }
   };
 
+  const currentLabel =
+    value.kind === "builtin"
+      ? t(TEMPLATE_LABEL_KEYS[value.id])
+      : value.name;
+
   return (
-    <select
-      value={selectValue}
-      onChange={(e) => handleChange(e.target.value)}
-      disabled={disabled}
-      className="rounded-md border bg-surface-elevated px-1.5 py-1 text-ui-sm disabled:opacity-60"
+    <label
+      className={`relative flex select-none items-center gap-1.5 px-2.5 py-1 ${
+        disabled ? "" : "cursor-pointer"
+      }`}
     >
-      {TEMPLATE_IDS.map((id) => (
-        <option key={id} value={id}>
-          {TEMPLATE_LABELS[id]}
-        </option>
-      ))}
-      {customTemplates.length > 0 && (
-        <optgroup label={t("templates.customGroup")}>
-          {customTemplates.map((ct) => (
-            <option key={ct.id} value={`custom:${ct.id}`}>
-              {ct.name}
+      <FileText className="h-3.5 w-3.5 shrink-0 text-content-tertiary" aria-hidden />
+      <span className="relative inline-flex items-center pr-4 text-content-primary">
+        <span aria-hidden>{currentLabel}</span>
+        <select
+          value={selectValue}
+          onChange={(e) => handleChange(e.target.value)}
+          disabled={disabled}
+          className="absolute inset-0 w-full cursor-pointer appearance-none border-0 bg-transparent p-0 text-ui-sm text-transparent opacity-0 focus:opacity-0 focus:outline-none focus:ring-0"
+          aria-label={t("summary.label")}
+        >
+          {TEMPLATE_IDS.map((id) => (
+            <option key={id} value={id}>
+              {t(TEMPLATE_LABEL_KEYS[id])}
             </option>
           ))}
-        </optgroup>
-      )}
-    </select>
+          {customTemplates.length > 0 && (
+            <optgroup label={t("templates.customGroup")}>
+              {customTemplates.map((ct) => (
+                <option key={ct.id} value={`custom:${ct.id}`}>
+                  {ct.name}
+                </option>
+              ))}
+            </optgroup>
+          )}
+        </select>
+        <ChevronDown
+          className="pointer-events-none absolute right-0 h-3 w-3 text-content-tertiary"
+          aria-hidden
+        />
+      </span>
+    </label>
   );
 }
 
@@ -224,7 +271,7 @@ function SummaryActions({
       type="button"
       onClick={onGenerate}
       disabled={disabled}
-      className="rounded-md border bg-surface-elevated px-2 py-1 text-ui-sm font-medium hover:bg-surface-sunken disabled:cursor-not-allowed disabled:opacity-60"
+      className="rounded-lg border border-accent-600 bg-accent-600 px-3 py-1 text-ui-sm font-medium text-white shadow-sm transition-colors hover:bg-accent-700 disabled:cursor-not-allowed disabled:opacity-60 dark:border-accent-400 dark:bg-accent-400 dark:text-content-primary dark:hover:bg-accent-600"
     >
       {label}
     </button>
@@ -330,7 +377,7 @@ function renderTemplateBody(summary: Summary, t: (key: string) => string) {
     case "freeText":
       return (
         <div className="prose prose-sm max-w-none">
-          <Markdown rehypePlugins={[rehypeSanitize]}>{summary.text || t("summary.emptySummary")}</Markdown>
+          <Markdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeSanitize]}>{summary.text || t("summary.emptySummary")}</Markdown>
         </div>
       );
 
@@ -341,7 +388,7 @@ function renderTemplateBody(summary: Summary, t: (key: string) => string) {
             {summary.templateName}
           </p>
           <div className="prose prose-sm max-w-none">
-            <Markdown rehypePlugins={[rehypeSanitize]}>{summary.text || t("summary.emptySummary")}</Markdown>
+            <Markdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeSanitize]}>{summary.text || t("summary.emptySummary")}</Markdown>
           </div>
         </div>
       );

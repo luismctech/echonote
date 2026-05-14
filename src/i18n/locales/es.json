@@ -1,7 +1,8 @@
 {
   "app": {
     "title": "EchoNote",
-    "subtitle": "Transcripción de reuniones privada y local con resúmenes de IA."
+    "subtitle": "Transcripción de reuniones privada y local con resúmenes de IA.",
+    "privacyChip": "100% local"
   },
   "sidebar": {
     "meetings": "Reuniones",
@@ -28,8 +29,9 @@
     "langHint": "Pista para whisper. 'auto' deja que el modelo detecte.",
     "langLabel": "Idioma",
     "langTooltip": "Idioma de transcripción",
-    "langAuto": "auto",
-    "diarize": "Diarizar",
+    "langAuto": "Auto",
+    "diarize": "Voces",
+    "diarizeHint": "Identifica y separa a cada persona que habla",
     "starting": "Iniciando…",
     "start": "Iniciar",
     "recording": "Grabando…",
@@ -43,6 +45,8 @@
     "fatal": "fatal:",
     "dismiss": "cerrar",
     "listening": "Escuchando… habla por el micrófono.",
+    "focusMode": "Modo enfoque ({{shortcut}})",
+    "toggleFocusMode": "Alternar modo enfoque",
     "pressStart": "Pulsa Iniciar o {{shortcut}} para comenzar una sesión.",
     "modelLoads": "el modelo se carga en el primer inicio",
     "silence": "silencio",
@@ -53,7 +57,19 @@
     "notes": "Notas",
     "refineTranscript": "Afinando transcripción…",
     "refineSpeakers": "Detectando speakers…",
-    "refineSummary": "Generando resumen…"
+    "refineSummary": "Generando resumen…",
+    "sourceLabel": "Fuente",
+    "sourceHint": "Fuente de audio para la transcripción",
+    "sourceMic": "Micrófono",
+    "sourceSystem": "Audio del sistema",
+    "sourceMixed": "Mixto (mic + sistema)",
+    "externalDeviceDetected": "Dispositivo de salida externo detectado: {{device}}.",
+    "enableMixed": "Activar modo mixto",
+    "dismissBanner": "Cerrar aviso",
+    "toggleMic": "Activar/desactivar micrófono en la mezcla",
+    "toggleSys": "Activar/desactivar audio del sistema en la mezcla",
+    "mic": "Mic",
+    "sys": "Sys"
   },
   "health": {
     "warmingUp": "calentando…",
@@ -74,7 +90,8 @@
     "copySummary": "Copiar resumen",
     "copyTranscript": "Copiar transcripción",
     "copyNotes": "Copiar notas",
-    "editTitle": "Clic para renombrar"
+    "editTitle": "Clic para renombrar",
+    "sectionsNav": "Secciones de la reunión"
   },
   "export": {
     "markdown": "Markdown (.md)",
@@ -195,7 +212,16 @@
     "namePlaceholder": "Nombre de la plantilla…",
     "promptPlaceholder": "Escribe tu prompt de resumen aquí… La transcripción de la reunión se agregará automáticamente.",
     "manage": "Gestionar plantillas",
-    "customGroup": "Personalizadas"
+    "manageShort": "Plantillas",
+    "customGroup": "Personalizadas",
+    "builtIn": {
+      "general": "General",
+      "oneOnOne": "1:1",
+      "sprintReview": "Revisión de Sprint",
+      "interview": "Entrevista",
+      "salesCall": "Llamada de Ventas",
+      "lecture": "Clase / Conferencia"
+    }
   },
   "onboarding": {
     "welcomeSubtitle": "Transcripción privada y resúmenes inteligentes para tus reuniones.",
@@ -258,6 +284,7 @@
     "modelMissingDetail": "Descarga el modelo faltante desde el panel de Modelos para usar esta función.",
     "openModels": "Abrir Modelos",
     "outsideTauri": "Fuera de Tauri — IPC no disponible con pnpm dev. Usa pnpm tauri:dev.",
+    "unknownError": "Error desconocido",
     "healthFailed": "Falló la verificación del backend."
   },
   "toast": {
@@ -291,6 +318,14 @@
     "failed": "Error al actualizar",
     "checking": "Buscando actualizaciones…",
     "upToDate": "¡Estás al día!"
+  },
+  "languages": {
+    "es": "Español",
+    "en": "English",
+    "pt": "Português",
+    "fr": "Français",
+    "de": "Deutsch",
+    "it": "Italiano"
   },
   "settings": {
     "switchLanguage": "Cambiar idioma",

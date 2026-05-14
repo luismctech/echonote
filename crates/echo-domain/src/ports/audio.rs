@@ -46,6 +46,12 @@ pub enum AudioSource {
     /// permissions: ScreenCaptureKit on macOS, WASAPI loopback on
     /// Windows, PulseAudio monitor on Linux.
     SystemOutput,
+    /// Microphone + system audio merged into one stream. On macOS both
+    /// cpal (mic) and ScreenCaptureKit (system) run concurrently; their
+    /// samples are averaged before reaching the transcription pipeline.
+    /// Ideal for video calls with headphones: mic captures the local
+    /// speaker, system captures the remote participants.
+    Mixed,
 }
 
 /// Sample-rate / channel configuration of a stream.

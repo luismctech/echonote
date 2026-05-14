@@ -42,9 +42,7 @@ use echo_diarize::{
     embedding::SpeakerEmbedder, CamPlusPlusEmbedder, Eres2NetEmbedder, OnlineDiarizer,
     PyannoteSegmenter,
 };
-use echo_domain::{
-    AudioCapture, ChatAssistant, Diarizer, LlmModel, MeetingStore, Resampler, Transcriber,
-};
+use echo_domain::{ChatAssistant, Diarizer, LlmModel, MeetingStore, Resampler, Transcriber};
 use echo_llm::{LlamaCppLlm, LoadOptions as LlamaLoadOptions};
 use echo_storage::SqliteMeetingStore;
 
@@ -136,7 +134,7 @@ pub fn health_check() -> HealthStatus {
 /// SQLite-backed meeting store, the per-session meeting recorder and
 /// the in-flight streaming sessions so they can be stopped from the UI.
 pub struct AppState {
-    pub(crate) capture: Arc<dyn AudioCapture>,
+    pub(crate) capture: Arc<RoutingAudioCapture>,
     pub(crate) resampler: Arc<dyn Resampler>,
     /// Shared HTTP client with connect timeout. Reused across all model
     /// downloads to amortise TLS handshake and connection-pool overhead.
@@ -193,6 +191,11 @@ pub(crate) struct SessionEntry {
     /// RAII guard — prevents the OS from sleeping while recording.
     /// Dropped automatically when the session entry is removed.
     pub _keep_awake: Option<keepawake::KeepAwake>,
+    /// Mix source controls — `Some` only when the session was started
+    /// with `AudioSource::Mixed`. The `set_mix_sources` command
+    /// writes to these flags to toggle each source during a live session.
+    pub mic_active: Option<Arc<std::sync::atomic::AtomicBool>>,
+    pub sys_active: Option<Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl AppState {

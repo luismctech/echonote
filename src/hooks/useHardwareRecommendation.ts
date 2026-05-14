@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import type { ModelRecommendation } from "../types/hardware";
 import { getModelRecommendation } from "../ipc/client";
@@ -8,6 +9,7 @@ import { getModelRecommendation } from "../ipc/client";
  * Caches the result for the lifetime of the component.
  */
 export function useHardwareRecommendation() {
+  const { t } = useTranslation();
   const [data, setData] = useState<ModelRecommendation | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -20,7 +22,7 @@ export function useHardwareRecommendation() {
       })
       .catch((err: unknown) => {
         if (!cancelled) {
-          const message = err instanceof Error ? err.message : "Unknown error";
+          const message = err instanceof Error ? err.message : t("errors.unknownError");
           setError(message);
         }
       })

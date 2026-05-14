@@ -28,6 +28,7 @@ import type {
 } from "../types/meeting";
 import type { SpeakerId } from "../types/speaker";
 import type {
+  OutputDeviceInfo,
   StartStreamingOptions,
   StreamingSessionId,
   TranscriptEvent,
@@ -107,6 +108,27 @@ export async function getMeetingId(
   sessionId: StreamingSessionId,
 ): Promise<MeetingId | null> {
   return invoke<MeetingId | null>("get_meeting_id", { sessionId });
+}
+
+/**
+ * Get the name and headphone-heuristic for the default audio output device.
+ * Returns `null` when no output device is available.
+ */
+export async function getOutputDeviceInfo(): Promise<OutputDeviceInfo | null> {
+  return invoke<OutputDeviceInfo | null>("get_output_device_info");
+}
+
+/**
+ * Toggle which sources contribute to the mix for an active `mixed` session.
+ * Returns `true` when the session was found and has mix controls.
+ * No-op (returns `false`) for non-Mixed sessions.
+ */
+export async function setMixSources(
+  sessionId: StreamingSessionId,
+  micActive: boolean,
+  sysActive: boolean,
+): Promise<boolean> {
+  return invoke<boolean>("set_mix_sources", { sessionId, micActive, sysActive });
 }
 
 // ---------------------------------------------------------------------------

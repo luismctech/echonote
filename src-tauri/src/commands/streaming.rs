@@ -12,6 +12,7 @@ use tokio::sync::Mutex as AsyncMutex;
 use crate::ipc_error::{ErrorCode, IpcError};
 
 use echo_app::{NaivePunctuator, StreamingPipeline};
+use echo_audio::MixControls;
 use echo_domain::{
     AudioFormat, AudioSource, CaptureSpec, StreamingOptions, StreamingSessionId, TranscriptEvent,
     Vad,
@@ -29,6 +30,9 @@ pub enum IpcAudioSource {
     Microphone,
     /// System audio loopback (macOS 13+ via ScreenCaptureKit).
     SystemOutput,
+    /// Microphone + system audio merged. Both sources run concurrently;
+    /// each can be muted/unmuted live via `set_mix_sources`.
+    Mixed,
 }
 
 impl From<IpcAudioSource> for AudioSource {
@@ -36,8 +40,63 @@ impl From<IpcAudioSource> for AudioSource {
         match value {
             IpcAudioSource::Microphone => AudioSource::Microphone,
             IpcAudioSource::SystemOutput => AudioSource::SystemOutput,
+            IpcAudioSource::Mixed => AudioSource::Mixed,
         }
     }
+}
+
+/// Information about the current system audio output device.
+#[derive(Debug, serde::Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct OutputDeviceInfo {
+    /// Human-readable name of the default output device.
+    pub name: String,
+    /// Heuristic: `true` when the device name suggests headphones /
+    /// earbuds / in-ear monitors rather than built-in or external speakers.
+    pub is_headphones: bool,
+}
+
+/// Return the name and headphone-heuristic for the default output device.
+#[tauri::command]
+#[specta::specta]
+pub async fn get_output_device_info() -> Result<Option<OutputDeviceInfo>, IpcError> {
+    let info = tokio::task::spawn_blocking(echo_audio::default_output_device_info)
+        .await
+        .unwrap_or(None);
+
+    Ok(info.map(|i| OutputDeviceInfo {
+        name: i.name,
+        is_headphones: i.is_headphones,
+    }))
+}
+
+/// Toggle which sources contribute to the mix for an active `Mixed` session.
+/// Returns `false` when the session is not found or was not started in Mixed mode.
+#[tauri::command]
+#[specta::specta]
+pub async fn set_mix_sources(
+    state: State<'_, AppState>,
+    session_id: StreamingSessionId,
+    mic_active: bool,
+    sys_active: bool,
+) -> Result<bool, IpcError> {
+    let map = state.sessions.lock().map_err(|e| {
+        IpcError::new(
+            ErrorCode::SessionConflict,
+            format!("session map poisoned: {e}"),
+        )
+    })?;
+    let Some(entry) = map.get(&session_id) else {
+        return Ok(false);
+    };
+    let has_controls = entry.mic_active.is_some() || entry.sys_active.is_some();
+    if let Some(flag) = &entry.mic_active {
+        flag.store(mic_active, std::sync::atomic::Ordering::Release);
+    }
+    if let Some(flag) = &entry.sys_active {
+        flag.store(sys_active, std::sync::atomic::Ordering::Release);
+    }
+    Ok(has_controls)
 }
 
 /// Options the frontend may pass when starting a streaming session.
@@ -124,10 +183,10 @@ pub async fn start_streaming(
     // a named device; surface a warning if the frontend forgets.
     let device_id = match source {
         AudioSource::Microphone => opts.device_id,
-        AudioSource::SystemOutput => {
+        AudioSource::SystemOutput | AudioSource::Mixed => {
             if opts.device_id.is_some() {
                 tracing::warn!(
-                    "deviceId ignored when source = systemOutput \
+                    "deviceId ignored when source = systemOutput/mixed \
                      (ScreenCaptureKit selects the primary display)"
                 );
             }
@@ -141,8 +200,11 @@ pub async fn start_streaming(
     };
 
     let transcriber = state.ensure_transcriber().await?;
-    let mut pipeline =
-        StreamingPipeline::new(state.capture.clone(), state.resampler.clone(), transcriber);
+    let mut pipeline = StreamingPipeline::new(
+        state.capture.clone() as Arc<dyn echo_domain::AudioCapture>,
+        state.resampler.clone(),
+        transcriber,
+    );
     if opts.diarize.unwrap_or(false) {
         let diarizer = state.build_diarizer(opts.embed_model_path)?;
         pipeline = pipeline.with_diarizer(diarizer);
@@ -159,10 +221,31 @@ pub async fn start_streaming(
     }
     pipeline = pipeline.with_punctuator(Arc::new(NaivePunctuator));
 
-    let handle = pipeline
-        .start_with_spec(spec, streaming_options)
-        .await
-        .map_err(|e| IpcError::new(ErrorCode::Audio, format!("failed to start streaming: {e}")))?;
+    // For Mixed source: start both captures directly so we can retain the
+    // MixControls handles for live source toggling via set_mix_sources.
+    let (handle, mix_controls) = if source == AudioSource::Mixed {
+        let (stream, controls) = state.capture.start_mixed(spec).await.map_err(|e| {
+            IpcError::new(
+                ErrorCode::Audio,
+                format!("failed to start mixed capture: {e}"),
+            )
+        })?;
+        let handle = pipeline
+            .start_with_stream(stream, streaming_options)
+            .await
+            .map_err(|e| {
+                IpcError::new(ErrorCode::Audio, format!("failed to start streaming: {e}"))
+            })?;
+        (handle, Some(controls))
+    } else {
+        let handle = pipeline
+            .start_with_spec(spec, streaming_options)
+            .await
+            .map_err(|e| {
+                IpcError::new(ErrorCode::Audio, format!("failed to start streaming: {e}"))
+            })?;
+        (handle, None)
+    };
     let session_id = handle.session_id();
     let paused_flag = handle.paused_flag();
 
@@ -227,6 +310,10 @@ pub async fn start_streaming(
             format!("session map poisoned: {e}"),
         )
     });
+    let (mic_active, sys_active) = mix_controls
+        .map(|c: MixControls| (Some(c.mic_active), Some(c.sys_active)))
+        .unwrap_or((None, None));
+
     insert_result?.insert(
         session_id,
         SessionEntry {
@@ -241,6 +328,8 @@ pub async fn start_streaming(
                 .create()
                 .map_err(|e| tracing::warn!("keep-awake unavailable: {e}"))
                 .ok(),
+            mic_active,
+            sys_active,
         },
     );
 

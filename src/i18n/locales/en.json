@@ -1,7 +1,8 @@
 {
   "app": {
     "title": "EchoNote",
-    "subtitle": "Private, local-first meeting transcription and AI summaries."
+    "subtitle": "Private, local-first meeting transcription and AI summaries.",
+    "privacyChip": "100% local"
   },
   "sidebar": {
     "meetings": "Meetings",
@@ -26,10 +27,11 @@
     "title": "Live transcript",
     "description": "5-second windows · whisper.cpp · {{label}}",
     "langHint": "Hint passed to whisper. 'auto' lets the model detect.",
-    "langLabel": "Lang",
+    "langLabel": "Language",
     "langTooltip": "Transcription language",
-    "langAuto": "auto",
-    "diarize": "Diarize",
+    "langAuto": "Auto",
+    "diarize": "Voices",
+    "diarizeHint": "Identify and separate each person speaking",
     "starting": "Starting…",
     "start": "Start",
     "recording": "Recording…",
@@ -43,6 +45,8 @@
     "fatal": "fatal:",
     "dismiss": "dismiss",
     "listening": "Listening… speak into the microphone.",
+    "focusMode": "Focus mode ({{shortcut}})",
+    "toggleFocusMode": "Toggle focus mode",
     "pressStart": "Press Start or {{shortcut}} to begin a session.",
     "modelLoads": "model loads on first start",
     "silence": "silence",
@@ -53,7 +57,19 @@
     "notes": "Notes",
     "refineTranscript": "Refining transcript…",
     "refineSpeakers": "Detecting speakers…",
-    "refineSummary": "Generating summary…"
+    "refineSummary": "Generating summary…",
+    "sourceLabel": "Source",
+    "sourceHint": "Audio source for transcription",
+    "sourceMic": "Microphone",
+    "sourceSystem": "System audio",
+    "sourceMixed": "Mixed (mic + system)",
+    "externalDeviceDetected": "External output detected: {{device}}.",
+    "enableMixed": "Enable mixed mode",
+    "dismissBanner": "Dismiss",
+    "toggleMic": "Toggle microphone in mix",
+    "toggleSys": "Toggle system audio in mix",
+    "mic": "Mic",
+    "sys": "Sys"
   },
   "health": {
     "warmingUp": "warming up…",
@@ -74,7 +90,8 @@
     "copySummary": "Copy summary",
     "copyTranscript": "Copy transcript",
     "copyNotes": "Copy notes",
-    "editTitle": "Click to rename"
+    "editTitle": "Click to rename",
+    "sectionsNav": "Meeting sections"
   },
   "export": {
     "markdown": "Markdown (.md)",
@@ -195,7 +212,16 @@
     "namePlaceholder": "Template name…",
     "promptPlaceholder": "Write your summary prompt here… The meeting transcript will be appended automatically.",
     "manage": "Manage templates",
-    "customGroup": "Custom"
+    "manageShort": "Templates",
+    "customGroup": "Custom",
+    "builtIn": {
+      "general": "General",
+      "oneOnOne": "1:1",
+      "sprintReview": "Sprint Review",
+      "interview": "Interview",
+      "salesCall": "Sales Call",
+      "lecture": "Lecture"
+    }
   },
   "onboarding": {
     "welcomeSubtitle": "Private transcription and smart summaries for your meetings.",
@@ -258,6 +284,7 @@
     "modelMissingDetail": "Download the missing model from the Models panel to use this feature.",
     "openModels": "Open Models",
     "outsideTauri": "Running outside Tauri — IPC is unavailable in pnpm dev. Use pnpm tauri:dev.",
+    "unknownError": "Unknown error",
     "healthFailed": "Backend health check failed."
   },
   "toast": {
@@ -291,6 +318,14 @@
     "failed": "Update failed",
     "checking": "Checking for updates…",
     "upToDate": "You're up to date!"
+  },
+  "languages": {
+    "es": "Español",
+    "en": "English",
+    "pt": "Português",
+    "fr": "Français",
+    "de": "Deutsch",
+    "it": "Italiano"
   },
   "settings": {
     "switchLanguage": "Switch language",

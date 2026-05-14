@@ -75,7 +75,7 @@ pub fn resample_to_whisper(
 /// Equal-weight downmix. Stereo -> mean(L, R); 5.1 -> mean of all six
 /// channels. Good enough for ASR; high-fidelity downmix lands later if
 /// the LLM benchmark demands it.
-fn downmix_to_mono(samples: &[Sample], channels: u16) -> Vec<Sample> {
+pub(crate) fn downmix_to_mono(samples: &[Sample], channels: u16) -> Vec<Sample> {
     if channels <= 1 {
         return samples.to_vec();
     }
@@ -95,10 +95,13 @@ fn downmix_to_mono(samples: &[Sample], channels: u16) -> Vec<Sample> {
 }
 
 /// Internal chunk size for rubato processing (input frames per call).
-const RESAMPLE_CHUNK_SIZE: usize = 1024;
+pub(crate) const RESAMPLE_CHUNK_SIZE: usize = 1024;
 
 /// Build a fresh [`SincFixedIn`] resampler for the given rate pair.
-fn make_sinc_resampler(from_hz: u32, to_hz: u32) -> Result<SincFixedIn<f32>, ResampleError> {
+pub(crate) fn make_sinc_resampler(
+    from_hz: u32,
+    to_hz: u32,
+) -> Result<SincFixedIn<f32>, ResampleError> {
     let params = SincInterpolationParameters {
         sinc_len: 256,
         f_cutoff: 0.95,

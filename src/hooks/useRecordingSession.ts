@@ -26,7 +26,7 @@ import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { useToast } from "../components/Toaster";
-import { startStreaming, stopStreaming, pauseStreaming, resumeStreaming, addNote as ipcAddNote, getMeetingId } from "../ipc/client";
+import { startStreaming, stopStreaming, pauseStreaming, resumeStreaming, addNote as ipcAddNote, getMeetingId, setMixSources as ipcSetMixSources } from "../ipc/client";
 import { isIpcError } from "../types/ipc-error";
 import type { ErrorCode } from "../types/ipc-error";
 import {
@@ -37,7 +37,7 @@ import {
   initialRecordingState,
   recordingReducer,
 } from "../state/recording";
-import type { TranscriptEvent } from "../types/streaming";
+import type { AudioSourceKind, TranscriptEvent } from "../types/streaming";
 import type { Note } from "../types/meeting";
 import type { StreamLine } from "../types/view";
 
@@ -57,6 +57,8 @@ export type StartOptions = {
   language: string;
   /** Enable diarization for this session. */
   diarize: boolean;
+  /** Audio capture source. Defaults to microphone. */
+  source?: AudioSourceKind;
 };
 
 export function useRecordingSession({
@@ -248,7 +250,7 @@ export function useRecordingSession({
   }, [t]);
 
   const start = useCallback(
-    async ({ language, diarize }: StartOptions) => {
+    async ({ language, diarize, source }: StartOptions) => {
       setLines([]);
       setStats(ZERO_STATS);
       setNotes([]);
@@ -263,6 +265,7 @@ export function useRecordingSession({
             silenceRmsThreshold: 0.005,
             diarize,
             ...(langHint.length > 0 ? { language: langHint } : {}),
+            ...(source && source !== "microphone" ? { source } : {}),
           },
           handleEvent,
         );
@@ -381,6 +384,14 @@ export function useRecordingSession({
     [stream],
   );
 
+  const setMixSources = useCallback(
+    async (micActive: boolean, sysActive: boolean): Promise<void> => {
+      if (stream.kind !== "recording" && stream.kind !== "paused") return;
+      await ipcSetMixSources(stream.sessionId, micActive, sysActive).catch(() => {});
+    },
+    [stream],
+  );
+
   const canStart = backendReady && selectCanStart(stream);
   const canStop = selectCanStop(stream);
   const canPause = selectCanPause(stream);
@@ -418,5 +429,6 @@ export function useRecordingSession({
     addNote,
     dismissError,
     reset,
+    setMixSources,
   };
 }
