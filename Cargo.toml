@@ -72,7 +72,7 @@ hound = "3.5"
 rubato = "0.16"
 # macOS-only system audio capture (ScreenCaptureKit). Pulled in conditionally
 # by echo-audio via [target.'cfg(target_os = "macos")'.dependencies].
-screencapturekit = "1.5"
+screencapturekit = "6.0"
 
 # ML inference
 # Pure-Rust ONNX inference. Used by echo-audio for the Silero VAD v5
