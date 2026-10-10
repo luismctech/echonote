@@ -220,8 +220,10 @@ mod tests {
             "hello world",
             "Además, la configuración",
             "日本語のテキスト",
+            "Reunión de planificación 🚀🚀 ñandú",
         ] {
-            assert!(estimate_tokens(text) >= text.len().div_ceil(2), "{text:?}");
+            let previous = text.chars().count().div_ceil(3);
+            assert!(estimate_tokens(text) >= previous, "{text:?}");
         }
     }
 

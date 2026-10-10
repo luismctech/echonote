@@ -288,6 +288,8 @@ async fn short_meeting_is_summarised_in_a_single_pass() {
         return;
     }
     let utterances = synthetic_dialogue(14, Some(7));
-    let (_, calls, _) = run_summary(&utterances).await;
-    assert_eq!(calls, 1, "a meeting that fits must take exactly one pass");
+    let (_, calls, notes) = run_summary(&utterances).await;
+    // A JSON-parse retry may add a second call, but never a map pass.
+    assert!(notes.is_empty(), "a meeting that fits must not be mapped");
+    assert!(calls <= 2, "expected a single pass, got {calls} calls");
 }

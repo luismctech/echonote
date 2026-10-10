@@ -258,8 +258,10 @@ async fn map_all(
                 .generate(&prompt, &opts)
                 .await
                 .map_err(SummarizeMeetingError::Llm)?;
+            // Measured raw: tokens spent on stripped content still count
+            // against the output cap.
             let note = strip_chat_tokens(&response).trim().to_string();
-            if count(&note) < cap {
+            if count(&response) < cap {
                 notes.push(note);
                 continue;
             }
@@ -407,6 +409,18 @@ mod tests {
 
         assert_eq!(*llm.calls.lock().unwrap(), 15);
         assert_eq!(notes.len(), 8);
+    }
+
+    #[tokio::test]
+    async fn cap_detection_measures_the_raw_response_not_the_stripped_note() {
+        // The budget was spent on control tokens that are stripped from
+        // the note: the response is capped even though the note is short.
+        let llm = fixed(8_192, format!("{}ok", "<|im_end|>".repeat(1_000)));
+        let chunk = lines(4).join("\n");
+
+        map_all(&llm, &[chunk], "x", 3_072).await.unwrap();
+
+        assert!(*llm.calls.lock().unwrap() > 1, "the capped chunk was kept");
     }
 
     #[tokio::test]
