@@ -13,8 +13,8 @@ use uuid::Uuid;
 
 use echo_domain::{
     AudioFormat, CreateMeeting, DomainError, FinalizeMeeting, Meeting, MeetingId, MeetingSearchHit,
-    MeetingStore, MeetingSummary, Note, NoteId, Segment, SegmentId, Speaker, SpeakerId, Summary,
-    SummaryContent, SummaryId,
+    MeetingStore, MeetingSummary, Note, NoteId, Segment, SegmentHit, SegmentId, SegmentRetriever,
+    Speaker, SpeakerId, Summary, SummaryContent, SummaryId,
 };
 
 /// Embedded migrations (`crates/echo-storage/migrations/`).
@@ -810,6 +810,116 @@ fn sanitize_fts_snippet(raw: &str) -> String {
         .replace(CLOSE_PH, "</mark>")
 }
 
+/// Retrieval over the same FTS5 index as [`MeetingStore::search`], scoped
+/// to one meeting.
+#[async_trait]
+impl SegmentRetriever for SqliteMeetingStore {
+    async fn search_segments(
+        &self,
+        meeting_id: MeetingId,
+        query: &str,
+        limit: u32,
+    ) -> Result<Vec<SegmentHit>, DomainError> {
+        let Some(match_expr) = build_retrieval_query(query) else {
+            return Ok(Vec::new());
+        };
+
+        // `bm25()` only resolves with the FTS table in the FROM clause of
+        // the same SELECT as the MATCH (see `search`). The meeting filter
+        // is applied on the joined `segments` row.
+        let rows = sqlx::query(
+            r#"
+            SELECT  s.id, bm25(segments_fts) AS rank
+              FROM segments_fts
+              JOIN segments s ON s.rowid = segments_fts.rowid
+             WHERE segments_fts MATCH ?
+               AND s.meeting_id = ?
+          ORDER BY rank ASC
+             LIMIT ?
+            "#,
+        )
+        .bind(&match_expr)
+        .bind(meeting_id.0.to_string())
+        .bind(i64::from(limit))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sqlx("search segments"))?;
+
+        rows.iter()
+            .map(|row| {
+                let id_text: String = row.get(0);
+                Ok(SegmentHit {
+                    segment_id: SegmentId(parse_uuid(&id_text, "segment")?),
+                    rank: row.get(1),
+                })
+            })
+            .collect()
+    }
+}
+
+///
+/// Words too common to discriminate between segments. Matching on them
+/// would (with OR semantics) retrieve nearly every segment of the meeting.
+/// Spanish and English, lower-case, both with and without accents.
+const RETRIEVAL_STOPWORDS: &[&str] = &[
+    // Spanish
+    "que", "qué", "como", "cómo", "cual", "cuál", "cuales", "cuáles", "cuando", "cuándo", "donde",
+    "dónde", "quien", "quién", "quienes", "quiénes", "cuanto", "cuánto", "por", "para", "con",
+    "sin", "sobre", "entre", "hacia", "desde", "hasta", "los", "las", "del", "una", "uno", "unos",
+    "unas", "este", "esta", "esto", "estos", "estas", "ese", "esa", "eso", "esos", "esas", "aquel",
+    "aquella", "aquello", "mas", "más", "pero", "porque", "cuyo", "fue", "fueron", "era", "eran",
+    "ser", "son", "soy", "eres", "somos", "está", "están", "estan", "estaba", "estar", "han",
+    "has", "hay", "hizo", "hacer", "ha", "muy", "tan", "tambien", "también", "ahora", "alli",
+    "allí", "aqui", "aquí", "ver", "dijo", "dice", "dicen", "sido", "tiene", "tienen", "tenia",
+    "tenía", "puede", "pueden", "sus", "mis", "tus", "nos", "les", "algo", "alguien", "nada",
+    "todo", "todos", "toda", "todas", "reunion", "reunión", // English
+    "the", "and", "for", "are", "was", "were", "has", "have", "had", "not", "but", "you", "your",
+    "with", "that", "this", "these", "those", "from", "what", "when", "where", "which", "who",
+    "whom", "whose", "why", "how", "does", "did", "can", "could", "would", "should", "will",
+    "about", "into", "than", "then", "there", "their", "they", "them", "she", "his", "her", "our",
+    "any", "all", "been", "being", "its", "also", "just", "said", "say", "says", "tell", "meeting",
+];
+
+/// Shortest token worth searching for.
+const RETRIEVAL_MIN_TOKEN_CHARS: usize = 3;
+
+/// Tokens at least this long also match longer words that start with them
+/// (plurals, gender and verb endings: "decisión" finds "decisiones").
+const RETRIEVAL_PREFIX_MIN_CHARS: usize = 5;
+
+/// Turn a natural-language question into an FTS5 `MATCH` expression with
+/// OR semantics, or `None` when nothing searchable is left.
+///
+/// The text is lower-cased and split on every non-alphanumeric character;
+/// short tokens and [`RETRIEVAL_STOPWORDS`] are dropped and repeats
+/// collapsed. Each remaining token is emitted as a quoted FTS5 string (so
+/// operators and column filters in the user's text are inert; only
+/// alphanumerics can reach the expression) and long tokens get a prefix
+/// `*`. The result is always passed as a bound parameter.
+fn build_retrieval_query(raw: &str) -> Option<String> {
+    let lowered = raw.to_lowercase();
+    let mut seen = std::collections::HashSet::new();
+    let terms: Vec<String> = lowered
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|t| t.chars().count() >= RETRIEVAL_MIN_TOKEN_CHARS)
+        .filter(|t| !RETRIEVAL_STOPWORDS.contains(t))
+        .filter(|t| seen.insert(*t))
+        .map(|t| {
+            let star = if t.chars().count() >= RETRIEVAL_PREFIX_MIN_CHARS {
+                "*"
+            } else {
+                ""
+            };
+            format!("\"{t}\"{star}")
+        })
+        .collect();
+    if terms.is_empty() {
+        None
+    } else {
+        Some(terms.join(" OR "))
+    }
+}
+
 /// Returns `None` for empty / whitespace-only / all-stripped inputs
 /// so the caller can short-circuit to "no hits" without ever asking
 /// SQLite. That matches the search port contract.
@@ -1550,5 +1660,171 @@ mod tests {
         );
         let meeting = store.get(id).await.unwrap().expect("meeting exists");
         assert!(meeting.segments.is_empty(), "failed batch must not persist");
+    }
+
+    /// Seed a meeting with one segment per text and return their ids.
+    async fn seed_segments(
+        store: &SqliteMeetingStore,
+        texts: &[&str],
+    ) -> (MeetingId, Vec<SegmentId>) {
+        let id = MeetingId::new();
+        store
+            .create(CreateMeeting {
+                id,
+                title: "m".into(),
+                input_format: fmt(),
+            })
+            .await
+            .unwrap();
+        let segments: Vec<Segment> = texts
+            .iter()
+            .enumerate()
+            .map(|(i, t)| segment(i as u32 * 1_000, (i as u32 + 1) * 1_000, t))
+            .collect();
+        let ids = segments.iter().map(|s| s.id).collect();
+        store.append_segments(id, &segments).await.unwrap();
+        (id, ids)
+    }
+
+    #[tokio::test]
+    async fn retrieval_is_scoped_to_the_requested_meeting() {
+        let store = SqliteMeetingStore::open_in_memory().await.unwrap();
+        let (mine, my_ids) = seed_segments(&store, &["el presupuesto de Atlas"]).await;
+        let (_other, _) = seed_segments(&store, &["otro presupuesto distinto"]).await;
+
+        let hits = store
+            .search_segments(mine, "presupuesto", 10)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            hits.iter().map(|h| h.segment_id).collect::<Vec<_>>(),
+            my_ids
+        );
+    }
+
+    #[tokio::test]
+    async fn retrieval_matches_any_word_of_the_question() {
+        let store = SqliteMeetingStore::open_in_memory().await.unwrap();
+        let (id, ids) = seed_segments(&store, &["hablamos del clima", "el viaje a Lisboa"]).await;
+
+        let hits = store
+            .search_segments(id, "¿Cuándo es el viaje de empresa a Madrid?", 10)
+            .await
+            .unwrap();
+
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].segment_id, ids[1]);
+    }
+
+    #[tokio::test]
+    async fn retrieval_ignores_diacritics_in_both_directions() {
+        let store = SqliteMeetingStore::open_in_memory().await.unwrap();
+        let (id, ids) = seed_segments(&store, &["La planificación empieza pronto"]).await;
+
+        for query in ["planificacion", "PLANIFICACIÓN"] {
+            let hits = store.search_segments(id, query, 10).await.unwrap();
+            assert_eq!(hits.len(), 1, "{query}");
+            assert_eq!(hits[0].segment_id, ids[0], "{query}");
+        }
+    }
+
+    #[tokio::test]
+    async fn retrieval_prefix_matches_plurals_of_longer_words() {
+        let store = SqliteMeetingStore::open_in_memory().await.unwrap();
+        let (id, ids) = seed_segments(&store, &["Tomamos varias decisiones importantes"]).await;
+
+        let hits = store
+            .search_segments(id, "¿qué decisión?", 10)
+            .await
+            .unwrap();
+
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].segment_id, ids[0]);
+    }
+
+    #[tokio::test]
+    async fn retrieval_with_only_stopwords_or_short_words_is_empty() {
+        let store = SqliteMeetingStore::open_in_memory().await.unwrap();
+        let (id, _) = seed_segments(&store, &["el que de la una the and"]).await;
+
+        for query in [
+            "",
+            "   ",
+            "¿Qué es el de la?",
+            "the and of",
+            "a b",
+            "la reunión",
+        ] {
+            assert!(
+                store
+                    .search_segments(id, query, 10)
+                    .await
+                    .unwrap()
+                    .is_empty(),
+                "{query:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn retrieval_treats_fts_and_sql_syntax_as_plain_text() {
+        let store = SqliteMeetingStore::open_in_memory().await.unwrap();
+        let (id, ids) = seed_segments(&store, &["presupuesto anual"]).await;
+
+        for query in [
+            r#"presupuesto" OR "x"#,
+            "presupuesto AND NOT (anual",
+            "presupuesto* NEAR/2 ^anual",
+            "'; DROP TABLE segments; --",
+            "col:presupuesto",
+            "\"\"\"",
+        ] {
+            let hits = store.search_segments(id, query, 10).await;
+            assert!(hits.is_ok(), "{query:?}: {hits:?}");
+        }
+        let hits = store
+            .search_segments(id, "'; DROP TABLE segments; -- presupuesto", 10)
+            .await
+            .unwrap();
+        assert_eq!(hits[0].segment_id, ids[0]);
+    }
+
+    #[tokio::test]
+    async fn retrieval_orders_by_bm25_and_respects_the_limit() {
+        let store = SqliteMeetingStore::open_in_memory().await.unwrap();
+        let (id, ids) = seed_segments(
+            &store,
+            &[
+                "mencionamos el presupuesto una vez entre muchas otras cosas del orden del día",
+                "presupuesto presupuesto presupuesto",
+                "nada relacionado",
+            ],
+        )
+        .await;
+
+        let hits = store.search_segments(id, "presupuesto", 10).await.unwrap();
+        assert_eq!(
+            hits.iter().map(|h| h.segment_id).collect::<Vec<_>>(),
+            vec![ids[1], ids[0]]
+        );
+        assert!(hits[0].rank <= hits[1].rank, "{hits:?}");
+
+        let capped = store.search_segments(id, "presupuesto", 1).await.unwrap();
+        assert_eq!(capped.len(), 1);
+        assert_eq!(capped[0].segment_id, ids[1]);
+    }
+
+    #[test]
+    fn retrieval_query_drops_stopwords_dedupes_and_quotes_tokens() {
+        assert_eq!(
+            build_retrieval_query("¿Cuál fue el presupuesto, el PRESUPUESTO de Atlas?"),
+            Some(r#""presupuesto"* OR "atlas"*"#.to_string())
+        );
+        assert_eq!(
+            build_retrieval_query("what is the plan"),
+            Some(r#""plan""#.into())
+        );
+        assert_eq!(build_retrieval_query("de la el"), None);
     }
 }

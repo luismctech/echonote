@@ -30,6 +30,7 @@ pub use ports::diarizer::{Diarizer, SpeakerSpan};
 pub use ports::llm::{estimate_tokens, GenerateOptions, LlmModel, DEFAULT_CONTEXT_WINDOW};
 pub use ports::punctuator::Punctuator;
 pub use ports::resampler::Resampler;
+pub use ports::retrieval::{SegmentHit, SegmentRetriever};
 pub use ports::segmenter::{Segmenter, SpeakerSegment};
 pub use ports::transcriber::{TranscribeOptions, Transcriber, Transcript};
 pub use ports::vad::{Vad, VoiceState};

@@ -3,9 +3,9 @@
 //! Both use cases feed the meeting transcript to the model as one
 //! line per non-empty segment. This module owns that line format and
 //! the token-budgeted chunking the summary uses when a transcript has
-//! to be split (map-reduce). The legacy head + tail truncation
-//! ([`render_truncated`]) remains only as the chat path until
-//! retrieval replaces it.
+//! to be split (map-reduce). The chat reads the same lines per segment
+//! ([`render_indexed_lines`]) to select excerpts when the transcript does
+//! not fit.
 //!
 //! ## Chunking rule
 //!
@@ -18,17 +18,22 @@
 
 use std::fmt::Write;
 
-use echo_domain::{Meeting, Segment, Speaker};
+use echo_domain::{Meeting, Segment, SegmentId, Speaker};
 
 /// Prefix of the citation marker the chat model is told to copy.
 /// Picked to be unambiguous (no overlap with English/Spanish prose)
 /// and short (cheap on tokens).
 pub(crate) const CITE_OPEN: &str = "[seg:";
 
-/// Maximum characters of transcript text the chat feeds to the model
-/// through [`render_truncated`]. Legacy, chat-only cap: the summary no
-/// longer truncates and is budgeted in tokens instead.
-pub(crate) const MAX_TRANSCRIPT_CHARS: usize = 6_000;
+/// Floor of the safety margin, in tokens. See [`safety_margin`].
+const MIN_SAFETY_MARGIN_TOKENS: usize = 256;
+
+/// Tokens kept free in a context window for what a prompt budget cannot
+/// measure exactly: chat-template tokens added at tokenization time,
+/// joining newlines, retry feedback. `max(256, 5% of the window)`.
+pub(crate) fn safety_margin(window: usize) -> usize {
+    MIN_SAFETY_MARGIN_TOKENS.max(window / 20)
+}
 
 /// Line format of a rendered transcript.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,6 +51,18 @@ pub(crate) enum Flavour {
 /// resolve to their user label, else `Speaker N`; segments without a
 /// known speaker read `Speaker`.
 pub(crate) fn render_lines(meeting: &Meeting, flavour: Flavour) -> Vec<String> {
+    render_indexed_lines(meeting, flavour)
+        .into_iter()
+        .map(|(_, line)| line)
+        .collect()
+}
+
+/// Like [`render_lines`], keeping the id of the segment each line was
+/// rendered from so a caller can select lines by segment.
+pub(crate) fn render_indexed_lines(
+    meeting: &Meeting,
+    flavour: Flavour,
+) -> Vec<(SegmentId, String)> {
     meeting
         .segments
         .iter()
@@ -66,7 +83,7 @@ pub(crate) fn render_lines(meeting: &Meeting, flavour: Flavour) -> Vec<String> {
             line.push_str(&label);
             line.push_str(": ");
             line.push_str(text);
-            Some(line)
+            Some((seg.id, line))
         })
         .collect()
 }
@@ -232,30 +249,6 @@ fn sentence_atoms(text: &str) -> Vec<&str> {
         atoms.push(&text[start..]);
     }
     atoms
-}
-
-/// Legacy chat path: render the transcript as one block, keeping the head (4/6) and the
-/// tail (2/6) of [`MAX_TRANSCRIPT_CHARS`] with an explicit elision
-/// marker when it is longer. Surviving citation markers stay intact, so
-/// a citation the model emits still points at a real segment id.
-pub(crate) fn render_truncated(meeting: &Meeting, flavour: Flavour) -> String {
-    let buf = render_lines(meeting, flavour).join("\n");
-    if buf.chars().count() <= MAX_TRANSCRIPT_CHARS {
-        return buf;
-    }
-
-    let head_chars = MAX_TRANSCRIPT_CHARS * 4 / 6;
-    let tail_chars = MAX_TRANSCRIPT_CHARS - head_chars;
-    let head: String = buf.chars().take(head_chars).collect();
-    let tail: String = buf
-        .chars()
-        .rev()
-        .take(tail_chars)
-        .collect::<String>()
-        .chars()
-        .rev()
-        .collect();
-    format!("{head}\n[… (transcript truncated for length) …]\n{tail}")
 }
 
 fn push_citation_prefix(buf: &mut String, seg: &Segment) {
@@ -466,24 +459,5 @@ mod tests {
             let single_line = !chunk.contains('\n');
             assert!(per_char(chunk) <= 25 || single_line, "over budget: {chunk}");
         }
-    }
-
-    #[test]
-    fn truncation_keeps_short_transcripts_untouched() {
-        let meeting = meeting_with(&["Hola", "Adiós"]);
-        assert_eq!(
-            render_truncated(&meeting, Flavour::Summary),
-            "Ana: Hola\nAna: Adiós"
-        );
-    }
-
-    #[test]
-    fn truncation_keeps_head_and_tail_with_a_marker() {
-        let long = "x".repeat(MAX_TRANSCRIPT_CHARS);
-        let meeting = meeting_with(&[&long, "TAIL"]);
-        let rendered = render_truncated(&meeting, Flavour::Chat);
-        assert!(rendered.contains("transcript truncated"), "{rendered}");
-        assert!(rendered.starts_with(CITE_OPEN), "{rendered}");
-        assert!(rendered.ends_with("TAIL"), "{rendered}");
     }
 }

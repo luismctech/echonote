@@ -42,7 +42,9 @@ use echo_diarize::{
     embedding::SpeakerEmbedder, CamPlusPlusEmbedder, Eres2NetEmbedder, OnlineDiarizer,
     PyannoteSegmenter,
 };
-use echo_domain::{ChatAssistant, Diarizer, LlmModel, MeetingStore, Resampler, Transcriber};
+use echo_domain::{
+    ChatAssistant, Diarizer, LlmModel, MeetingStore, Resampler, SegmentRetriever, Transcriber,
+};
 use echo_llm::{LlamaCppLlm, LoadOptions as LlamaLoadOptions};
 use echo_storage::SqliteMeetingStore;
 
@@ -152,6 +154,9 @@ pub struct AppState {
     /// `PyannoteSegmenter` to the `OnlineDiarizer` automatically.
     pub(crate) seg_model_path: PathBuf,
     pub(crate) store: Arc<dyn MeetingStore>,
+    /// Per-meeting segment search the chat uses on transcripts that do not
+    /// fit the context window; backed by the same database as `store`.
+    pub(crate) retriever: Arc<dyn SegmentRetriever>,
     pub(crate) recorder: Arc<MeetingRecorder>,
     pub(crate) rename_speaker: Arc<RenameSpeaker>,
     /// In-flight streaming sessions.
@@ -344,6 +349,7 @@ impl AppState {
         })?;
         tracing::info!(db_path = %db_path.display(), "meeting store ready");
 
+        let retriever: Arc<dyn SegmentRetriever> = Arc::new(store.clone());
         let store: Arc<dyn MeetingStore> = Arc::new(store);
         let recorder = Arc::new(MeetingRecorder::with_default_title(store.clone()));
         let rename_speaker = Arc::new(RenameSpeaker::new(store.clone()));
@@ -357,6 +363,7 @@ impl AppState {
             embed_model_path: std::sync::RwLock::new(embed_model_path),
             seg_model_path,
             store,
+            retriever,
             recorder,
             rename_speaker,
             sessions: Arc::new(Mutex::new(HashMap::new())),

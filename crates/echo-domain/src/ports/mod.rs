@@ -13,6 +13,7 @@ pub mod diarizer;
 pub mod llm;
 pub mod punctuator;
 pub mod resampler;
+pub mod retrieval;
 pub mod segmenter;
 pub mod storage;
 pub mod transcriber;

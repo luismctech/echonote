@@ -126,7 +126,7 @@ pub async fn ask_about_meeting(
     on_event: Channel<AskAboutMeetingEvent>,
 ) -> Result<(), IpcError> {
     let chat = state.ensure_chat().await?;
-    let use_case = AskAboutMeeting::new(chat, state.store.clone());
+    let use_case = AskAboutMeeting::new(chat, state.store.clone(), state.retriever.clone());
 
     let mut stream = use_case
         .execute(meeting_id, history.unwrap_or_default(), question)

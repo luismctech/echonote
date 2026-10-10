@@ -36,15 +36,12 @@ use tracing::warn;
 
 use super::{generate_opts, SummarizeMeetingError, SUMMARY_MAX_TOKENS};
 use crate::sanitize::strip_chat_tokens;
-use crate::transcript::chunk_lines;
+use crate::transcript::{chunk_lines, safety_margin};
 
 /// Smallest chunk or reduce budget worth running a map-reduce with.
 /// Below it the model would receive scraps of context per call, so the
 /// request fails with [`SummarizeMeetingError::ContextTooSmall`] instead.
 const MIN_BUDGET_TOKENS: usize = 256;
-
-/// Floor of the safety margin, in tokens. See the module docs.
-const MIN_SAFETY_MARGIN_TOKENS: usize = 256;
 
 /// Upper bound of one map note, in tokens. Longer notes would only make
 /// every map call slower; chunks shrink with it (see the module docs).
@@ -106,10 +103,6 @@ pub(super) struct Condense {
     chunk_budget: usize,
     map_max_tokens: usize,
     reduce_budget: usize,
-}
-
-fn safety_margin(window: usize) -> usize {
-    MIN_SAFETY_MARGIN_TOKENS.max(window / 20)
 }
 
 /// Decide between a single pass and map-reduce for `lines`.
