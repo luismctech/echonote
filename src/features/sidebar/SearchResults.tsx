@@ -27,7 +27,7 @@ export const SearchResults = memo(function SearchResults({
   const { t } = useTranslation();
   if (error) {
     return (
-        <p className="rounded bg-rose-50 px-2 py-1 text-ui-sm text-rose-700 dark:bg-rose-950/40 dark:text-rose-300">
+        <p className="rounded-sm bg-rose-50 px-2 py-1 text-ui-sm text-rose-700 dark:bg-rose-950/40 dark:text-rose-300">
         {t("search.failed")} {error}
       </p>
     );
@@ -73,7 +73,7 @@ export const SearchResults = memo(function SearchResults({
                 dangerous than e.g. a transcript line.
               */}
               <span
-                className="line-clamp-2 text-ui-xs leading-snug text-content-secondary [&_mark]:rounded [&_mark]:bg-amber-200/60 [&_mark]:px-0.5 [&_mark]:text-content-primary dark:[&_mark]:bg-amber-500/30"
+                className="line-clamp-2 text-ui-xs leading-snug text-content-secondary [&_mark]:rounded-sm [&_mark]:bg-amber-200/60 [&_mark]:px-0.5 [&_mark]:text-content-primary dark:[&_mark]:bg-amber-500/30"
                 dangerouslySetInnerHTML={{ __html: hit.snippet }}
               />
               <span className="text-micro tabular-nums text-content-placeholder">

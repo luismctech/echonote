@@ -77,7 +77,7 @@ export function ContextMenu({
           <div
             ref={menuRef}
             role="menu"
-            className="fixed z-[100] min-w-[160px] animate-ctx-in rounded-lg border bg-surface-elevated p-1 shadow-lg"
+            className="fixed z-100 min-w-[160px] animate-ctx-in rounded-lg border bg-surface-elevated p-1 shadow-lg"
             style={{ left: pos.x, top: pos.y }}
           >
             {items.map((item) => (

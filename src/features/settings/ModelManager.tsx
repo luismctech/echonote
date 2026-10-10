@@ -163,7 +163,7 @@ function ModelSection({
             {t(`models.section${section.key.charAt(0).toUpperCase()}${section.key.slice(1)}`)}
           </h3>
           {section.chip === "required" && (
-            <span className="shrink-0 rounded bg-rose-100 px-1.5 py-0.5 text-micro font-medium text-rose-700 dark:bg-rose-900/40 dark:text-rose-300">
+            <span className="shrink-0 rounded-sm bg-rose-100 px-1.5 py-0.5 text-micro font-medium text-rose-700 dark:bg-rose-900/40 dark:text-rose-300">
               {t("models.required")}
             </span>
           )}
@@ -251,12 +251,12 @@ function ModelRow({
             {model.label}
           </span>
           {isRecommended && (
-            <span className="shrink-0 rounded bg-accent-100 px-1.5 py-0.5 text-micro font-medium text-accent-700 dark:bg-accent-50 dark:text-accent-900">
+            <span className="shrink-0 rounded-sm bg-accent-100 px-1.5 py-0.5 text-micro font-medium text-accent-700 dark:bg-accent-50 dark:text-accent-900">
               {t("models.recommended")}
             </span>
           )}
           {isActive && (
-            <span className="shrink-0 rounded bg-blue-100 px-1.5 py-0.5 text-micro font-medium text-blue-700 dark:bg-blue-950/40 dark:text-blue-300">
+            <span className="shrink-0 rounded-sm bg-blue-100 px-1.5 py-0.5 text-micro font-medium text-blue-700 dark:bg-blue-950/40 dark:text-blue-300">
               {t("models.active")}
             </span>
           )}

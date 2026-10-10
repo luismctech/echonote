@@ -60,7 +60,7 @@ export function SummaryPanel({
       className="flex min-h-0 flex-col"
     >
       {/* ── Header bar (never scrolls) ── */}
-      <div className="flex flex-shrink-0 items-center justify-between px-1 py-1">
+      <div className="flex shrink-0 items-center justify-between px-1 py-1">
         <span className="type-section-header text-content-placeholder">
           {t("summary.label")}
         </span>
@@ -149,7 +149,7 @@ export function SummaryPanel({
         {!loading && generating && streamingText && (
           <div className="prose prose-sm max-w-none text-ui-md leading-relaxed">
             <Markdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeSanitize]}>{streamingText}</Markdown>
-            <span className="ml-0.5 inline-block h-3 w-1.5 animate-pulse rounded-sm bg-emerald-500" />
+            <span className="ml-0.5 inline-block h-3 w-1.5 animate-pulse rounded-xs bg-emerald-500" />
           </div>
         )}
         {!loading && generating && !streamingText && (
@@ -219,7 +219,7 @@ function TemplateSelector({
           value={selectValue}
           onChange={(e) => handleChange(e.target.value)}
           disabled={disabled}
-          className="absolute inset-0 w-full cursor-pointer appearance-none border-0 bg-transparent p-0 text-ui-sm text-transparent opacity-0 focus:opacity-0 focus:outline-none focus:ring-0"
+          className="absolute inset-0 w-full cursor-pointer appearance-none border-0 bg-transparent p-0 text-ui-sm text-transparent opacity-0 focus:opacity-0 focus:outline-hidden focus:ring-0"
           aria-label={t("summary.label")}
         >
           {TEMPLATE_IDS.map((id) => (

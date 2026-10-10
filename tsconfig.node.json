@@ -9,5 +9,5 @@
     "outDir": "./node_modules/.cache/tsc-node",
     "rootDir": "."
   },
-  "include": ["vite.config.ts", "tailwind.config.ts", "postcss.config.js"]
+  "include": ["vite.config.ts"]
 }

@@ -229,9 +229,9 @@ export function App() {
 
   return (
     <main className="flex h-full w-full flex-col gap-3 overflow-hidden px-4 py-3 sm:px-6 sm:py-4">
-      <header className="flex flex-shrink-0 items-center justify-between gap-4">
+      <header className="flex shrink-0 items-center justify-between gap-4">
         <div className="flex items-center gap-3">
-          <LogoMark size={32} className="flex-shrink-0 drop-shadow-[0_0_12px_rgba(59,232,165,0.25)]" />
+          <LogoMark size={32} className="shrink-0 drop-shadow-[0_0_12px_rgba(59,232,165,0.25)]" />
           <h1 className="text-[28px] font-semibold leading-none tracking-[-0.02em] text-content-primary">
             {t("app.title")}
           </h1>

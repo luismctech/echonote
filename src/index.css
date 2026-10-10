@@ -1,6 +1,234 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import "tailwindcss";
+@plugin "@tailwindcss/typography";
+
+/* Class-based dark mode: useTheme.ts toggles `.dark` on <html>. */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* Tailwind 4 wraps `hover:` in `@media (hover: hover)`. Keep the v3
+ * behaviour (plain :hover) so hover styles also apply on hybrid /
+ * touch-primary Windows devices running the WebView2 shell. */
+@custom-variant hover (&:hover);
+
+/* ─── Theme (migrated from tailwind.config.ts) ───────────────────
+ * `inline` keeps the `var(--token)` references inside the generated
+ * utilities, so the light/dark values defined on :root / .dark below
+ * resolve at use time. Opacity modifiers (bg-surface-base/60) compile
+ * to color-mix() over rgb(var(--bg-base)). */
+@theme inline {
+  --color-surface-base: rgb(var(--bg-base));
+  --color-surface-elevated: rgb(var(--bg-elevated));
+  --color-surface-sunken: rgb(var(--bg-sunken));
+  --color-surface-inset: rgb(var(--bg-inset));
+
+  --color-content-primary: rgb(var(--text-primary));
+  --color-content-secondary: rgb(var(--text-secondary));
+  --color-content-tertiary: rgb(var(--text-tertiary));
+  --color-content-placeholder: rgb(var(--text-placeholder));
+
+  --color-accent: rgb(var(--accent-600));
+  --color-accent-50: rgb(var(--accent-50));
+  --color-accent-100: rgb(var(--accent-100));
+  --color-accent-400: rgb(var(--accent-400));
+  --color-accent-600: rgb(var(--accent-600));
+  --color-accent-700: rgb(var(--accent-700));
+  --color-accent-900: rgb(var(--accent-900));
+
+  /* The raw channels are --color-success etc., so the theme keys carry
+   * the `semantic-` prefix to avoid redefining the same variable. */
+  --color-semantic-success: rgb(var(--color-success));
+  --color-semantic-warning: rgb(var(--color-warning));
+  --color-semantic-danger: rgb(var(--color-danger));
+  --color-semantic-info: rgb(var(--color-info));
+}
+
+@theme {
+  --font-sans: Inter, system-ui, -apple-system, sans-serif;
+  --font-mono: "JetBrains Mono", "SF Mono", Consolas, monospace;
+
+  /* Display — hero moments, onboarding, empty states */
+  --text-display-xl: 48px;
+  --text-display-xl--line-height: 1.05;
+  --text-display-lg: 36px;
+  --text-display-lg--line-height: 1.1;
+  --text-display-md: 28px;
+  --text-display-md--line-height: 1.15;
+  /* UI — primary interface scale (aligned to macOS HIG) */
+  --text-ui-lg: 15px;
+  --text-ui-lg--line-height: 1.45;
+  --text-ui-md: 13px;
+  --text-ui-md--line-height: 1.4;
+  --text-ui-sm: 12px;
+  --text-ui-sm--line-height: 1.35;
+  --text-ui-xs: 11px;
+  --text-ui-xs--line-height: 1.3;
+  /* Reading — transcripts and long-form notes */
+  --text-reading-lg: 18px;
+  --text-reading-lg--line-height: 1.65;
+  --text-reading-md: 16px;
+  --text-reading-md--line-height: 1.7;
+  /* Mono — timestamps, code */
+  --text-mono-md: 12px;
+  --text-mono-md--line-height: 1.5;
+  /* Micro — badges, status indicators */
+  --text-micro: 10px;
+  --text-micro--line-height: 1.3;
+
+  --animate-rec-breathe: rec-breathe 3s cubic-bezier(0.32, 0.72, 0, 1) infinite;
+  --animate-rec-ring: rec-ring 1.5s cubic-bezier(0.32, 0.72, 0, 1) infinite;
+  --animate-text-appear: text-appear 150ms ease-out forwards;
+  --animate-progress-glow: progress-glow 2s linear infinite;
+  --animate-overlay-in: overlay-in 200ms ease-out forwards;
+  --animate-overlay-out: overlay-out 150ms ease-in forwards;
+  --animate-modal-in: modal-in 250ms cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  --animate-modal-out: modal-out 150ms ease-in forwards;
+  --animate-slide-in: slide-in 200ms ease-out forwards;
+  --animate-ctx-in: ctx-in 120ms ease-out forwards;
+
+  @keyframes rec-breathe {
+    0%,
+    100% {
+      transform: scale(1);
+      opacity: 1;
+    }
+    50% {
+      transform: scale(1.1);
+      opacity: 0.85;
+    }
+  }
+  @keyframes rec-ring {
+    0% {
+      transform: scale(1);
+      opacity: 0.6;
+    }
+    100% {
+      transform: scale(1.8);
+      opacity: 0;
+    }
+  }
+  @keyframes text-appear {
+    0% {
+      opacity: 0;
+    }
+    100% {
+      opacity: 1;
+    }
+  }
+  @keyframes progress-glow {
+    0% {
+      background-position: 200% 0;
+    }
+    100% {
+      background-position: -200% 0;
+    }
+  }
+  @keyframes overlay-in {
+    0% {
+      opacity: 0;
+    }
+    100% {
+      opacity: 1;
+    }
+  }
+  @keyframes overlay-out {
+    0% {
+      opacity: 1;
+    }
+    100% {
+      opacity: 0;
+    }
+  }
+  @keyframes modal-in {
+    0% {
+      opacity: 0;
+      transform: scale(0.95) translateY(8px);
+    }
+    100% {
+      opacity: 1;
+      transform: scale(1) translateY(0);
+    }
+  }
+  @keyframes modal-out {
+    0% {
+      opacity: 1;
+      transform: scale(1) translateY(0);
+    }
+    100% {
+      opacity: 0;
+      transform: scale(0.95) translateY(8px);
+    }
+  }
+  @keyframes slide-in {
+    0% {
+      opacity: 0;
+      transform: translateY(4px);
+    }
+    100% {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+  @keyframes ctx-in {
+    0% {
+      opacity: 0;
+      transform: scale(0.95);
+    }
+    100% {
+      opacity: 1;
+      transform: scale(1);
+    }
+  }
+}
+
+/* Shadows — warm, lifted feel. Light values live in the theme so the
+ * `shadow-*` utilities reference var(--shadow-*); `.dark` below overrides
+ * the same variables. v3 mapped `shadow` (DEFAULT) to --shadow-md; no
+ * source file uses bare `shadow`, and sm/md/lg keep their v3 meaning. */
+@theme {
+  --shadow-sm:
+    0 1px 2px rgba(26, 24, 20, 0.04), 0 1px 3px rgba(26, 24, 20, 0.06);
+  --shadow-md:
+    0 2px 4px rgba(26, 24, 20, 0.04), 0 4px 12px rgba(26, 24, 20, 0.08);
+  --shadow-lg:
+    0 4px 8px rgba(26, 24, 20, 0.06), 0 12px 32px rgba(26, 24, 20, 0.12);
+  --shadow-xl:
+    0 8px 16px rgba(26, 24, 20, 0.08), 0 24px 48px rgba(26, 24, 20, 0.16);
+}
+
+/* Border colours. v3 `borderColor.DEFAULT` -> --border-default, so the
+ * v4 preflight default (currentcolor) is restored to it. */
+@layer base {
+  *,
+  ::after,
+  ::before,
+  ::backdrop,
+  ::file-selector-button {
+    border-color: var(--border-default);
+  }
+
+  /* v3 preflight: buttons show a pointer cursor; v4 uses `default`. */
+  button:not(:disabled),
+  [role="button"]:not(:disabled) {
+    cursor: pointer;
+  }
+
+  /* v3 preflight: placeholder text was gray-400, v4 uses currentcolor/50%. */
+  input::placeholder,
+  textarea::placeholder {
+    color: var(--color-gray-400);
+  }
+}
+
+@utility border-subtle {
+  border-color: var(--border-subtle);
+}
+@utility border-strong {
+  border-color: var(--border-strong);
+}
+@utility divide-subtle {
+  :where(& > :not(:last-child)) {
+    border-color: var(--border-subtle);
+  }
+}
 
 /* ─── Design tokens from docs/DESIGN.md §4 ──────────────────────
  * Colours are stored as space-separated R G B channels so Tailwind
@@ -38,16 +266,6 @@
   --color-warning: 184 134 11;
   --color-danger: 156 42 40;
   --color-info: 58 92 122;
-
-  /* Shadows — warm, lifted feel */
-  --shadow-sm:
-    0 1px 2px rgba(26, 24, 20, 0.04), 0 1px 3px rgba(26, 24, 20, 0.06);
-  --shadow-md:
-    0 2px 4px rgba(26, 24, 20, 0.04), 0 4px 12px rgba(26, 24, 20, 0.08);
-  --shadow-lg:
-    0 4px 8px rgba(26, 24, 20, 0.06), 0 12px 32px rgba(26, 24, 20, 0.12);
-  --shadow-xl:
-    0 8px 16px rgba(26, 24, 20, 0.08), 0 24px 48px rgba(26, 24, 20, 0.16);
 }
 
 .dark {
@@ -152,13 +370,23 @@ input[type="checkbox"]:focus-visible {
 
 /* ─── Typography utilities ───────────────────────────────────── */
 
-@layer components {
+@utility type-section-header {
   /* Section header — reusable across panels */
-  .type-section-header {
-    @apply text-ui-xs font-semibold uppercase tracking-wide text-content-secondary;
-  }
+  @apply text-ui-xs font-semibold uppercase tracking-wide text-content-secondary;
+}
+@utility type-label {
   /* Label — form fields, metadata captions */
-  .type-label {
-    @apply text-ui-xs font-medium text-content-tertiary;
-  }
+  @apply text-ui-xs font-medium text-content-tertiary;
+}
+
+/* Markdown prose (typography plugin) bound to the design tokens. Unlayered
+ * so it overrides the plugin's defaults in the components layer. */
+.prose {
+  --tw-prose-body: rgb(var(--text-primary));
+  --tw-prose-headings: rgb(var(--text-primary));
+  --tw-prose-links: rgb(var(--accent-600));
+  --tw-prose-bold: rgb(var(--text-primary));
+  --tw-prose-quotes: rgb(var(--text-secondary));
+  --tw-prose-code: rgb(var(--text-primary));
+  --tw-prose-hr: var(--border-default);
 }

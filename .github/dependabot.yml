@@ -46,7 +46,7 @@ updates:
     vite:
       patterns: [ "vite*", "vitest*" ]
     tailwind:
-      patterns: [ "tailwindcss*", "postcss*", "autoprefixer*" ]
+      patterns: [ "tailwindcss*", "@tailwindcss/*", "postcss*" ]
 
 - package-ecosystem: github-actions
   directory: /

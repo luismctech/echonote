@@ -132,7 +132,7 @@ export function ChatPanel({
       className="flex min-h-0 flex-1 flex-col"
     >
       {/* ── Header bar (never scrolls) ── */}
-      <div className="flex flex-shrink-0 items-center justify-between px-1 py-1">
+      <div className="flex shrink-0 items-center justify-between px-1 py-1">
         <span className="type-section-header text-content-placeholder">
           {t("chat.label")}
         </span>
@@ -188,7 +188,7 @@ export function ChatPanel({
         </div>
 
         {/* ── Input area (pinned to bottom) ── */}
-        <form onSubmit={handleSubmit} className="flex flex-shrink-0 gap-2 border-t border-subtle p-2">
+        <form onSubmit={handleSubmit} className="flex shrink-0 gap-2 border-t border-subtle p-2">
           <textarea
             ref={inputRef}
             value={input}
@@ -197,7 +197,7 @@ export function ChatPanel({
             placeholder={t("chat.placeholder")}
             rows={1}
             disabled={chat.streaming}
-            className="min-h-[30px] flex-1 resize-none rounded-md border bg-surface-elevated px-2 py-1 text-ui-sm placeholder:text-content-placeholder focus:border-strong focus:outline-none disabled:opacity-60"
+            className="min-h-[30px] flex-1 resize-none rounded-md border bg-surface-elevated px-2 py-1 text-ui-sm placeholder:text-content-placeholder focus:border-strong focus:outline-hidden disabled:opacity-60"
           />
           <button
             type="submit"
@@ -362,7 +362,7 @@ function replacePlaceholders(
           type="button"
           onClick={() => onClick?.(segId)}
           title={i18next.t("chat.scrollToSegment", { id: label })}
-          className="mx-0.5 inline-flex items-center gap-0.5 rounded bg-blue-100 px-1.5 py-0.5 font-mono text-micro text-blue-700 hover:bg-blue-200 dark:bg-blue-900/40 dark:text-blue-300 dark:hover:bg-blue-900/60"
+          className="mx-0.5 inline-flex items-center gap-0.5 rounded-sm bg-blue-100 px-1.5 py-0.5 font-mono text-micro text-blue-700 hover:bg-blue-200 dark:bg-blue-900/40 dark:text-blue-300 dark:hover:bg-blue-900/60"
         >
           <Clock className="h-2.5 w-2.5" />
           {label}

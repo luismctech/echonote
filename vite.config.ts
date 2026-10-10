@@ -1,5 +1,6 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
+import tailwindcss from "@tailwindcss/vite";
 
 // Tauri exposes the target host + port via env. Binding to host makes the
 // dev server reachable from the Tauri webview on non-loopback targets.
@@ -7,7 +8,7 @@ import react from "@vitejs/plugin-react";
 const host = process.env.TAURI_DEV_HOST;
 
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react(), tailwindcss()],
 
   // Prevent Vite from obscuring Rust errors in the terminal.
   clearScreen: false,
@@ -31,7 +32,7 @@ export default defineConfig({
 
   // Tauri uses Chromium on Windows/Linux and WebKit on macOS.
   build: {
-    target: process.env.TAURI_ENV_PLATFORM === "windows" ? "chrome105" : "safari13",
+    target: process.env.TAURI_ENV_PLATFORM === "windows" ? "chrome105" : "safari13", cssTarget: "safari16.4",
     minify: !process.env.TAURI_ENV_DEBUG,
     sourcemap: Boolean(process.env.TAURI_ENV_DEBUG),
   },

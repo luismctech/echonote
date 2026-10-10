@@ -154,7 +154,7 @@ export function McpInstaller({
               <div className="flex flex-col gap-2">
                 <div className="flex items-center gap-2">
                   <h3 className="text-ui-sm font-semibold text-content-primary">{t("mcp.detected")}</h3>
-                  <span className="rounded bg-emerald-100 px-1.5 py-0.5 text-micro font-medium text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300">
+                  <span className="rounded-sm bg-emerald-100 px-1.5 py-0.5 text-micro font-medium text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300">
                     {detected.length}
                   </span>
                 </div>
@@ -290,12 +290,12 @@ function ClientRow({
         <div className="flex items-center gap-2">
           <span className="text-ui-sm font-medium text-content-primary">{client.label}</span>
           {client.installed && (
-            <span className="shrink-0 rounded bg-violet-100 px-1.5 py-0.5 text-micro font-medium text-violet-700 dark:bg-violet-950/40 dark:text-violet-300">
+            <span className="shrink-0 rounded-sm bg-violet-100 px-1.5 py-0.5 text-micro font-medium text-violet-700 dark:bg-violet-950/40 dark:text-violet-300">
               {t("mcp.connected")}
             </span>
           )}
           {!client.detected && (
-            <span className="shrink-0 rounded bg-neutral-100 px-1.5 py-0.5 text-micro font-medium text-neutral-500 dark:bg-neutral-800 dark:text-neutral-400">
+            <span className="shrink-0 rounded-sm bg-neutral-100 px-1.5 py-0.5 text-micro font-medium text-neutral-500 dark:bg-neutral-800 dark:text-neutral-400">
               {t("mcp.notInstalled")}
             </span>
           )}

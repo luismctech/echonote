@@ -46,7 +46,7 @@ export function ResizableHandle({
       role="separator"
       aria-orientation="horizontal"
       aria-valuenow={Math.round(ratio * 100)}
-      className="group flex h-2 flex-shrink-0 cursor-row-resize items-center justify-center"
+      className="group flex h-2 shrink-0 cursor-row-resize items-center justify-center"
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}

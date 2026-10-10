@@ -53,7 +53,7 @@ function RefiningProgress({ stage }: Readonly<{ stage: number }>) {
           return (
             <div
               key={key}
-              className={`h-1.5 flex-1 rounded-full transition-colors duration-500 ${cls} ${i === stage ? "bg-gradient-to-r from-emerald-300 via-emerald-500 to-emerald-300 bg-[length:200%_100%] dark:from-emerald-400 dark:via-emerald-600 dark:to-emerald-400" : ""}`}
+              className={`h-1.5 flex-1 rounded-full transition-colors duration-500 ${cls} ${i === stage ? "bg-linear-to-r/srgb from-emerald-300 via-emerald-500 to-emerald-300 bg-size-[200%_100%] dark:from-emerald-400 dark:via-emerald-600 dark:to-emerald-400" : ""}`}
             />
           );
         })}
@@ -187,7 +187,7 @@ export function LivePane({
   return (
     <>
       {/* ── Top bar: minimal status + controls ── */}
-      <header className="flex flex-shrink-0 items-center justify-between gap-3">
+      <header className="flex shrink-0 items-center justify-between gap-3">
         <div className="flex items-center gap-3">
           {/* Status indicator — morphs between states with crossfade */}
           <div className="relative flex h-5 items-center">
@@ -259,7 +259,7 @@ export function LivePane({
                   value={language}
                   disabled={toggleLocked}
                   onChange={(e) => onChangeLanguage(e.target.value)}
-                  className="absolute inset-0 w-full cursor-pointer appearance-none border-0 bg-transparent p-0 text-ui-sm text-transparent opacity-0 focus:opacity-0 focus:outline-none focus:ring-0"
+                  className="absolute inset-0 w-full cursor-pointer appearance-none border-0 bg-transparent p-0 text-ui-sm text-transparent opacity-0 focus:opacity-0 focus:outline-hidden focus:ring-0"
                   aria-label={t("live.langTooltip")}
                 >
                   <option value="">{t("live.langAuto")}</option>
@@ -322,7 +322,7 @@ export function LivePane({
                   value={audioSource}
                   disabled={toggleLocked}
                   onChange={(e) => onChangeSource(e.target.value as AudioSourceKind)}
-                  className="absolute inset-0 w-full cursor-pointer appearance-none border-0 bg-transparent p-0 text-ui-sm text-transparent opacity-0 focus:opacity-0 focus:outline-none focus:ring-0"
+                  className="absolute inset-0 w-full cursor-pointer appearance-none border-0 bg-transparent p-0 text-ui-sm text-transparent opacity-0 focus:opacity-0 focus:outline-hidden focus:ring-0"
                   aria-label={t("live.sourceLabel")}
                 >
                   <option value="microphone">{t("live.sourceMic")}</option>
@@ -371,7 +371,7 @@ export function LivePane({
             type="button"
             onClick={() => setBannerDismissed(true)}
             aria-label={t("live.dismissBanner")}
-            className="flex-shrink-0 rounded p-0.5 text-blue-500 hover:bg-blue-100 dark:hover:bg-blue-900"
+            className="shrink-0 rounded-sm p-0.5 text-blue-500 hover:bg-blue-100 dark:hover:bg-blue-900"
           >
             <X className="h-3.5 w-3.5" />
           </button>
@@ -452,7 +452,7 @@ export function LivePane({
       </div>
 
       {/* ── Bottom bar: controls + audio level ── */}
-      <footer className="flex flex-shrink-0 items-center justify-between gap-4 rounded-md border border-subtle bg-surface-sunken px-4 py-2">
+      <footer className="flex shrink-0 items-center justify-between gap-4 rounded-md border border-subtle bg-surface-sunken px-4 py-2">
         {/* Left: audio level indicator + optional mix source toggles */}
         <div className="flex items-center gap-2">
           {audioSource === "systemOutput" ? (
@@ -568,7 +568,7 @@ export function LivePane({
               {stream.kind === "recording" && (
                 <span className="pointer-events-none absolute inset-0 rounded-full border-2 border-rose-400 animate-rec-ring" />
               )}
-              <span className="relative inline-flex h-2.5 w-2.5 rounded-sm bg-white/90" />
+              <span className="relative inline-flex h-2.5 w-2.5 rounded-xs bg-white/90" />
               <span className="relative">{stream.kind === "stopping" ? t("live.stopping") : t("live.stop")}</span>
             </button>
           )}

@@ -46,7 +46,7 @@ export function NotesPanel({
         {notes.map((note) => (
           <li
             key={note.id}
-            className="group flex items-baseline gap-2 rounded px-1.5 py-1 text-ui-md transition-colors hover:bg-amber-100/60 dark:hover:bg-amber-900/30"
+            className="group flex items-baseline gap-2 rounded-sm px-1.5 py-1 text-ui-md transition-colors hover:bg-amber-100/60 dark:hover:bg-amber-900/30"
           >
             <span className="shrink-0 font-mono text-ui-xs text-amber-600 dark:text-amber-400">
               {formatTimestamp(note.timestampMs)}

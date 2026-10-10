@@ -149,7 +149,7 @@ export function TemplateManager({
               value={form.name}
               onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
               placeholder={t("templates.namePlaceholder")}
-              className="w-full rounded-md border bg-surface-elevated px-2.5 py-1.5 text-ui-md text-content-primary placeholder:text-content-placeholder focus:border-accent-400 focus:outline-none focus:ring-1 focus:ring-accent-400"
+              className="w-full rounded-md border bg-surface-elevated px-2.5 py-1.5 text-ui-md text-content-primary placeholder:text-content-placeholder focus:border-accent-400 focus:outline-hidden focus:ring-1 focus:ring-accent-400"
               maxLength={100}
               autoFocus
             />
@@ -158,7 +158,7 @@ export function TemplateManager({
               onChange={(e) => setForm((f) => ({ ...f, prompt: e.target.value }))}
               placeholder={t("templates.promptPlaceholder")}
               rows={6}
-              className="w-full resize-y rounded-md border bg-surface-elevated px-2.5 py-1.5 text-ui-md text-content-primary placeholder:text-content-placeholder focus:border-accent-400 focus:outline-none focus:ring-1 focus:ring-accent-400"
+              className="w-full resize-y rounded-md border bg-surface-elevated px-2.5 py-1.5 text-ui-md text-content-primary placeholder:text-content-placeholder focus:border-accent-400 focus:outline-hidden focus:ring-1 focus:ring-accent-400"
               maxLength={4000}
             />
             <div className="flex items-center justify-end gap-2">

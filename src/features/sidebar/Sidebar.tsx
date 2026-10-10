@@ -41,7 +41,7 @@ export function Sidebar({
     <aside className="flex h-full min-h-0 flex-col gap-2 overflow-hidden rounded-lg border bg-surface-elevated p-3 shadow-sm">
       <header className="flex items-center justify-between">
         <div className="flex items-center gap-1.5">
-          <LogoMark size={18} className="flex-shrink-0 opacity-60" />
+          <LogoMark size={18} className="shrink-0 opacity-60" />
           <h2 className="text-ui-md font-semibold tracking-wide text-content-secondary">
             {t("sidebar.meetings")}
           </h2>
@@ -66,7 +66,7 @@ export function Sidebar({
       </header>
 
       {meetingsError && (
-        <p className="rounded bg-amber-50 px-2 py-1 text-ui-sm text-amber-800 dark:bg-amber-950/40 dark:text-amber-300">
+        <p className="rounded-sm bg-amber-50 px-2 py-1 text-ui-sm text-amber-800 dark:bg-amber-950/40 dark:text-amber-300">
           {meetingsError}
         </p>
       )}

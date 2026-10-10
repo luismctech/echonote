@@ -4,3 +4,9 @@ onlyBuiltDependencies:
   - esbuild
   - "@tauri-apps/cli"
   - "@parcel/watcher"
+
+# @tailwindcss/typography 0.5.x pins postcss-selector-parser 6.0.10, which is
+# affected by GHSA-rj75-hqrm-r3gf (fixed in 7.1.6). The plugin only uses the
+# stable selector-walking API; the compiled prose CSS is verified identical.
+overrides:
+  postcss-selector-parser: ">=7.1.6"

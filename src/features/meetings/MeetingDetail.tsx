@@ -74,7 +74,7 @@ function EditableTitle({
   return (
     <input
       ref={inputRef}
-      className="w-full rounded border border-blue-400 bg-transparent px-1 text-[22px] font-semibold leading-tight tracking-tight outline-none ring-1 ring-blue-400"
+      className="w-full rounded-sm border border-blue-400 bg-transparent px-1 text-[22px] font-semibold leading-tight tracking-tight outline-hidden ring-1 ring-blue-400"
       value={draft}
       onChange={(e) => setDraft(e.target.value)}
       onBlur={commit}
@@ -189,7 +189,7 @@ export function MeetingDetail({
   return (
     <>
       {/* ── Header ── */}
-      <header className="flex flex-shrink-0 items-start justify-between gap-2">
+      <header className="flex shrink-0 items-start justify-between gap-2">
         <div className="flex flex-col gap-1">
           <EditableTitle value={m.title} onCommit={onRenameMeeting} />
           <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-ui-sm text-content-tertiary">
@@ -294,7 +294,7 @@ export function MeetingDetail({
                         <li
                           key={seg.id}
                           data-segment-id={seg.id}
-                          className="absolute left-0 top-0 flex w-full items-baseline gap-3 rounded-sm"
+                          className="absolute left-0 top-0 flex w-full items-baseline gap-3 rounded-xs"
                           style={{ transform: `translateY(${vItem.start}px)` }}
                           data-index={vItem.index}
                           ref={virtualizer.measureElement}

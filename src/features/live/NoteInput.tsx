@@ -60,7 +60,7 @@ export function NoteInput({
       onSubmit={handleSubmit}
       className="flex items-center gap-2 rounded-md border bg-surface-elevated px-3 py-2"
     >
-      <span className="shrink-0 rounded bg-surface-inset px-1.5 py-0.5 font-mono text-micro text-content-tertiary">
+      <span className="shrink-0 rounded-sm bg-surface-inset px-1.5 py-0.5 font-mono text-micro text-content-tertiary">
         {formatTimestamp(elapsedMs)}
       </span>
       <input
@@ -70,12 +70,12 @@ export function NoteInput({
         onChange={(e) => setText(e.target.value)}
         disabled={disabled}
         placeholder={`${t("live.notePlaceholder")} (${isMac ? "⌘N" : "Ctrl+N"})`}
-        className="min-w-0 flex-1 bg-transparent text-ui-sm text-content-primary placeholder:text-content-placeholder focus:outline-none"
+        className="min-w-0 flex-1 bg-transparent text-ui-sm text-content-primary placeholder:text-content-placeholder focus:outline-hidden"
       />
       <button
         type="submit"
         disabled={disabled || !text.trim() || submitting}
-        className="shrink-0 rounded bg-emerald-600 px-2 py-1 text-micro font-medium text-white hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-40"
+        className="shrink-0 rounded-sm bg-emerald-600 px-2 py-1 text-micro font-medium text-white hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-40"
       >
         {t("live.addNote")}
       </button>
