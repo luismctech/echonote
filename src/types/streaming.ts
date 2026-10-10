@@ -83,6 +83,12 @@ export type TranscriptEvent =
        * `undefined`.
        */
       speakerSlot?: number;
+      /**
+       * Every distinct speaker referenced by `segments` (a segment may
+       * belong to a different speaker than the chunk-dominant one).
+       * Omitted by older backends; treat `undefined` as empty.
+       */
+      speakers?: SpeakerRef[];
     }
   | {
       type: "skipped";
@@ -123,6 +129,12 @@ export type TranscriptEvent =
       sessionId: StreamingSessionId;
       merges: SpeakerMerge[];
     };
+
+/** A speaker referenced by a chunk: stable id plus arrival-order slot. */
+export type SpeakerRef = {
+  id: SpeakerId;
+  slot: number;
+};
 
 /**
  * One offline-refinement merge: `absorbed` is collapsed into

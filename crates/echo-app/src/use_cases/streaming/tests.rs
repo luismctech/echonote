@@ -23,7 +23,7 @@ use echo_domain::{
     StreamingOptions, TranscribeOptions, Transcriber, Transcript, TranscriptEvent, Vad, VoiceState,
 };
 
-use super::{StreamingHandle, StreamingPipeline};
+use super::{referenced_speakers, StreamingHandle, StreamingPipeline};
 
 /// Yields N pre-baked frames then EOF.
 struct FakeStream {
@@ -718,4 +718,29 @@ async fn vad_is_reset_on_session_start() {
     let _ = drain_until_stopped(&mut handle).await;
     assert_eq!(inner.reset_count(), 1, "VAD must be reset on session start");
     assert_eq!(inner.push_count(), 1, "VAD must see the loud chunk");
+}
+
+#[test]
+fn referenced_speakers_lists_every_span_speaker_once_with_dominant_included() {
+    use echo_domain::{SpeakerRef, SpeakerSpan};
+
+    let a = SpeakerId::new();
+    let b = SpeakerId::new();
+    let span = |id, slot, start, end| SpeakerSpan {
+        speaker_id: id,
+        slot,
+        start_sample: start,
+        end_sample: end,
+    };
+    let spans = [
+        span(a, 0, 0, 800),
+        span(b, 1, 800, 900),
+        span(a, 0, 900, 1_000),
+    ];
+    let out = referenced_speakers(&spans, Some((a, 0)));
+    assert_eq!(
+        out,
+        vec![SpeakerRef { id: a, slot: 0 }, SpeakerRef { id: b, slot: 1 }]
+    );
+    assert!(referenced_speakers(&[], None).is_empty());
 }

@@ -33,8 +33,8 @@ use tracing::{debug, error, info, warn};
 
 use echo_domain::{
     AudioCapture, AudioFormat, CaptureSpec, Diarizer, DomainError, Punctuator, Resampler, Sample,
-    SpeakerId, SpeakerMerge, SpeakerSpan, StreamingOptions, StreamingSessionId, TranscribeOptions,
-    Transcriber, TranscriptEvent, Vad, VoiceState,
+    SpeakerId, SpeakerMerge, SpeakerRef, SpeakerSpan, StreamingOptions, StreamingSessionId,
+    TranscribeOptions, Transcriber, TranscriptEvent, Vad, VoiceState,
 };
 
 /// Capacity of the event channel. ~10 minutes of headroom for a
@@ -657,6 +657,7 @@ async fn process_chunk(
             // Chunk-level speaker for the UI palette: dominant span
             // across the entire chunk by sample-weighted majority.
             let chunk_dominant = chunk_dominant_speaker(&spans);
+            let speakers = referenced_speakers(&spans, chunk_dominant);
             let _ = events
                 .send(TranscriptEvent::Chunk {
                     session_id,
@@ -667,6 +668,7 @@ async fn process_chunk(
                     rtf,
                     speaker_id: chunk_dominant.map(|(id, _)| id),
                     speaker_slot: chunk_dominant.map(|(_, slot)| slot),
+                    speakers,
                 })
                 .await;
             segs
@@ -684,6 +686,26 @@ async fn process_chunk(
 /// sample indices) inside the same chunk.
 fn ms_to_chunk_samples(ms: u32) -> usize {
     (u64::from(ms) * u64::from(echo_audio_whisper_rate()) / 1_000) as usize
+}
+
+/// Distinct speakers named by `spans`, in first-seen order, always
+/// including the chunk-dominant pair. Segments take their speaker from
+/// `dominant_span`, so this is a superset of every `Segment::speaker_id`
+/// in the chunk and lets the recorder persist them before the segments.
+fn referenced_speakers(
+    spans: &[SpeakerSpan],
+    chunk_dominant: Option<(SpeakerId, u32)>,
+) -> Vec<SpeakerRef> {
+    let mut out: Vec<SpeakerRef> = Vec::new();
+    let pairs = chunk_dominant
+        .into_iter()
+        .chain(spans.iter().map(|s| (s.speaker_id, s.slot)));
+    for (id, slot) in pairs {
+        if !out.iter().any(|r| r.id == id) {
+            out.push(SpeakerRef { id, slot });
+        }
+    }
+    out
 }
 
 /// Sample-weighted majority across the chunk: returns the

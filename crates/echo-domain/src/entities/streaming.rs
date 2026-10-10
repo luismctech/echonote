@@ -120,6 +120,13 @@ pub enum TranscriptEvent {
         /// chip). 0-based; `None` whenever `speaker_id` is `None`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         speaker_slot: Option<u32>,
+        /// Every distinct speaker referenced by `segments` (each
+        /// segment may belong to a different speaker than the
+        /// chunk-dominant one above), so consumers can persist them
+        /// before the segments. Defaults to empty so payloads from
+        /// older producers still deserialise.
+        #[serde(default)]
+        speakers: Vec<SpeakerRef>,
     },
     /// A chunk was discarded by the silence gate before being sent to
     /// the ASR backend. Useful for UI / metrics.
@@ -184,6 +191,17 @@ pub enum TranscriptEvent {
         /// Session id.
         session_id: StreamingSessionId,
     },
+}
+
+/// A speaker referenced by a [`TranscriptEvent::Chunk`]: its stable id
+/// plus the arrival-order slot the recorder persists it under.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct SpeakerRef {
+    /// Speaker identifier, as referenced by `Segment::speaker_id`.
+    pub id: SpeakerId,
+    /// Arrival-order slot (0-based) of the speaker.
+    pub slot: u32,
 }
 
 /// One offline-refinement merge: `absorbed` is collapsed into
@@ -272,6 +290,7 @@ mod tests {
             rtf: 0.1,
             speaker_id: None,
             speaker_slot: None,
+            speakers: vec![],
         };
         let json = serde_json::to_string(&evt).unwrap();
         assert!(
@@ -297,6 +316,7 @@ mod tests {
             rtf: 0.2,
             speaker_id: Some(speaker),
             speaker_slot: Some(1),
+            speakers: vec![],
         };
         let json = serde_json::to_string(&evt).unwrap();
         assert!(json.contains("\"speakerId\""), "got: {json}");
@@ -330,5 +350,49 @@ mod tests {
             }
             other => panic!("expected Chunk, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn chunk_without_speakers_field_still_deserialises() {
+        // Payload produced by a pre-`speakers` build (older frontend,
+        // MCP sidecar, persisted fixture).
+        let json = r#"{
+            "type": "chunk",
+            "sessionId": "0190a000-0000-7000-8000-000000000000",
+            "chunkIndex": 3,
+            "offsetMs": 1500,
+            "segments": [],
+            "language": "en",
+            "rtf": 0.1
+        }"#;
+        let evt: TranscriptEvent = serde_json::from_str(json).expect("old payload");
+        match evt {
+            TranscriptEvent::Chunk { speakers, .. } => assert!(speakers.is_empty()),
+            other => panic!("expected Chunk, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn chunk_speakers_round_trip_in_camel_case() {
+        let id = SpeakerId::new();
+        let evt = TranscriptEvent::Chunk {
+            session_id: StreamingSessionId::new(),
+            chunk_index: 0,
+            offset_ms: 0,
+            segments: vec![],
+            language: None,
+            rtf: 0.0,
+            speaker_id: Some(id),
+            speaker_slot: Some(0),
+            speakers: vec![SpeakerRef { id, slot: 0 }],
+        };
+        let json = serde_json::to_value(&evt).unwrap();
+        assert_eq!(json["speakers"][0]["slot"], 0);
+        assert_eq!(
+            json["speakers"][0]["id"],
+            serde_json::json!(id.0.to_string())
+        );
+        let back: TranscriptEvent = serde_json::from_value(json).unwrap();
+        assert_eq!(back, evt);
     }
 }

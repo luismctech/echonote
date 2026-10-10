@@ -1514,4 +1514,35 @@ mod tests {
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].id, id);
     }
+
+    #[tokio::test]
+    async fn append_segments_rejects_speaker_that_was_never_upserted() {
+        // Documents the `segments.speaker_id REFERENCES speakers(id)`
+        // failure mode (foreign_keys = ON): the recorder must upsert
+        // every speaker a chunk references before appending, otherwise
+        // the whole batch is rejected and its segments are lost.
+        let store = SqliteMeetingStore::open_in_memory().await.unwrap();
+        let id = MeetingId::new();
+        store
+            .create(CreateMeeting {
+                id,
+                title: "fk".into(),
+                input_format: fmt(),
+            })
+            .await
+            .unwrap();
+
+        let mut seg = segment(0, 1_000, "orphan");
+        seg.speaker_id = Some(SpeakerId::new());
+        let err = store
+            .append_segments(id, &[seg])
+            .await
+            .expect_err("unknown speaker id must violate the foreign key");
+        assert!(
+            err.to_string().to_lowercase().contains("foreign key"),
+            "unexpected error: {err}"
+        );
+        let meeting = store.get(id).await.unwrap().expect("meeting exists");
+        assert!(meeting.segments.is_empty(), "failed batch must not persist");
+    }
 }
