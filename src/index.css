@@ -179,19 +179,17 @@
   }
 }
 
-/* Shadows — warm, lifted feel. Light values live in the theme so the
- * `shadow-*` utilities reference var(--shadow-*); `.dark` below overrides
- * the same variables. v3 mapped `shadow` (DEFAULT) to --shadow-md; no
- * source file uses bare `shadow`, and sm/md/lg keep their v3 meaning. */
-@theme {
-  --shadow-sm:
-    0 1px 2px rgba(26, 24, 20, 0.04), 0 1px 3px rgba(26, 24, 20, 0.06);
-  --shadow-md:
-    0 2px 4px rgba(26, 24, 20, 0.04), 0 4px 12px rgba(26, 24, 20, 0.08);
-  --shadow-lg:
-    0 4px 8px rgba(26, 24, 20, 0.06), 0 12px 32px rgba(26, 24, 20, 0.12);
-  --shadow-xl:
-    0 8px 16px rgba(26, 24, 20, 0.08), 0 24px 48px rgba(26, 24, 20, 0.16);
+/* Shadows — warm, lifted feel. The values live in runtime variables
+ * (--elevation-*, light on :root, dark on .dark) and the theme only points
+ * at them via `inline`, so the compiled `shadow-*` utilities keep a
+ * var() reference and follow the active theme. A plain `@theme` would
+ * bake the light values into the utilities at build time. v3 mapped
+ * `shadow` (DEFAULT) to --shadow-md; no source file uses bare `shadow`. */
+@theme inline {
+  --shadow-sm: var(--elevation-sm);
+  --shadow-md: var(--elevation-md);
+  --shadow-lg: var(--elevation-lg);
+  --shadow-xl: var(--elevation-xl);
 }
 
 /* Border colours. v3 `borderColor.DEFAULT` -> --border-default, so the
@@ -236,6 +234,11 @@
  * Borders and shadows carry their own alpha and are used verbatim. */
 
 :root {
+  --elevation-sm: 0 1px 2px rgba(26, 24, 20, 0.04), 0 1px 3px rgba(26, 24, 20, 0.06);
+  --elevation-md: 0 2px 4px rgba(26, 24, 20, 0.04), 0 4px 12px rgba(26, 24, 20, 0.08);
+  --elevation-lg: 0 4px 8px rgba(26, 24, 20, 0.06), 0 12px 32px rgba(26, 24, 20, 0.12);
+  --elevation-xl: 0 8px 16px rgba(26, 24, 20, 0.08), 0 24px 48px rgba(26, 24, 20, 0.16);
+
   /* Surfaces */
   --bg-base: 248 245 240;
   --bg-elevated: 255 255 255;
@@ -290,10 +293,10 @@
   --accent-700: 247 186 124;
   --accent-900: 250 216 172;
 
-  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.25), 0 1px 3px rgba(0, 0, 0, 0.35);
-  --shadow-md: 0 2px 4px rgba(0, 0, 0, 0.25), 0 4px 12px rgba(0, 0, 0, 0.4);
-  --shadow-lg: 0 4px 8px rgba(0, 0, 0, 0.3), 0 12px 32px rgba(0, 0, 0, 0.45);
-  --shadow-xl: 0 8px 16px rgba(0, 0, 0, 0.35), 0 24px 48px rgba(0, 0, 0, 0.55);
+  --elevation-sm: 0 1px 2px rgba(0, 0, 0, 0.25), 0 1px 3px rgba(0, 0, 0, 0.35);
+  --elevation-md: 0 2px 4px rgba(0, 0, 0, 0.25), 0 4px 12px rgba(0, 0, 0, 0.4);
+  --elevation-lg: 0 4px 8px rgba(0, 0, 0, 0.3), 0 12px 32px rgba(0, 0, 0, 0.45);
+  --elevation-xl: 0 8px 16px rgba(0, 0, 0, 0.35), 0 24px 48px rgba(0, 0, 0, 0.55);
 }
 
 /* ─── Global resets ──────────────────────────────────────────── */
