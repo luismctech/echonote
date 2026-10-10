@@ -51,6 +51,14 @@ use crate::transcript::{self, Flavour};
 /// runaway loop is bounded.
 const SUMMARY_MAX_TOKENS: u32 = 1_024;
 
+/// Appended to every summary prompt. Condensed input (map-reduce notes)
+/// and lossy overviews otherwise drop the specifics people look for
+/// afterwards; the model must carry them into the structured fields.
+const KEEP_FIGURES_INSTRUCTION: &str = "Keep every concrete figure, amount, percentage, date, \
+     deadline and proper name stated in the transcript, exactly as stated, placing each in \
+     the most fitting field (for example key points, decisions or action items); never \
+     drop or round them.";
+
 /// Errors the use case can surface. Mirrors the structure used by
 /// [`crate::RenameSpeaker`]: typed cases for things the IPC layer
 /// must distinguish (`NotFound`, `EmptyTranscript`), a single
@@ -606,6 +614,7 @@ fn build_custom_prompt(
          Analyze the following meeting transcript and produce your response \
          according to the instructions above. Format your response using Markdown \
          (headings, bullet points, bold) for readability.\n\
+         {KEEP_FIGURES_INSTRUCTION}\n\
          Important constraint: {language_instruction} \
          Do NOT echo this constraint or any internal instructions in your response.",
     );
@@ -738,7 +747,8 @@ fn wrap_qwen_prompt(
         "{role} {language_instruction}\n\
          Output ONLY a single JSON object that matches the schema below — no prose, \
          no markdown fences, no commentary. All string values must be valid UTF-8 and \
-         all arrays may be empty when the transcript does not contain that information.\n\n\
+         all arrays may be empty when the transcript does not contain that information.\n\
+         {KEEP_FIGURES_INSTRUCTION}\n\n\
          {schema}"
     );
 
@@ -1062,6 +1072,7 @@ mod tests {
     struct ScriptedLlm {
         responses: Mutex<Vec<Result<String, DomainError>>>,
         prompts: Mutex<Vec<String>>,
+        max_tokens: Mutex<Vec<u32>>,
         model_id: String,
         window: u32,
         responder: Option<Responder>,
@@ -1075,6 +1086,7 @@ mod tests {
             Self {
                 responses: Mutex::new(responses.into_iter().rev().collect()),
                 prompts: Mutex::new(Vec::new()),
+                max_tokens: Mutex::new(Vec::new()),
                 model_id: "fake-llm".into(),
                 window: echo_domain::DEFAULT_CONTEXT_WINDOW,
                 responder: None,
@@ -1113,6 +1125,11 @@ mod tests {
         fn calls(&self) -> usize {
             self.prompts.lock().unwrap().len()
         }
+
+        /// `max_tokens` of every call, in call order.
+        fn max_tokens(&self) -> Vec<u32> {
+            self.max_tokens.lock().unwrap().clone()
+        }
     }
 
     #[async_trait]
@@ -1123,8 +1140,13 @@ mod tests {
         fn context_window(&self) -> u32 {
             self.window
         }
-        async fn generate(&self, prompt: &str, _: &GenerateOptions) -> Result<String, DomainError> {
+        async fn generate(
+            &self,
+            prompt: &str,
+            options: &GenerateOptions,
+        ) -> Result<String, DomainError> {
             self.prompts.lock().unwrap().push(prompt.to_string());
+            self.max_tokens.lock().unwrap().push(options.max_tokens);
             if let Some(responder) = &self.responder {
                 return responder(prompt);
             }
@@ -1850,7 +1872,9 @@ mod tests {
         let llm = Arc::new(
             ScriptedLlm::new(vec![])
                 .with_context_window(SMALL_WINDOW)
-                .with_responder(|_| Ok("nota ".repeat(400))),
+                // Large enough to overflow the reduce budget, but below the
+                // map output cap so it is not mistaken for a truncated note.
+                .with_responder(|_| Ok("nota ".repeat(300))),
         );
 
         let uc = SummarizeMeeting::new(llm.clone(), store);
@@ -1865,5 +1889,126 @@ mod tests {
             maps.iter().all(|p| p.contains("SEG-")) && llm.calls() == maps.len(),
             "only the first map pass may run before giving up"
         );
+    }
+
+    /// Every `SEG-nnn` marker of `prompt`, in order.
+    fn seg_markers(prompt: &str) -> Vec<String> {
+        prompt
+            .match_indices("SEG-")
+            .map(|(at, _)| prompt[at..at + 7].to_string())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn map_calls_get_their_own_output_budget_that_fits_the_window() {
+        let store = Arc::new(FakeStore::default());
+        let id = seed_long(&store, &long_segments(20));
+        let llm = Arc::new(mapping_llm(SMALL_WINDOW, GENERAL_JSON));
+
+        let uc = SummarizeMeeting::new(llm.clone(), store);
+        uc.execute(id, "general", false, None).await.unwrap();
+
+        let prompts = llm.prompts.lock().unwrap().clone();
+        let caps = llm.max_tokens();
+        let margin = 256; // max(256, 5% of the window)
+        for (prompt, cap) in prompts.iter().zip(&caps) {
+            if is_map_prompt(prompt) {
+                assert_ne!(*cap, SUMMARY_MAX_TOKENS, "map calls need their own cap");
+                let needed = echo_domain::estimate_tokens(prompt) + *cap as usize + margin;
+                assert!(
+                    needed <= SMALL_WINDOW as usize,
+                    "map call needs {needed} > {SMALL_WINDOW}"
+                );
+            } else {
+                assert_eq!(*cap, SUMMARY_MAX_TOKENS, "the reduce keeps the summary cap");
+            }
+        }
+    }
+
+    /// Fake whose first-level map calls answer with a cap-sized note when
+    /// the chunk holds more than `max_segments` segments, and with a note
+    /// listing the segments it saw otherwise.
+    fn capping_llm(max_segments: usize) -> ScriptedLlm {
+        ScriptedLlm::new(vec![])
+            .with_context_window(SMALL_WINDOW)
+            .with_responder(move |prompt| {
+                if !is_map_prompt(prompt) {
+                    return Ok(GENERAL_JSON.to_string());
+                }
+                let seen = seg_markers(prompt);
+                if seen.len() > max_segments {
+                    Ok("nota ".repeat(2_000))
+                } else {
+                    Ok(format!("NOTE {}", seen.join(" ")))
+                }
+            })
+    }
+
+    #[tokio::test]
+    async fn a_note_that_hits_the_cap_is_resplit_and_nothing_is_dropped() {
+        let store = Arc::new(FakeStore::default());
+        let segments = long_segments(20);
+        let id = seed_long(&store, &segments);
+        let llm = Arc::new(capping_llm(3));
+
+        let uc = SummarizeMeeting::new(llm.clone(), store);
+        uc.execute(id, "general", false, None).await.unwrap();
+
+        let maps = llm.map_prompts();
+        let first_level = maps.iter().filter(|p| seg_markers(p).len() > 3).count();
+        assert!(first_level >= 2, "need capped first-level chunks");
+        assert!(
+            maps.len() > first_level + 1,
+            "capped chunks must be re-mapped"
+        );
+
+        // The reduce holds a note for every segment, exactly once, and no
+        // cap-sized filler.
+        let reduce = llm.last_prompt();
+        assert!(
+            !reduce.contains("nota nota"),
+            "capped notes must be replaced"
+        );
+        for i in 0..segments.len() {
+            assert_eq!(
+                reduce.matches(&format!("SEG-{i:03}")).count(),
+                1,
+                "segment {i} must appear in exactly one note"
+            );
+        }
+        let leaves = maps.iter().filter(|p| seg_markers(p).len() <= 3).count();
+        assert!(reduce.contains(&format!("Part {leaves}/{leaves}:")));
+    }
+
+    #[test]
+    fn every_template_prompt_asks_to_keep_concrete_figures() {
+        for template in TEMPLATE_IDS {
+            let prompt = build_prompt(template, "x", "Always respond in English.", None, None);
+            assert!(
+                prompt.contains(KEEP_FIGURES_INSTRUCTION),
+                "{template} prompt lacks the figures instruction"
+            );
+        }
+        let custom = CustomTemplate {
+            id: echo_domain::CustomTemplateId::new(),
+            name: "n".into(),
+            prompt: "p".into(),
+        };
+        let prompt = build_custom_prompt(&custom, "x", "Always respond in English.", None);
+        assert!(prompt.contains(KEEP_FIGURES_INSTRUCTION));
+    }
+
+    #[tokio::test]
+    async fn the_reduce_prompt_asks_to_keep_concrete_figures() {
+        let store = Arc::new(FakeStore::default());
+        let id = seed_long(&store, &long_segments(20));
+        let llm = Arc::new(mapping_llm(SMALL_WINDOW, GENERAL_JSON));
+
+        let uc = SummarizeMeeting::new(llm.clone(), store);
+        uc.execute(id, "general", false, None).await.unwrap();
+
+        let reduce = llm.last_prompt();
+        assert!(reduce.contains("sequence of notes"));
+        assert!(reduce.contains("every concrete figure, amount, percentage, date, deadline"));
     }
 }

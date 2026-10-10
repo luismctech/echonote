@@ -57,8 +57,15 @@ impl LlmModel for CountingLlm {
         prompt: &str,
         options: &GenerateOptions,
     ) -> Result<String, DomainError> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        self.inner.generate(prompt, options).await
+        let n = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+        let response = self.inner.generate(prompt, options).await?;
+        // Diagnostics only: shows whether a note reached its output cap.
+        eprintln!(
+            "call {n}: max_tokens={}, response={} tokens",
+            options.max_tokens,
+            self.inner.count_tokens(&response)
+        );
+        Ok(response)
     }
     async fn generate_stream(
         &self,
