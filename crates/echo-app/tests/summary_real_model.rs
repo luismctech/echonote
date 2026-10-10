@@ -11,12 +11,19 @@
 //!
 //! They prove what the scripted unit tests cannot: that map-reduce over a
 //! long meeting fits the production 8,192-token window with the model's own
-//! tokenizer, yields the structured General template, and keeps a fact that
-//! sits in the middle of the transcript.
+//! tokenizer, yields the structured General template, and that a fact in the
+//! middle of the transcript survives the map step.
+//!
+//! Accepted limitation (user decision, 2026-10-10): with Qwen3-8B the final
+//! General summary of a long, filler-heavy meeting may omit an isolated
+//! figure, because the reduce step has to compress many notes into a few
+//! template fields. The long test therefore asserts the fact reaches at least
+//! one intermediate map note and only reports whether the final summary kept
+//! it.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use async_trait::async_trait;
@@ -39,6 +46,8 @@ const PLANTED_SENTENCE: &str =
 struct CountingLlm {
     inner: Arc<LlamaCppLlm>,
     calls: AtomicUsize,
+    /// Responses to map prompts (identified by the note-taker system prompt).
+    map_notes: Mutex<Vec<String>>,
 }
 
 #[async_trait]
@@ -59,6 +68,9 @@ impl LlmModel for CountingLlm {
     ) -> Result<String, DomainError> {
         let n = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
         let response = self.inner.generate(prompt, options).await?;
+        if prompt.contains("meticulous meeting note-taker") {
+            self.map_notes.lock().unwrap().push(response.clone());
+        }
         // Diagnostics only: shows whether a note reached its output cap.
         eprintln!(
             "call {n}: max_tokens={}, response={} tokens",
@@ -193,13 +205,14 @@ async fn seed_meeting(utterances: &[String]) -> (MeetingId, Arc<SqliteMeetingSto
     (id, store)
 }
 
-/// Runs the use case and returns `(summary text blob, calls, seconds)`,
+/// Runs the use case and returns `(summary text blob, calls, map notes)`,
 /// asserting the structured General template came back.
-async fn run_summary(utterances: &[String]) -> (String, usize, f64) {
+async fn run_summary(utterances: &[String]) -> (String, usize, Vec<String>) {
     let model_path = model_from_env().expect("guarded by caller");
     let llm = Arc::new(CountingLlm {
         inner: Arc::new(LlamaCppLlm::load(&model_path).expect("load gguf")),
         calls: AtomicUsize::new(0),
+        map_notes: Mutex::new(Vec::new()),
     });
     let (id, store) = seed_meeting(utterances).await;
     let chars: usize = utterances.iter().map(String::len).sum();
@@ -228,12 +241,13 @@ async fn run_summary(utterances: &[String]) -> (String, usize, f64) {
         SummaryContent::General { .. } => {}
         other => panic!("expected General template, got {other:?}"),
     }
-    (json, calls, elapsed)
+    let notes = llm.map_notes.lock().unwrap().clone();
+    (json, calls, notes)
 }
 
 #[tokio::test]
 #[ignore = "requires ECHO_LLM_MODEL to point at a .gguf file"]
-async fn long_meeting_is_map_reduced_and_keeps_a_mid_transcript_fact() {
+async fn long_meeting_is_map_reduced_and_keeps_a_mid_transcript_fact_in_map_notes() {
     if model_from_env().is_none() {
         eprintln!("skipping: ECHO_LLM_MODEL not set");
         return;
@@ -244,13 +258,25 @@ async fn long_meeting_is_map_reduced_and_keeps_a_mid_transcript_fact() {
     let chars: usize = utterances.iter().map(String::len).sum();
     assert!(chars >= 35_000, "fixture too short: {chars} chars");
 
-    let (json, calls, _) = run_summary(&utterances).await;
+    let (json, calls, notes) = run_summary(&utterances).await;
 
     // >= 2 map calls + 1 reduce/final call.
     assert!(calls >= 3, "expected map-reduce (>= 3 calls), got {calls}");
+    let holders: Vec<usize> = notes
+        .iter()
+        .enumerate()
+        .filter(|(_, n)| n.contains(PLANTED_NUMBER))
+        .map(|(i, _)| i + 1)
+        .collect();
+    eprintln!(
+        "map notes: {}; planted fact in map note(s) {holders:?}; in final summary: {}",
+        notes.len(),
+        json.contains(PLANTED_NUMBER)
+    );
     assert!(
-        json.contains(PLANTED_NUMBER),
-        "planted fact ({PLANTED_NUMBER}) missing from summary:\n{json}"
+        !holders.is_empty(),
+        "planted fact ({PLANTED_NUMBER}) lost by the map step; notes:\n{}",
+        notes.join("\n=====\n")
     );
 }
 
