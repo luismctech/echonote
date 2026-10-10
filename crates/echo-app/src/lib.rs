@@ -15,6 +15,7 @@
 pub mod punct;
 pub mod sanitize;
 pub mod services;
+pub(crate) mod transcript;
 pub mod use_cases;
 
 pub use punct::NaivePunctuator;

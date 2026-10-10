@@ -27,7 +27,7 @@ pub use ports::audio::{
 };
 pub use ports::chat::{ChatAssistant, ChatMessage, ChatOptions, ChatRequest, ChatRole, ChatToken};
 pub use ports::diarizer::{Diarizer, SpeakerSpan};
-pub use ports::llm::{GenerateOptions, LlmModel};
+pub use ports::llm::{estimate_tokens, GenerateOptions, LlmModel, DEFAULT_CONTEXT_WINDOW};
 pub use ports::punctuator::Punctuator;
 pub use ports::resampler::Resampler;
 pub use ports::segmenter::{Segmenter, SpeakerSegment};

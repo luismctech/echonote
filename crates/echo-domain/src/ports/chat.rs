@@ -66,6 +66,7 @@ use async_trait::async_trait;
 use futures::stream::BoxStream;
 use serde::{Deserialize, Serialize};
 
+use super::llm::{estimate_tokens, DEFAULT_CONTEXT_WINDOW};
 use crate::DomainError;
 
 /// Author of a single message in a chat exchange.
@@ -250,6 +251,20 @@ pub trait ChatAssistant: Send + Sync {
     /// `"qwen3-14b-instruct-q4_k_m"`, `"llama-3.2-3b-instruct-q4_k_m"`.
     fn model_id(&self) -> &str;
 
+    /// Size of the context window in tokens, shared by the whole
+    /// request (messages plus the reply). The use case sizes the
+    /// transcript block against it. Same contract and default as
+    /// [`crate::LlmModel::context_window`].
+    fn context_window(&self) -> u32 {
+        DEFAULT_CONTEXT_WINDOW
+    }
+
+    /// Number of tokens `text` occupies for this model. Same contract
+    /// and conservative chars/3 default as [`crate::LlmModel::count_tokens`].
+    fn count_tokens(&self, text: &str) -> usize {
+        estimate_tokens(text)
+    }
+
     /// Run one chat turn and return a stream of [`ChatToken`]s.
     ///
     /// The returned stream:
@@ -385,6 +400,15 @@ mod tests {
             let tokens = self.tokens.clone();
             Ok(stream::iter(tokens.into_iter().map(Ok)).boxed())
         }
+    }
+
+    #[test]
+    fn token_budget_defaults_are_conservative() {
+        // `MockChatAssistant` overrides nothing, so it exercises the
+        // trait defaults every fake relies on.
+        let assistant = MockChatAssistant::new(vec![]);
+        assert_eq!(assistant.context_window(), 8_192);
+        assert_eq!(assistant.count_tokens("abcdefg"), 3);
     }
 
     #[tokio::test]

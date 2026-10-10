@@ -135,6 +135,14 @@ impl ChatAssistant for LlamaCppChat {
         &self.inner.model_id
     }
 
+    fn context_window(&self) -> u32 {
+        self.inner.n_ctx
+    }
+
+    fn count_tokens(&self, text: &str) -> usize {
+        self.inner.count_tokens(text)
+    }
+
     #[instrument(
         skip(self, request),
         fields(

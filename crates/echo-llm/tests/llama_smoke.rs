@@ -18,7 +18,7 @@
 use std::path::PathBuf;
 use std::time::Instant;
 
-use echo_domain::{GenerateOptions, LlmModel};
+use echo_domain::{ChatAssistant, GenerateOptions, LlmModel};
 use echo_llm::{LlamaCppLlm, LoadOptions};
 
 fn model_from_env() -> Option<PathBuf> {
@@ -95,6 +95,37 @@ async fn loads_model_and_completes_a_short_greedy_prompt() {
         elapsed.as_secs() < 60,
         "smoke completion took {elapsed:?}, something is very wrong"
     );
+}
+
+#[test]
+#[ignore = "requires ECHO_LLM_MODEL to point at a .gguf file"]
+fn reports_real_context_window_and_token_counts() {
+    let Some(model_path) = model_from_env() else {
+        eprintln!("skipping: ECHO_LLM_MODEL not set");
+        return;
+    };
+
+    let llm = LlamaCppLlm::load_with(
+        &model_path,
+        LoadOptions::default().with_n_ctx(2_048).with_n_threads(4),
+    )
+    .expect("load gguf");
+    let chat = llm.chat_handle();
+
+    assert_eq!(llm.context_window(), 2_048);
+    assert_eq!(chat.context_window(), 2_048);
+
+    let text = "Decidimos lanzar la versión nueva el lunes por la mañana.";
+    let real = llm.count_tokens(text);
+    assert!(real > 0, "a non-empty text must tokenize to something");
+    // The real tokenizer must beat the pessimistic chars/3 estimate,
+    // otherwise the override adds nothing over the port default.
+    assert!(
+        real <= echo_domain::estimate_tokens(text),
+        "real count {real} exceeds the conservative estimate"
+    );
+    assert_eq!(chat.count_tokens(text), real);
+    assert_eq!(llm.count_tokens(""), 0);
 }
 
 #[tokio::test]

@@ -27,19 +27,11 @@ use tracing::{info, instrument, warn};
 
 use echo_domain::{
     CustomTemplate, Definition, DomainError, GenerateOptions, InterviewQuote, LlmModel, Meeting,
-    MeetingId, MeetingStore, Speaker, Summary, SummaryContent, SummaryId, TEMPLATE_IDS,
+    MeetingId, MeetingStore, Summary, SummaryContent, SummaryId, TEMPLATE_IDS,
 };
 
 use crate::sanitize::strip_chat_tokens;
-
-/// Maximum characters of transcript text fed to the model. Qwen 3
-/// (and Qwen 2.5 as legacy fallback) ship with 32 k+ context but the
-/// KV cache cost scales linearly with it; ~6 k characters fits ~30
-/// minutes of speech and stays well within a 4 k token budget after
-/// Qwen's BPE tokenization (~3.5 chars/token in Spanish text). Longer
-/// meetings are summarised on a head + tail window — see
-/// [`render_transcript`].
-const MAX_TRANSCRIPT_CHARS: usize = 6_000;
+use crate::transcript::{self, Flavour};
 
 /// Token budget for the model's response. Generous enough for a full
 /// general summary with several action items; small enough that a
@@ -433,49 +425,9 @@ fn generate_opts() -> GenerateOptions {
 /// Render the meeting's transcript into a single block of text the
 /// LLM can ingest. Speakers are inlined as `Speaker N:` (or the user
 /// label, if assigned) so the model can attribute action items.
-///
-/// When the transcript is longer than [`MAX_TRANSCRIPT_CHARS`] we keep
-/// the first 2/3 from the head and the last 1/3 from the tail with
-/// an explicit `[…elision…]` marker. This is good enough for the MVP
-/// — long-meeting chunked summarisation lands in Sprint 2 with the
-/// chat use case.
+/// Over-long transcripts are truncated by [`transcript::render_truncated`].
 fn render_transcript(meeting: &Meeting) -> String {
-    let mut buf = String::new();
-    for seg in &meeting.segments {
-        let label = seg
-            .speaker_id
-            .and_then(|id| meeting.speakers.iter().find(|s| s.id == id))
-            .map(speaker_display_name)
-            .unwrap_or_else(|| "Speaker".to_string());
-        let text = seg.text.trim();
-        if text.is_empty() {
-            continue;
-        }
-        if !buf.is_empty() {
-            buf.push('\n');
-        }
-        buf.push_str(&label);
-        buf.push_str(": ");
-        buf.push_str(text);
-    }
-
-    if buf.chars().count() <= MAX_TRANSCRIPT_CHARS {
-        return buf;
-    }
-
-    // Head (4/6) + tail (2/6) split with an explicit elision marker.
-    let head_chars = MAX_TRANSCRIPT_CHARS * 4 / 6;
-    let tail_chars = MAX_TRANSCRIPT_CHARS - head_chars;
-    let head: String = buf.chars().take(head_chars).collect();
-    let tail: String = buf
-        .chars()
-        .rev()
-        .take(tail_chars)
-        .collect::<String>()
-        .chars()
-        .rev()
-        .collect();
-    format!("{head}\n[… (transcript truncated for length) …]\n{tail}")
+    transcript::render_truncated(meeting, Flavour::Summary)
 }
 
 /// Render the meeting's notes into a context block for the LLM.
@@ -495,12 +447,6 @@ fn render_notes(meeting: &Meeting) -> Option<String> {
         buf.push_str(&format!("[{min:02}:{sec:02}] {}", note.text));
     }
     Some(buf)
-}
-
-fn speaker_display_name(s: &Speaker) -> String {
-    s.label
-        .clone()
-        .unwrap_or_else(|| format!("Speaker {}", s.slot + 1))
 }
 
 fn language_instruction(language: Option<&str>) -> String {
@@ -906,9 +852,10 @@ mod tests {
     use pretty_assertions::assert_eq;
     use time::OffsetDateTime;
 
+    use crate::transcript::MAX_TRANSCRIPT_CHARS;
     use echo_domain::{
         ActionItem, AudioFormat, CreateMeeting, FinalizeMeeting, MeetingSearchHit, MeetingSummary,
-        Segment, SegmentId, SpeakerId,
+        Segment, SegmentId, Speaker, SpeakerId,
     };
 
     /// In-memory store with summary support. Other methods panic so

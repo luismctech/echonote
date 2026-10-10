@@ -40,12 +40,18 @@ use crate::llama_cpp_chat::LlamaCppChat;
 use crate::shared::LoadedModel;
 
 /// Default context window when the caller does not override it. Both
-/// Qwen 3 8B and 14B ship with `n_ctx_train = 32_768`; 8192 is
-/// generous enough for a full meeting transcript (~6 k chars ≈ 1.7 k
-/// tokens) + system prompt + chat history + 1 k output tokens, while
-/// keeping the per-context KV-cache allocation under ~200 MB for 8B
-/// Q4_K_M. Callers that need more (or want to save RAM) can pass
-/// `LlamaCppLlm::load_with(path, opts.with_n_ctx(...))`.
+/// Qwen 3 8B and 14B ship with `n_ctx_train = 32_768`; 8192 holds the
+/// system prompt, chat history and 1 k output tokens next to roughly
+/// 20 minutes of Spanish speech (~3.5 chars/token); longer meetings
+/// are budgeted against [`echo_domain::LlmModel::context_window`].
+///
+/// The KV cache is the cost that scales with it. Computed (not
+/// measured) from the published Qwen3-8B config — 36 layers, 8 KV
+/// heads, head_dim 128, f16 keys and values — it takes
+/// 36 * 8 * 128 * 2 * 2 B = 144 KiB per token, about 1.2 GB per
+/// context at 8,192 tokens (the figure scales with the model: Qwen3-14B
+/// has more layers). Callers that need more (or want to save RAM) can
+/// pass `LlamaCppLlm::load_with(path, opts.with_n_ctx(...))`.
 const DEFAULT_N_CTX: u32 = 8_192;
 
 /// Number of model layers to offload to the GPU when Metal/CUDA is
@@ -222,6 +228,14 @@ impl LlamaCppLlm {
 impl LlmModel for LlamaCppLlm {
     fn model_id(&self) -> &str {
         &self.inner.model_id
+    }
+
+    fn context_window(&self) -> u32 {
+        self.inner.n_ctx
+    }
+
+    fn count_tokens(&self, text: &str) -> usize {
+        self.inner.count_tokens(text)
     }
 
     #[instrument(skip(self, prompt, options), fields(prompt_chars = prompt.len(), max_tokens = options.max_tokens))]

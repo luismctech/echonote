@@ -51,16 +51,11 @@ use uuid::Uuid;
 
 use echo_domain::{
     ChatAssistant, ChatMessage, ChatOptions, ChatRequest, ChatRole, DomainError, Meeting,
-    MeetingId, MeetingStore, Note, Segment, SegmentId, Speaker,
+    MeetingId, MeetingStore, Note, SegmentId,
 };
 
 use crate::sanitize::strip_chat_tokens;
-
-/// Maximum characters of transcript text fed to the model. Same budget
-/// as [`crate::SummarizeMeeting`] — a 32 k context Qwen tolerates ~6 k
-/// chars of Spanish text comfortably and leaves room for the system
-/// prompt, the prior chat history and the model's reply.
-const MAX_TRANSCRIPT_CHARS: usize = 6_000;
+use crate::transcript::{self, Flavour, CITE_OPEN};
 
 /// Token cap for one assistant turn. Generous enough for a multi-
 /// paragraph answer with several citations; tight enough that a
@@ -73,10 +68,6 @@ const CHAT_MAX_TOKENS: u32 = 1_024;
 /// context window predictable.
 const MAX_HISTORY_TURNS: usize = 20;
 
-/// Marker prefix the model is told to use when citing a segment.
-/// Picked to be unambiguous (no overlap with English/Spanish prose)
-/// and short (cheap on tokens).
-const CITE_OPEN: &str = "[seg:";
 const CITE_CLOSE: char = ']';
 
 /// Errors surfaced **before** the streaming response starts. Anything
@@ -400,48 +391,14 @@ fn build_system_prompt(
 /// Format per non-empty segment:
 ///
 /// ```text
-/// [seg:UUID] Speaker N: text
+/// [seg:UUID] (m:ss) Speaker N: text
 /// ```
 ///
-/// When the rendered block exceeds [`MAX_TRANSCRIPT_CHARS`], the head
-/// (4/6) + tail (2/6) split with an explicit elision marker is reused
-/// from the summariser. Citation markers in the surviving slices stay
-/// intact, so any citation the model emits keeps pointing at a real
-/// segment id.
+/// Over-long transcripts are truncated by [`transcript::render_truncated`];
+/// citation markers in the surviving slices stay intact, so any citation
+/// the model emits keeps pointing at a real segment id.
 fn render_transcript_with_citations(meeting: &Meeting) -> String {
-    let mut buf = String::new();
-    for seg in &meeting.segments {
-        let text = seg.text.trim();
-        if text.is_empty() {
-            continue;
-        }
-        let label = seg
-            .speaker_id
-            .and_then(|id| meeting.speakers.iter().find(|s| s.id == id))
-            .map(speaker_display_name)
-            .unwrap_or_else(|| "Speaker".to_string());
-        if !buf.is_empty() {
-            buf.push('\n');
-        }
-        push_segment_line(&mut buf, seg, &label, text);
-    }
-
-    if buf.chars().count() <= MAX_TRANSCRIPT_CHARS {
-        return buf;
-    }
-
-    let head_chars = MAX_TRANSCRIPT_CHARS * 4 / 6;
-    let tail_chars = MAX_TRANSCRIPT_CHARS - head_chars;
-    let head: String = buf.chars().take(head_chars).collect();
-    let tail: String = buf
-        .chars()
-        .rev()
-        .take(tail_chars)
-        .collect::<String>()
-        .chars()
-        .rev()
-        .collect();
-    format!("{head}\n[… (transcript truncated for length) …]\n{tail}")
+    transcript::render_truncated(meeting, Flavour::Chat)
 }
 
 /// Render the user's notes as a block of timestamped lines.
@@ -469,26 +426,6 @@ fn render_notes(notes: &[Note]) -> String {
         write!(buf, "({mm}:{ss:02}) {text}").expect("write to String");
     }
     buf
-}
-
-fn push_segment_line(buf: &mut String, seg: &Segment, label: &str, text: &str) {
-    buf.push_str(CITE_OPEN);
-    buf.push_str(&seg.id.0.to_string());
-    buf.push_str("] ");
-    // Timestamp in mm:ss so the model can reference when things were said.
-    let secs = seg.start_ms / 1000;
-    let mm = secs / 60;
-    let ss = secs % 60;
-    write!(buf, "({mm}:{ss:02}) ").expect("write to String");
-    buf.push_str(label);
-    buf.push_str(": ");
-    buf.push_str(text);
-}
-
-fn speaker_display_name(s: &Speaker) -> String {
-    s.label
-        .clone()
-        .unwrap_or_else(|| format!("Speaker {}", s.slot + 1))
 }
 
 fn language_instruction(language: Option<&str>) -> String {
@@ -607,7 +544,7 @@ mod tests {
 
     use echo_domain::{
         AudioFormat, ChatToken, CreateMeeting, FinalizeMeeting, MeetingSearchHit, MeetingSummary,
-        SpeakerId, Summary,
+        Segment, Speaker, SpeakerId, Summary,
     };
 
     /// In-memory store with just enough surface for this use case.
