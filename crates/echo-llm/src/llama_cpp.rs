@@ -323,7 +323,7 @@ fn generate_blocking(
     let batch_capacity = prompt_tokens.len().max(INITIAL_BATCH_TOKENS);
     let mut batch = LlamaBatch::new(batch_capacity, 1);
     let last_index = (prompt_tokens.len() as i32) - 1;
-    for (i, token) in (0_i32..).zip(prompt_tokens.into_iter()) {
+    for (i, token) in (0_i32..).zip(prompt_tokens) {
         let is_last = i == last_index;
         batch
             .add(token, i, &[0], is_last)
@@ -479,7 +479,7 @@ fn generate_stream_inner(
     let batch_capacity = prompt_tokens.len().max(INITIAL_BATCH_TOKENS);
     let mut batch = LlamaBatch::new(batch_capacity, 1);
     let last_index = (prompt_tokens.len() as i32) - 1;
-    for (i, token) in (0_i32..).zip(prompt_tokens.into_iter()) {
+    for (i, token) in (0_i32..).zip(prompt_tokens) {
         let is_last = i == last_index;
         batch
             .add(token, i, &[0], is_last)

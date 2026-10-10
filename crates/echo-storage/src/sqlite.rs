@@ -929,8 +929,14 @@ mod tests {
             .await
             .unwrap();
         let s = segment(0, 500, "once");
-        store.append_segments(id, &[s.clone()]).await.unwrap();
-        store.append_segments(id, &[s.clone()]).await.unwrap();
+        store
+            .append_segments(id, std::slice::from_ref(&s))
+            .await
+            .unwrap();
+        store
+            .append_segments(id, std::slice::from_ref(&s))
+            .await
+            .unwrap();
         finalize_meeting(&store, id).await;
         let listed = store.list(0).await.unwrap();
         assert_eq!(listed[0].segment_count, 1);

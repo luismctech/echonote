@@ -96,8 +96,9 @@ const POWERSET_MAP: [[bool; 3]; POWERSET_CLASSES] = [
 /// no `exp` is needed) and expands it to the set of active speakers.
 /// Trailing values that do not fill a whole frame are ignored.
 pub fn decode_powerset(log_probs: &[f32]) -> Vec<[bool; 3]> {
-    log_probs
-        .chunks_exact(POWERSET_CLASSES)
+    let (frames, _remainder) = log_probs.as_chunks::<POWERSET_CLASSES>();
+    frames
+        .iter()
         .map(|frame| {
             let best = frame
                 .iter()

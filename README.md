@@ -221,7 +221,7 @@ Models are downloaded on-demand from the built-in model manager (**Settings → 
 | Layer | Technology |
 |-------|------------|
 | Desktop shell | [Tauri 2](https://tauri.app/) (Rust + native webview) |
-| Backend | Rust 1.88+ |
+| Backend | Rust 1.99+ |
 | Frontend | React 18, TypeScript, Tailwind CSS, i18n (en / es) |
 | Speech-to-text | [whisper.cpp](https://github.com/ggerganov/whisper.cpp) |
 | Summaries & chat | [llama.cpp](https://github.com/ggerganov/llama.cpp) (Qwen 3) |

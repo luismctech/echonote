@@ -27,7 +27,7 @@ members = [
 [workspace.package]
 version = "0.6.0"
 edition = "2021"
-rust-version = "1.88"
+rust-version = "1.99"
 authors = ["Luis MC <luismctechdev@gmail.com>"]
 license = "LicenseRef-PolyForm-Noncommercial-1.0.0"
 repository = "https://github.com/luismctech/echonote"
