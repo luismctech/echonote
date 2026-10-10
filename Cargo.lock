@@ -1398,6 +1398,7 @@ dependencies = [
  "async-trait",
  "echo-audio",
  "echo-domain",
+ "echo-llm",
  "echo-storage",
  "futures",
  "pretty_assertions",

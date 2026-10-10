@@ -34,3 +34,7 @@ specta.workspace = true
 pretty_assertions.workspace = true
 echo-audio = { path = "../echo-audio" }
 echo-storage = { path = "../echo-storage" }
+# Only for the gated real-model acceptance test (`tests/summary_real_model.rs`).
+# It is `#[ignore]`d and skips without `ECHO_LLM_MODEL`, so the default
+# `cargo test` never loads a model.
+echo-llm = { path = "../echo-llm" }
