@@ -1266,6 +1266,21 @@ label: string | null }
  */
 export type SpeakerId = string
 /**
+ * One offline-refinement merge: `absorbed` is collapsed into
+ * `surviving`. Persisted segments referring to `absorbed` must be
+ * rewritten to point at `surviving`; the `absorbed` speaker row is
+ * dropped from the meeting.
+ */
+export type SpeakerMerge = { 
+/**
+ * Speaker the offline pass decided was a duplicate.
+ */
+absorbed: SpeakerId; 
+/**
+ * Speaker the absorbed one is folded into.
+ */
+surviving: SpeakerId }
+/**
  * Options the frontend may pass when starting a streaming session.
  * All fields optional; defaults match `StreamingOptions::default()`.
  */
@@ -1453,6 +1468,18 @@ export type TranscriptEvent =
  * the ASR backend. Useful for UI / metrics.
  */
 { type: "skipped"; sessionId: StreamingSessionId; chunkIndex: number; offsetMs: number; durationMs: number; rms: number } | 
+/**
+ * Offline diarization refinement after the streaming loop ended.
+ * 
+ * Carries `(absorbed_id, surviving_id)` pairs the storage layer
+ * must apply to already-persisted segments: every reference to
+ * `absorbed_id` is rewritten to `surviving_id`, and the absorbed
+ * speaker row is deleted. Always emitted *before* [`Stopped`] so
+ * consumers can finalise the meeting with the correct speaker
+ * count. Empty `merges` is allowed — the recorder treats it as a
+ * no-op.
+ */
+{ type: "speakersMerged"; sessionId: StreamingSessionId; merges: SpeakerMerge[] } | 
 /**
  * The pipeline finished cleanly (caller stopped or stream EOF).
  */

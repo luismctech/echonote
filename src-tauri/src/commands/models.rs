@@ -186,12 +186,24 @@ fn model_catalog(root: &std::path::Path) -> Vec<(ModelInfo, &'static str, Option
         ),
         (
             ModelInfo {
+                id: "embedder-campplus-multi".into(),
+                label: "CAM++ Multilingüe".into(),
+                description: "Speaker identification · multilingual (ZH+EN), better on Spanish".into(),
+                kind: "embedder".into(),
+                present: present("models/embedder/campplus_zh_en_common_advanced.onnx"),
+                size_bytes: 28_281_164,
+            },
+            "https://huggingface.co/csukuangfj/speaker-embedding-models/resolve/main/3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx",
+            Some("aa3cfc16963a10586a9393f5035d6d6b57e98d358b347f80c2a30bf4f00ceba2"),
+        ),
+        (
+            ModelInfo {
                 id: "segmenter-pyannote".into(),
                 label: "pyannote 3.0".into(),
                 description: "Detects speaker changes in conversation".into(),
                 kind: "segmenter".into(),
                 present: present("models/segmenter/pyannote_segmentation_3.onnx"),
-                size_bytes: 17_000_000,
+                size_bytes: 5_992_913,
             },
             "https://huggingface.co/csukuangfj/sherpa-onnx-pyannote-segmentation-3-0/resolve/main/model.onnx",
             Some("220ad67ca923bef2fa91f2390c786097bf305bceb5e261d4af67b38e938e1079"),
@@ -214,6 +226,7 @@ fn model_dest_path(id: &str) -> Option<&'static str> {
         "vad-silero" => Some("models/vad/silero_vad.onnx"),
         "embedder-eres2net" => Some("models/embedder/eres2net_en_voxceleb.onnx"),
         "embedder-camplusplus" => Some("models/embedder/campplus_en_voxceleb.onnx"),
+        "embedder-campplus-multi" => Some("models/embedder/campplus_zh_en_common_advanced.onnx"),
         "segmenter-pyannote" => Some("models/segmenter/pyannote_segmentation_3.onnx"),
         _ => None,
     }

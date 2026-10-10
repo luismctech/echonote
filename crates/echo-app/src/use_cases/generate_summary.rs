@@ -941,6 +941,14 @@ mod tests {
         ) -> Result<bool, DomainError> {
             unreachable!()
         }
+        async fn merge_speakers(
+            &self,
+            _: MeetingId,
+            _: SpeakerId,
+            _: SpeakerId,
+        ) -> Result<bool, DomainError> {
+            unreachable!()
+        }
         async fn finalize(
             &self,
             _: MeetingId,

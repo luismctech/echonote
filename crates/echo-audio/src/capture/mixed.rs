@@ -533,27 +533,38 @@ mod tests {
         // Mute sys before any frames are produced.
         ctrl.sys_active.store(false, Ordering::Relaxed);
 
-        let mut received = Vec::new();
-        for _ in 0..4 {
-            let next = tokio::time::timeout(Duration::from_millis(200), stream.next_frame()).await;
-            if let Ok(Some(f)) = next {
-                received.extend_from_slice(&f.samples);
-            }
+        // Drain every frame the mixer emits for the single mic frame.
+        // The scripted sources block after their first frame, so a
+        // timeout with no frame means the mixer has flushed its buffers.
+        let mut frames = Vec::new();
+        while let Ok(Some(f)) =
+            tokio::time::timeout(Duration::from_millis(200), stream.next_frame()).await
+        {
+            frames.push(f);
         }
 
         assert!(
-            !received.is_empty(),
+            !frames.is_empty(),
             "mixer must keep producing with sys muted"
         );
-        let r = rms(&received);
-        // A 440 Hz sine at amplitude 0.5 has RMS ≈ 0.354. Resampling
-        // and chunk-edge effects can pull it down slightly, but it must
-        // stay well above the "half" floor that the old per-index mixer
-        // produced (which would land around 0.17 because it averaged
-        // mic with zeroed sys).
+
+        // "Unattenuated" means at least one emitted frame carries the mic
+        // sine at (near) full energy. We check the PEAK per-frame RMS,
+        // not the RMS of the whole concatenation: when the muted sys
+        // buffer crosses the frame threshold before the mic buffer does,
+        // the mixer emits leading silence frames, and how many is
+        // scheduling-dependent — averaging them in is what made the old
+        // concatenated-RMS assertion flaky. A 440 Hz sine at amplitude
+        // 0.5 has RMS ≈ 0.354; the old halving bug ((mic+0)*0.5) would
+        // cap every frame at ≈0.177, so a 0.3 floor cleanly separates
+        // "fixed" from "regressed" regardless of interleaved silence.
+        let peak_rms = frames
+            .iter()
+            .map(|f| rms(&f.samples))
+            .fold(0.0_f32, f32::max);
         assert!(
-            r > 0.2,
-            "mic-only RMS {r} suggests the muted sys is still attenuating the mix"
+            peak_rms > 0.3,
+            "muted sys still attenuating: peak per-frame RMS {peak_rms} (expected ≈0.354)"
         );
     }
 }

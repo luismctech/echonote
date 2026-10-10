@@ -155,6 +155,14 @@ mod tests {
             s.label = label.map(str::to_string);
             Ok(true)
         }
+        async fn merge_speakers(
+            &self,
+            _: MeetingId,
+            _: SpeakerId,
+            _: SpeakerId,
+        ) -> Result<bool, DomainError> {
+            unreachable!("rename_speaker tests don't exercise merges")
+        }
         async fn finalize(
             &self,
             _: MeetingId,

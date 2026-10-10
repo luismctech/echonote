@@ -820,6 +820,9 @@ async fn run_stream(
             Some(TranscriptEvent::Resumed { .. }) => {
                 println!("  ▸ resumed");
             }
+            Some(TranscriptEvent::SpeakersMerged { merges, .. }) => {
+                println!("  ⤳ offline refine merged {} speaker(s)", merges.len());
+            }
             None => break,
         }
     }

@@ -243,6 +243,42 @@ impl MeetingRecorder {
                     Ok(None)
                 }
             }
+            TranscriptEvent::SpeakersMerged { session_id, merges } => {
+                let meeting_id = self
+                    .sessions
+                    .lock()
+                    .await
+                    .get(session_id)
+                    .map(|s| s.meeting_id);
+                let Some(meeting_id) = meeting_id else {
+                    warn!(%session_id, "recorder: speakers-merged for unknown session");
+                    return Ok(None);
+                };
+                for m in merges {
+                    if m.absorbed == m.surviving {
+                        continue;
+                    }
+                    if let Err(e) = self
+                        .store
+                        .merge_speakers(meeting_id, m.absorbed, m.surviving)
+                        .await
+                    {
+                        // Best-effort: a single merge failing shouldn't
+                        // abort the session's finalisation. Surface in
+                        // logs so the operator can see the DB is stale.
+                        warn!(
+                            %session_id, %meeting_id,
+                            absorbed = %m.absorbed, surviving = %m.surviving, error = %e,
+                            "recorder: merge_speakers failed"
+                        );
+                    }
+                }
+                debug!(
+                    %session_id, %meeting_id, merges = merges.len(),
+                    "recorder: offline diarization merges applied"
+                );
+                Ok(Some(meeting_id))
+            }
             // Paused / Resumed are informational UI events — the
             // recorder doesn't persist anything for them.
             TranscriptEvent::Paused { .. } | TranscriptEvent::Resumed { .. } => Ok(None),
@@ -378,6 +414,33 @@ mod tests {
             };
             s.label = label.map(|l| l.to_string());
             Ok(true)
+        }
+        async fn merge_speakers(
+            &self,
+            meeting_id: MeetingId,
+            absorbed: SpeakerId,
+            surviving: SpeakerId,
+        ) -> Result<bool, DomainError> {
+            let mut guard = self.meetings.lock().unwrap();
+            let Some(m) = guard.iter_mut().find(|m| m.summary.id == meeting_id) else {
+                return Ok(false);
+            };
+            if !m.speakers.iter().any(|s| s.id == surviving) {
+                return Ok(false);
+            }
+            let mut changed = false;
+            for seg in &mut m.segments {
+                if seg.speaker_id == Some(absorbed) {
+                    seg.speaker_id = Some(surviving);
+                    changed = true;
+                }
+            }
+            let before = m.speakers.len();
+            m.speakers.retain(|s| s.id != absorbed);
+            if m.speakers.len() != before {
+                changed = true;
+            }
+            Ok(changed)
         }
         async fn list_speakers(&self, meeting_id: MeetingId) -> Result<Vec<Speaker>, DomainError> {
             let guard = self.meetings.lock().unwrap();

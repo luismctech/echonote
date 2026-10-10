@@ -199,6 +199,57 @@ impl MeetingStore for SqliteMeetingStore {
         Ok(result.rows_affected() > 0)
     }
 
+    async fn merge_speakers(
+        &self,
+        meeting_id: MeetingId,
+        absorbed: SpeakerId,
+        surviving: SpeakerId,
+    ) -> Result<bool, DomainError> {
+        // Two-step in a single transaction so we never end up with
+        // segments pointing at a deleted speaker row even if a crash
+        // wedges the connection between statements.
+        let meeting_str = meeting_id.to_string();
+        let absorbed_str = absorbed.0.to_string();
+        let surviving_str = surviving.0.to_string();
+
+        let mut tx = self.pool.begin().await.map_err(map_sqlx("begin tx"))?;
+
+        // Bail out cleanly if `surviving` is not actually a speaker on
+        // this meeting — applying the rewrite would orphan segments.
+        let surviving_exists: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM speakers WHERE id = ? AND meeting_id = ?")
+                .bind(&surviving_str)
+                .bind(&meeting_str)
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(map_sqlx("verify surviving speaker"))?;
+        if surviving_exists == 0 {
+            tx.rollback().await.map_err(map_sqlx("rollback tx"))?;
+            return Ok(false);
+        }
+
+        let seg_update = sqlx::query(
+            "UPDATE segments SET speaker_id = ? \
+             WHERE meeting_id = ? AND speaker_id = ?",
+        )
+        .bind(&surviving_str)
+        .bind(&meeting_str)
+        .bind(&absorbed_str)
+        .execute(&mut *tx)
+        .await
+        .map_err(map_sqlx("rewrite segments speaker_id"))?;
+
+        let row_delete = sqlx::query("DELETE FROM speakers WHERE id = ? AND meeting_id = ?")
+            .bind(&absorbed_str)
+            .bind(&meeting_str)
+            .execute(&mut *tx)
+            .await
+            .map_err(map_sqlx("delete absorbed speaker"))?;
+
+        tx.commit().await.map_err(map_sqlx("commit tx"))?;
+        Ok(seg_update.rows_affected() > 0 || row_delete.rows_affected() > 0)
+    }
+
     async fn rename_meeting(
         &self,
         meeting_id: MeetingId,

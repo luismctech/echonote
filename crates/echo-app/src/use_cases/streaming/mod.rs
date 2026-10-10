@@ -33,8 +33,8 @@ use tracing::{debug, error, info, warn};
 
 use echo_domain::{
     AudioCapture, AudioFormat, CaptureSpec, Diarizer, DomainError, Punctuator, Resampler, Sample,
-    SpeakerId, StreamingOptions, StreamingSessionId, TranscribeOptions, Transcriber,
-    TranscriptEvent, Vad, VoiceState,
+    SpeakerId, SpeakerMerge, SpeakerSpan, StreamingOptions, StreamingSessionId, TranscribeOptions,
+    Transcriber, TranscriptEvent, Vad, VoiceState,
 };
 
 /// Capacity of the event channel. ~10 minutes of headroom for a
@@ -474,6 +474,35 @@ async fn run_pipeline(
         total_segments = total_segments.saturating_add(segs);
     }
 
+    // Offline diarization refinement: re-cluster the embeddings we
+    // accumulated during streaming, then emit the resulting merges so
+    // the recorder can rewrite already-persisted segments. Adapters
+    // that don't opt into offline accumulation return an empty vec,
+    // which we filter out to keep the wire quiet on the common case.
+    if let Some(d) = diarizer.as_deref() {
+        let merges = d.refine_offline();
+        if !merges.is_empty() {
+            let payload: Vec<SpeakerMerge> = merges
+                .into_iter()
+                .map(|(absorbed, surviving)| SpeakerMerge {
+                    absorbed,
+                    surviving,
+                })
+                .collect();
+            info!(
+                %session_id,
+                merges = payload.len(),
+                "offline diarization refinement collapsed over-split speakers"
+            );
+            let _ = events
+                .send(TranscriptEvent::SpeakersMerged {
+                    session_id,
+                    merges: payload,
+                })
+                .await;
+        }
+    }
+
     info!(
         %session_id,
         total_audio_ms,
@@ -576,9 +605,15 @@ async fn process_chunk(
     // ms vs Whisper's hundreds), so the lack of parallelism here is
     // deliberate: keeping the borrow on `diarizer` exclusive is
     // simpler than spawning a second task and joining.
-    let speaker = match diarizer.as_deref_mut() {
-        Some(d) => assign_speaker(d, &resampled, chunk_index, session_id).await,
-        None => None,
+    //
+    // `spans` may contain overlapping ranges when two speakers talk
+    // simultaneously — the segmenter inside the diarizer emits one
+    // span per active speaker per frame. We preserve those overlaps
+    // and let the per-segment attribution below pick the dominant
+    // speaker for each Whisper segment by sample-window overlap.
+    let spans = match diarizer.as_deref_mut() {
+        Some(d) => assign_speaker_spans(d, &resampled, chunk_index, session_id).await,
+        None => Vec::new(),
     };
 
     let asr_started = Instant::now();
@@ -596,16 +631,21 @@ async fn process_chunk(
                     seg.text = p.punctuate(&seg.text, lang);
                 }
             }
-            // Make segment timestamps absolute relative to the session start.
+            // Attribute each segment to the speaker whose span overlaps
+            // it the most, then shift its timestamps to session time.
+            // Order matters: speaker attribution uses chunk-local time
+            // (before the offset_ms shift) so the sample-window math
+            // lines up with the diarizer's chunk-relative spans.
             for seg in &mut transcript.segments {
+                if !spans.is_empty() {
+                    let sample_start = ms_to_chunk_samples(seg.start_ms);
+                    let sample_end = ms_to_chunk_samples(seg.end_ms);
+                    if let Some(id) = dominant_span(&spans, sample_start, sample_end) {
+                        seg.speaker_id = Some(id);
+                    }
+                }
                 seg.start_ms = seg.start_ms.saturating_add(offset_ms);
                 seg.end_ms = seg.end_ms.saturating_add(offset_ms);
-                // Stamp the speaker on every segment in this chunk so
-                // the storage layer can persist it without needing the
-                // chunk-level event.
-                if let Some((id, _)) = speaker {
-                    seg.speaker_id = Some(id);
-                }
             }
             let segs = transcript.segments.len() as u32;
             let rtf = if duration_ms == 0 {
@@ -614,6 +654,9 @@ async fn process_chunk(
                 (asr_elapsed.as_secs_f32())
                     / (Duration::from_millis(u64::from(duration_ms)).as_secs_f32())
             };
+            // Chunk-level speaker for the UI palette: dominant span
+            // across the entire chunk by sample-weighted majority.
+            let chunk_dominant = chunk_dominant_speaker(&spans);
             let _ = events
                 .send(TranscriptEvent::Chunk {
                     session_id,
@@ -622,8 +665,8 @@ async fn process_chunk(
                     segments: transcript.segments,
                     language: transcript.language,
                     rtf,
-                    speaker_id: speaker.map(|(id, _)| id),
-                    speaker_slot: speaker.map(|(_, slot)| slot),
+                    speaker_id: chunk_dominant.map(|(id, _)| id),
+                    speaker_slot: chunk_dominant.map(|(_, slot)| slot),
                 })
                 .await;
             segs
@@ -635,43 +678,77 @@ async fn process_chunk(
     }
 }
 
-/// Run the diarizer over `samples` and look up the assigned speaker's
-/// arrival-order slot. Returns `None` when the diarizer chose not to
-/// embed (chunk too short, low confidence, …) or errored — diarization
-/// is *strictly* best-effort, so we never abort the pipeline because
-/// of it.
-async fn assign_speaker(
+/// Convert chunk-local milliseconds to a chunk-local sample index at
+/// the pipeline's canonical 16 kHz rate. Used to align Whisper
+/// segments (which report time) with diarizer spans (which report
+/// sample indices) inside the same chunk.
+fn ms_to_chunk_samples(ms: u32) -> usize {
+    (u64::from(ms) * u64::from(echo_audio_whisper_rate()) / 1_000) as usize
+}
+
+/// Sample-weighted majority across the chunk: returns the
+/// `(SpeakerId, slot)` whose total active duration is largest. `None`
+/// when the diarizer emitted no spans.
+fn chunk_dominant_speaker(spans: &[SpeakerSpan]) -> Option<(SpeakerId, u32)> {
+    if spans.is_empty() {
+        return None;
+    }
+    let mut totals: Vec<(SpeakerId, u32, usize)> = Vec::with_capacity(spans.len());
+    for span in spans {
+        let len = span.len_samples();
+        if let Some((_, _, acc)) = totals.iter_mut().find(|(id, _, _)| *id == span.speaker_id) {
+            *acc += len;
+        } else {
+            totals.push((span.speaker_id, span.slot, len));
+        }
+    }
+    totals
+        .into_iter()
+        .max_by_key(|(_, _, n)| *n)
+        .map(|(id, slot, _)| (id, slot))
+}
+
+/// Find the speaker whose span overlaps the `[start, end)` window the
+/// most. `None` when none of the spans intersect the window.
+fn dominant_span(spans: &[SpeakerSpan], start: usize, end: usize) -> Option<SpeakerId> {
+    let mut best: Option<(SpeakerId, usize)> = None;
+    for span in spans {
+        let ov = span.overlap_samples(start, end);
+        if ov == 0 {
+            continue;
+        }
+        best = Some(match best {
+            Some((_, prev)) if prev >= ov => best.unwrap(),
+            _ => (span.speaker_id, ov),
+        });
+    }
+    best.map(|(id, _)| id)
+}
+
+/// Run the diarizer over `samples` and return every speaker-attributed
+/// span in the chunk. Returns an empty vec when the diarizer chose not
+/// to embed (chunk too short, low confidence, …) or errored —
+/// diarization is *strictly* best-effort, so we never abort the
+/// pipeline because of it.
+///
+/// The returned spans may overlap when two speakers talk
+/// simultaneously; callers are expected to handle overlap by mapping
+/// individual Whisper segments to the dominant overlapping span,
+/// rather than collapsing the chunk to a single speaker.
+async fn assign_speaker_spans(
     diarizer: &mut dyn Diarizer,
     samples: &[Sample],
     chunk_index: u32,
     session_id: StreamingSessionId,
-) -> Option<(SpeakerId, u32)> {
-    match diarizer.assign(samples).await {
-        Ok(Some(id)) => {
-            let slot = diarizer
-                .speakers()
-                .into_iter()
-                .find(|s| s.id == id)
-                .map(|s| s.slot)
-                .unwrap_or_else(|| {
-                    // Shouldn't happen — assign() just told us this id
-                    // exists. Log and fall back to slot 0 so the UI
-                    // still gets *some* colour.
-                    warn!(
-                        %session_id, chunk_index, %id,
-                        "diarizer returned id not present in speakers() snapshot"
-                    );
-                    0
-                });
-            Some((id, slot))
-        }
-        Ok(None) => None,
+) -> Vec<SpeakerSpan> {
+    match diarizer.assign_spans(samples).await {
+        Ok(spans) => spans,
         Err(e) => {
             warn!(
                 %session_id, chunk_index, error = %e,
                 "diarizer failed; chunk will be unlabelled"
             );
-            None
+            Vec::new()
         }
     }
 }

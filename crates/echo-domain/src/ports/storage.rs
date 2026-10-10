@@ -103,6 +103,26 @@ pub trait MeetingStore: Send + Sync {
         label: Option<&str>,
     ) -> Result<bool, DomainError>;
 
+    /// Collapse one speaker into another for this meeting.
+    ///
+    /// Rewrites every `segments.speaker_id` referencing `absorbed` to
+    /// `surviving`, then deletes the `absorbed` row. Used by the
+    /// offline diarization refinement pass invoked at the end of a
+    /// streaming session to fix online over-splits.
+    ///
+    /// Idempotent: if `absorbed` no longer exists the call succeeds
+    /// with `Ok(false)`. Returns `Ok(true)` when at least one
+    /// speaker or segment row was modified. If `surviving` does not
+    /// exist the call is a no-op (returns `Ok(false)`) — callers
+    /// should keep both ids in sync with the diarizer's view of the
+    /// meeting.
+    async fn merge_speakers(
+        &self,
+        meeting_id: MeetingId,
+        absorbed: SpeakerId,
+        surviving: SpeakerId,
+    ) -> Result<bool, DomainError>;
+
     /// Update the display title of a meeting. Returns `false` when
     /// the meeting id was not found.
     async fn rename_meeting(&self, meeting_id: MeetingId, title: &str)

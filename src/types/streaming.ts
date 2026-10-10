@@ -110,4 +110,27 @@ export type TranscriptEvent =
   | {
       type: "resumed";
       sessionId: StreamingSessionId;
+    }
+  | {
+      /**
+       * Offline diarization refinement applied at end-of-session.
+       * Carries `(absorbed, surviving)` SpeakerId pairs; the recorder
+       * has already rewritten persisted segments and dropped absorbed
+       * speaker rows by the time the frontend sees this. UI listeners
+       * may use it to refresh any in-memory speakers list they kept.
+       */
+      type: "speakersMerged";
+      sessionId: StreamingSessionId;
+      merges: SpeakerMerge[];
     };
+
+/**
+ * One offline-refinement merge: `absorbed` is collapsed into
+ * `surviving`. Persisted segments referring to `absorbed` are
+ * rewritten to point at `surviving`; the `absorbed` speaker row is
+ * dropped from the meeting.
+ */
+export type SpeakerMerge = {
+  absorbed: SpeakerId;
+  surviving: SpeakerId;
+};

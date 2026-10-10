@@ -316,7 +316,7 @@ impl AppState {
         let seg_model_path = resolve_asset_path(
             &data_root,
             env_override("ECHO_SEG_MODEL"),
-            "models/segmenter/pyannote_segmentation_3.onnx",
+            preferred_segmenter_model(&data_root),
         );
         let llm_model_path = resolve_asset_path(
             &data_root,
@@ -482,25 +482,52 @@ impl AppState {
         // than ERes2Net 192-dim. In controlled English fixtures
         // cross-speaker cosine is ~0.57, but real-world Spanish podcasts
         // (same mic, same gender, similar timbre) can push cross-speaker
-        // to 0.70–0.78. We set:
-        //   - similarity_threshold = 0.78: high enough to separate same-
-        //     gender speakers sharing a mic, low enough that the same
-        //     speaker's centroids don't over-split.
-        //   - merge_threshold = 1.0: DISABLE online centroid merging.
-        //     The EMA centroids drift toward each other over time, and at
-        //     0.85 they cascade-merge all speakers into one. The offline
-        //     AHC pass (refine_offline) handles merging properly after the
-        //     session ends, using full-session means instead of noisy EMAs.
+        // to 0.70–0.85.
+        //
+        // Hard case: a video played through speakers and captured by a
+        // single mic — every voice shares the same acoustic path (same
+        // bocina, same room reverb, same compression) so cosines pile
+        // up in the 0.80–0.90 band even for clearly distinct speakers.
+        // That's why we sit at 0.85 by default: high enough to split
+        // most video-style recordings, low enough that the same speaker
+        // doesn't over-split across short streaming chunks. Real
+        // in-room meetings rarely have cross-speaker cosine that high,
+        // so the same threshold works for both. Users who hit edge
+        // cases can override via ECHO_DIAR_SIM_THRESHOLD (dev builds).
+        //
+        // `merge_threshold = 1.0` keeps online merging disabled — the
+        // EMA centroids drift toward each other over time and would
+        // cascade-merge all speakers at any threshold < 1.0. The
+        // offline AHC pass (refine_offline) handles merging using
+        // full-session means instead of noisy EMAs.
+        let env_sim_threshold = if cfg!(debug_assertions) {
+            std::env::var("ECHO_DIAR_SIM_THRESHOLD")
+                .ok()
+                .and_then(|v| v.parse::<f32>().ok())
+        } else {
+            None
+        };
         let cluster_cfg = if file_name.contains("camplusplus") || file_name.contains("campplus") {
             echo_diarize::OnlineClusterConfig {
-                similarity_threshold: 0.78,
+                similarity_threshold: env_sim_threshold.unwrap_or(0.85),
                 merge_threshold: 1.0, // disable online merge for CAM++
                 ..Default::default()
             }
         } else {
-            echo_diarize::OnlineClusterConfig::default()
+            // ERes2Net (192-dim, lower cross-speaker baseline). 0.65 is
+            // calibrated for video-style input where cosines run hot;
+            // the old 0.55 default over-split heavily on real meetings
+            // but is still useful as a fallback.
+            echo_diarize::OnlineClusterConfig {
+                similarity_threshold: env_sim_threshold.unwrap_or(0.65),
+                ..Default::default()
+            }
         };
-        let mut diarizer = OnlineDiarizer::new(embedder, cluster_cfg);
+        // `with_offline_refinement` enables embedding accumulation so
+        // the streaming pipeline can run an AHC pass at end-of-session
+        // and emit SpeakersMerged. Without this the embedder's online
+        // over-splits would persist in the meeting record forever.
+        let mut diarizer = OnlineDiarizer::new(embedder, cluster_cfg).with_offline_refinement();
 
         // Attach pyannote segmenter if the model file is installed.
         if self.seg_model_path.exists() {
@@ -671,6 +698,7 @@ fn preferred_embed_model(root: &Path) -> &'static str {
         // The preference stores the relative path directly.
         // Match against known static paths to return &'static str.
         const KNOWN: &[&str] = &[
+            "models/embedder/campplus_zh_en_common_advanced.onnx",
             "models/embedder/campplus_en_voxceleb.onnx",
             "models/embedder/eres2net_en_voxceleb.onnx",
         ];
@@ -692,6 +720,22 @@ fn preferred_embed_model(root: &Path) -> &'static str {
         }
     }
     "models/embedder/eres2net_en_voxceleb.onnx"
+}
+
+/// Prefer the tract-compatible (InstanceNorm-decomposed) pyannote
+/// segmenter export when present, falling back to the upstream sherpa
+/// export. The upstream file does NOT load in tract 0.22
+/// (`InstanceNormalization` fails `into_optimized()`), so with only the
+/// upstream file installed `build_diarizer` logs a warning and runs the
+/// whole-chunk path. See `scripts/patch-pyannote-segmenter.py`.
+fn preferred_segmenter_model(root: &Path) -> &'static str {
+    const TRACT: &str = "models/segmenter/pyannote_segmentation_3_tract.onnx";
+    const UPSTREAM: &str = "models/segmenter/pyannote_segmentation_3.onnx";
+    if root.join(TRACT).exists() {
+        TRACT
+    } else {
+        UPSTREAM
+    }
 }
 
 fn preferred_asr_model(root: &Path) -> &'static str {
@@ -766,7 +810,10 @@ pub(crate) fn path_to_catalog_id(path: &Path) -> Option<String> {
         "silero_vad.onnx" => "vad-silero",
         "eres2net_en_voxceleb.onnx" => "embedder-eres2net",
         "campplus_en_voxceleb.onnx" => "embedder-camplusplus",
-        "pyannote_segmentation_3.onnx" => "segmenter-pyannote",
+        "campplus_zh_en_common_advanced.onnx" => "embedder-campplus-multi",
+        "pyannote_segmentation_3.onnx" | "pyannote_segmentation_3_tract.onnx" => {
+            "segmenter-pyannote"
+        }
         _ => return None,
     };
     Some(id.to_string())

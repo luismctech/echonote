@@ -246,6 +246,12 @@ export function useRecordingSession({
       case "resumed":
         dispatch({ type: "STREAMING_RESUMED" });
         break;
+      case "speakersMerged":
+        // Backend already rewrote the persisted segments and dropped
+        // the absorbed speaker rows; this event is informational only
+        // for live UI. The meeting fetch on STREAMING_STOPPED will
+        // pick up the consolidated speaker list.
+        break;
     }
   }, [t]);
 

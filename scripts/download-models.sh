@@ -22,6 +22,8 @@
 #                                             # (requires Python; see Pack C below)
 #   scripts/download-models.sh vad            # Silero VAD v5.1.2 (~2 MB)
 #   scripts/download-models.sh embed          # 3D-Speaker ERes2Net (~26 MB)
+#   scripts/download-models.sh cam-plus-plus  # CAM++ EN-VoxCeleb embedder (~28 MB)
+#   scripts/download-models.sh embed-multi    # CAM++ multilingual zh_en embedder (~27 MB, better on Spanish)
 #   scripts/download-models.sh segmenter      # pyannote-segmentation-3.0 (~17 MB)
 #   scripts/download-models.sh llm            # Qwen 3 14B Instruct Q4_K_M (~9 GB)
 #   scripts/download-models.sh llm-small      # Qwen 3 8B Instruct Q4_K_M (~5 GB)
@@ -29,7 +31,7 @@
 #   scripts/download-models.sh llm-moe        # Qwen 3 30B-A3B Instruct Q4_K_M (~18 GB)
 #   scripts/download-models.sh llm-legacy-7b  # Qwen 2.5 7B (back-compat, ~4.4 GB)
 #   scripts/download-models.sh llm-legacy-3b  # Qwen 2.5 3B (back-compat, ~1.9 GB)
-#   scripts/download-models.sh --all          # large-v3-turbo + vad + embed (no LLM)
+#   scripts/download-models.sh --all          # large-v3-turbo + vad + CAM++ + ERes2Net + pyannote-segmenter (no LLM)
 #
 # ASR models are written to ./models/asr/ggml-<flavor>.bin
 # VAD model lives at         ./models/vad/silero_vad.onnx
@@ -85,6 +87,13 @@ ERES2NET_URL="https://huggingface.co/csukuangfj/speaker-embedding-models/resolve
 # primary meetings where ERes2Net (VoxCeleb-EN only) can over-split.
 # Mirrored by csukuangfj on the same HF repo as ERes2Net.
 CAMPP_URL="https://huggingface.co/csukuangfj/speaker-embedding-models/resolve/main/3dspeaker_speech_campplus_sv_en_voxceleb_16k.onnx"
+# CAM++ multilingual (3D-Speaker zh_en 16k-common_advanced). Same
+# [1,T,80] Kaldi-fbank contract as the EN model but a 192-dim output
+# (the EN-VoxCeleb export is the outlier at 512-dim). Trained on a far
+# larger, more varied speaker set (EN+ZH), which generalises better to
+# Spanish than the English-only export — recommended A/B for reducing
+# over-splitting on Spanish meetings. ~27 MiB, opset 13.
+CAMPP_MULTI_URL="https://huggingface.co/csukuangfj/speaker-embedding-models/resolve/main/3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx"
 # pyannote-segmentation-3.0 ONNX export from the sherpa-onnx project.
 # ~17 MB, detects speaker boundaries at 10 ms granularity. Used by the
 # PyannoteSegmenter adapter in echo-diarize to split 5-second chunks
@@ -344,7 +353,47 @@ download_camplusplus() {
     printf "  ${GRN}✓${RST} campplus_en_voxceleb.onnx (%d MiB)\n" "$got_mib"
   fi
 
-  # Share the two-speaker fixture with ERes2Net — download it if missing.
+  download_camplusplus_fixture
+}
+
+# CAM++ multilingual embedder (zh_en 16k-common_advanced). Same adapter
+# as the EN model (echo-diarize detects the 192-dim output at load), so
+# it drops straight into the Models panel as an A/B alternative.
+download_camplusplus_multi() {
+  local out="${EMBED_DIR}/campplus_zh_en_common_advanced.onnx"
+  local need_model=1
+  if [[ -f "$out" ]]; then
+    local got_mib
+    got_mib=$(( $(wc -c < "$out") / 1048576 ))
+    if (( got_mib < 20 )); then
+      warn "campplus_zh_en_common_advanced.onnx present but truncated (${got_mib} MiB, expected ~27 MiB). Re-downloading."
+      rm -f "$out"
+    else
+      info "campplus_zh_en_common_advanced.onnx already present (${got_mib} MiB) — skipping."
+      need_model=0
+    fi
+  fi
+
+  if (( need_model )); then
+    info "Fetching CAM++ multilingual (3D-Speaker, zh_en common) → ${out}"
+    if command -v curl >/dev/null 2>&1; then
+      curl --fail --location --progress-bar --output "$out" "$CAMPP_MULTI_URL"
+    elif command -v wget >/dev/null 2>&1; then
+      wget --show-progress --output-document="$out" "$CAMPP_MULTI_URL"
+    else
+      fail "Neither curl nor wget is installed."
+    fi
+    local got_mib
+    got_mib=$(( $(wc -c < "$out") / 1048576 ))
+    if (( got_mib < 20 )); then
+      fail "campplus_zh_en_common_advanced.onnx downloaded incompletely (${got_mib} MiB)"
+    fi
+    printf "  ${GRN}✓${RST} campplus_zh_en_common_advanced.onnx (%d MiB)\n" "$got_mib"
+  fi
+}
+
+# Two-speaker fixture shared by the CAM++ / ERes2Net adapter tests.
+download_camplusplus_fixture() {
   mkdir -p "$ERES2NET_FIXTURE_DIR"
   local fixture_out="${ERES2NET_FIXTURE_DIR}/two_speakers_en.wav"
   if [[ -f "$fixture_out" && $(wc -c < "$fixture_out") -gt 400000 ]]; then
@@ -364,32 +413,56 @@ download_camplusplus() {
 
 download_pyannote_segmenter() {
   local out="${SEG_DIR}/pyannote_segmentation_3.onnx"
+  local need=1
+  # Upstream sherpa export is ~5.7 MiB; anything under 4 MiB is a truncated
+  # download.
   if [[ -f "$out" ]]; then
     local got_mib
     got_mib=$(( $(wc -c < "$out") / 1048576 ))
-    if (( got_mib < 10 )); then
-      warn "pyannote_segmentation_3.onnx present but truncated (${got_mib} MiB, expected ~17 MiB). Re-downloading."
+    if (( got_mib < 4 )); then
+      warn "pyannote_segmentation_3.onnx present but truncated (${got_mib} MiB, expected ~5.7 MiB). Re-downloading."
       rm -f "$out"
     else
-      info "pyannote_segmentation_3.onnx already present (${got_mib} MiB) — skipping."
-      return
+      info "pyannote_segmentation_3.onnx already present (${got_mib} MiB) — skipping download."
+      need=0
     fi
   fi
 
-  info "Fetching pyannote-segmentation-3.0 (sherpa-onnx) → ${out}"
-  if command -v curl >/dev/null 2>&1; then
-    curl --fail --location --progress-bar --output "$out" "$PYANNOTE_SEG_URL"
-  elif command -v wget >/dev/null 2>&1; then
-    wget --show-progress --output-document="$out" "$PYANNOTE_SEG_URL"
+  if (( need )); then
+    info "Fetching pyannote-segmentation-3.0 (sherpa-onnx) → ${out}"
+    if command -v curl >/dev/null 2>&1; then
+      curl --fail --location --progress-bar --output "$out" "$PYANNOTE_SEG_URL"
+    elif command -v wget >/dev/null 2>&1; then
+      wget --show-progress --output-document="$out" "$PYANNOTE_SEG_URL"
+    else
+      fail "Neither curl nor wget is installed."
+    fi
+    local got_mib
+    got_mib=$(( $(wc -c < "$out") / 1048576 ))
+    if (( got_mib < 4 )); then
+      fail "pyannote_segmentation_3.onnx downloaded incompletely (${got_mib} MiB)"
+    fi
+    printf "  ${GRN}✓${RST} pyannote_segmentation_3.onnx (%d MiB)\n" "$got_mib"
+  fi
+
+  # The upstream export does NOT load in the pure-Rust tract engine
+  # (`InstanceNormalization` fails analysis). Produce a tract-compatible,
+  # numerically-identical variant that echo-shell prefers at runtime.
+  local tract_out="${SEG_DIR}/pyannote_segmentation_3_tract.onnx"
+  if [[ -f "$tract_out" && "$tract_out" -nt "$out" ]]; then
+    info "pyannote_segmentation_3_tract.onnx already up to date — skipping patch."
+    return
+  fi
+  if python3 -c "import onnx" >/dev/null 2>&1; then
+    info "Patching segmenter for tract → ${tract_out}"
+    if python3 "${REPO_ROOT}/scripts/patch-pyannote-segmenter.py" "$out" "$tract_out"; then
+      printf "  ${GRN}✓${RST} pyannote_segmentation_3_tract.onnx (tract-compatible)\n"
+    else
+      warn "segmenter patch failed; tract builds will run whole-chunk (no overlap-aware segmentation)."
+    fi
   else
-    fail "Neither curl nor wget is installed."
+    warn "python3 + onnx not available; skipping tract patch. Install with 'pip install onnx onnxruntime' and re-run, or overlap-aware segmentation stays disabled on tract builds."
   fi
-  local got_mib
-  got_mib=$(( $(wc -c < "$out") / 1048576 ))
-  if (( got_mib < 10 )); then
-    fail "pyannote_segmentation_3.onnx downloaded incompletely (${got_mib} MiB)"
-  fi
-  printf "  ${GRN}✓${RST} pyannote_segmentation_3.onnx (%d MiB)\n" "$got_mib"
 }
 
 download_llm() {
@@ -436,7 +509,13 @@ main() {
     --all)
       download_one large-v3-turbo
       download_silero_vad
+      # CAM++ is the recommended embedder for Spanish-first meetings;
+      # ERes2Net is fetched too so callers can A/B-compare via the
+      # Models panel. `preferred_embed_model()` in echo-shell picks
+      # CAM++ when both files are present.
+      download_camplusplus
       download_eres2net
+      download_pyannote_segmenter
       ;;
     --help|-h)
       sed -n '4,35p' "$0"
@@ -457,6 +536,13 @@ main() {
       # multilingual training vs ERes2Net VoxCeleb-EN).
       download_camplusplus
       info "CAM++ embedder in ${EMBED_DIR}. Set ECHO_EMBED_MODEL=${EMBED_DIR}/campplus_en_voxceleb.onnx if you move it."
+      return
+      ;;
+    cam-plus-plus-multi|camplusplus-multi|cam++-multi|embed-multi)
+      # Multilingual CAM++ (zh_en common). A/B alternative for reducing
+      # over-splitting on Spanish audio vs the EN-VoxCeleb export.
+      download_camplusplus_multi
+      info "CAM++ multilingual embedder in ${EMBED_DIR}. Select it in the Models panel or set ECHO_EMBED_MODEL=${EMBED_DIR}/campplus_zh_en_common_advanced.onnx."
       return
       ;;
     segmenter|pyannote|pyannote-segmentation)

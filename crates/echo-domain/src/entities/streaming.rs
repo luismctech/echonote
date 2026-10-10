@@ -136,6 +136,23 @@ pub enum TranscriptEvent {
         /// RMS of the skipped chunk (for diagnostics).
         rms: f32,
     },
+    /// Offline diarization refinement after the streaming loop ended.
+    ///
+    /// Carries `(absorbed_id, surviving_id)` pairs the storage layer
+    /// must apply to already-persisted segments: every reference to
+    /// `absorbed_id` is rewritten to `surviving_id`, and the absorbed
+    /// speaker row is deleted. Always emitted *before* [`Stopped`] so
+    /// consumers can finalise the meeting with the correct speaker
+    /// count. Empty `merges` is allowed — the recorder treats it as a
+    /// no-op.
+    #[serde(rename_all = "camelCase")]
+    SpeakersMerged {
+        /// Session id.
+        session_id: StreamingSessionId,
+        /// `(absorbed, surviving)` pairs produced by the diarizer's
+        /// offline refinement pass.
+        merges: Vec<SpeakerMerge>,
+    },
     /// The pipeline finished cleanly (caller stopped or stream EOF).
     #[serde(rename_all = "camelCase")]
     Stopped {
@@ -169,6 +186,19 @@ pub enum TranscriptEvent {
     },
 }
 
+/// One offline-refinement merge: `absorbed` is collapsed into
+/// `surviving`. Persisted segments referring to `absorbed` must be
+/// rewritten to point at `surviving`; the `absorbed` speaker row is
+/// dropped from the meeting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct SpeakerMerge {
+    /// Speaker the offline pass decided was a duplicate.
+    pub absorbed: SpeakerId,
+    /// Speaker the absorbed one is folded into.
+    pub surviving: SpeakerId,
+}
+
 impl TranscriptEvent {
     /// Session id this event belongs to. Convenient for routing in the UI.
     #[must_use]
@@ -177,6 +207,7 @@ impl TranscriptEvent {
             Self::Started { session_id, .. }
             | Self::Chunk { session_id, .. }
             | Self::Skipped { session_id, .. }
+            | Self::SpeakersMerged { session_id, .. }
             | Self::Stopped { session_id, .. }
             | Self::Failed { session_id, .. }
             | Self::Paused { session_id, .. }

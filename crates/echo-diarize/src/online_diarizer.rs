@@ -13,7 +13,7 @@
 //! per-track contract documented on [`Diarizer`].
 
 use async_trait::async_trait;
-use echo_domain::{Diarizer, DomainError, Sample, Segmenter, Speaker, SpeakerId};
+use echo_domain::{Diarizer, DomainError, Sample, Segmenter, Speaker, SpeakerId, SpeakerSpan};
 
 use crate::cluster::{OnlineCluster, OnlineClusterConfig};
 use crate::embedding::SpeakerEmbedder;
@@ -129,39 +129,89 @@ impl Diarizer for OnlineDiarizer {
     }
 
     async fn assign(&mut self, samples: &[Sample]) -> Result<Option<SpeakerId>, DomainError> {
-        // Segmented path: split the chunk into speaker-homogeneous
-        // sub-regions, embed each separately, return the dominant speaker.
+        // Legacy single-speaker path: forward to assign_spans and pick
+        // the dominant speaker by sample-weighted majority. Kept so
+        // callers that haven't migrated to spans still get a sensible
+        // answer; the streaming pipeline calls assign_spans directly.
+        let spans = self.assign_spans(samples).await?;
+        if spans.is_empty() {
+            return Ok(None);
+        }
+        let mut totals: Vec<(SpeakerId, usize)> = Vec::with_capacity(spans.len());
+        for span in &spans {
+            let len = span.len_samples();
+            if let Some((_, acc)) = totals.iter_mut().find(|(id, _)| *id == span.speaker_id) {
+                *acc += len;
+            } else {
+                totals.push((span.speaker_id, len));
+            }
+        }
+        let dominant = totals.into_iter().max_by_key(|(_, n)| *n).map(|(id, _)| id);
+        Ok(dominant)
+    }
+
+    async fn assign_spans(&mut self, samples: &[Sample]) -> Result<Vec<SpeakerSpan>, DomainError> {
+        // Segmented path: emit one span per speaker-homogeneous
+        // sub-region the segmenter detected. Overlapping pyannote
+        // outputs (frames where two speaker channels are active at
+        // once) come through as two SpeakerSegments with overlapping
+        // sample ranges, which we preserve verbatim — the streaming
+        // pipeline distributes them across Whisper segments.
         if let Some(ref mut segmenter) = self.segmenter {
-            let segments = segmenter.segment(samples)?;
-            if !segments.is_empty() {
-                let mut best: Option<(SpeakerId, usize)> = None;
-                for seg in &segments {
+            let sub_segments = segmenter.segment(samples)?;
+            if !sub_segments.is_empty() {
+                let mut spans: Vec<SpeakerSpan> = Vec::with_capacity(sub_segments.len());
+                for seg in &sub_segments {
                     let end = seg.end_sample.min(samples.len());
-                    let sub = &samples[seg.start_sample..end];
-                    if let Some(embedding) = self.embedder.embed(sub)? {
-                        let id = self.cluster.assign(embedding.clone());
-                        if let Some(ref mut log) = self.embedding_log {
-                            log.push((embedding, id));
-                        }
-                        let len = end.saturating_sub(seg.start_sample);
-                        best = Some(match best {
-                            Some((prev_id, prev_len)) if prev_len >= len => (prev_id, prev_len),
-                            _ => (id, len),
-                        });
+                    if end <= seg.start_sample {
+                        continue;
                     }
+                    let sub = &samples[seg.start_sample..end];
+                    let Some(embedding) = self.embedder.embed(sub)? else {
+                        continue;
+                    };
+                    let id = self.cluster.assign(embedding.clone());
+                    if let Some(ref mut log) = self.embedding_log {
+                        log.push((embedding, id));
+                    }
+                    let slot = self
+                        .cluster
+                        .speakers()
+                        .into_iter()
+                        .find(|s| s.id == id)
+                        .map(|s| s.slot)
+                        .unwrap_or(0);
+                    spans.push(SpeakerSpan {
+                        speaker_id: id,
+                        slot,
+                        start_sample: seg.start_sample,
+                        end_sample: end,
+                    });
                 }
-                return Ok(best.map(|(id, _)| id));
+                return Ok(spans);
             }
         }
         // Whole-chunk path (no segmenter, or segmenter returned nothing).
         let Some(embedding) = self.embedder.embed(samples)? else {
-            return Ok(None);
+            return Ok(Vec::new());
         };
         let id = self.cluster.assign(embedding.clone());
         if let Some(ref mut log) = self.embedding_log {
             log.push((embedding, id));
         }
-        Ok(Some(id))
+        let slot = self
+            .cluster
+            .speakers()
+            .into_iter()
+            .find(|s| s.id == id)
+            .map(|s| s.slot)
+            .unwrap_or(0);
+        Ok(vec![SpeakerSpan {
+            speaker_id: id,
+            slot,
+            start_sample: 0,
+            end_sample: samples.len(),
+        }])
     }
 
     fn speakers(&self) -> Vec<Speaker> {
@@ -177,6 +227,13 @@ impl Diarizer for OnlineDiarizer {
         if let Some(ref mut log) = self.embedding_log {
             log.clear();
         }
+    }
+
+    fn refine_offline(&self) -> Vec<(SpeakerId, SpeakerId)> {
+        // Forward to the inherent helper, which checks whether
+        // [`with_offline_refinement`] was opted into. When it wasn't
+        // (embedding_log is None) the helper returns an empty vec.
+        self.refine_offline_default()
     }
 }
 

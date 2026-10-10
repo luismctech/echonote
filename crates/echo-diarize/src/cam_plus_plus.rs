@@ -32,7 +32,7 @@
 //!   pad / centre-crop to T = TARGET_FRAMES (~3 s)
 //!         │
 //!         ▼
-//!   Tensor [1, T, 80] ──► tract ONNX inference ──► [1, 192]
+//!   Tensor [1, T, 80] ──► tract ONNX inference ──► [1, D]
 //!         │
 //!         ▼
 //!   L2-normalise ──► Vec<f32>
@@ -40,6 +40,16 @@
 //!
 //! The preprocessing parameters are identical to ERes2Net: 25 ms frame,
 //! 10 ms hop, 80 mel bins, Kaldi Povey window, `apply_cmn = true`.
+//!
+//! ## Embedding width is detected, not assumed
+//!
+//! The csukuangfj CAM++ ONNX exports do not agree on output width: the
+//! EN-VoxCeleb export emits **512**-dim embeddings while the
+//! multilingual `zh_en_16k-common_advanced` export (and most upstream
+//! 3D-Speaker CAM++ checkpoints) emit **192**-dim. Both share the
+//! `[1, T, 80]` fbank input, so the adapter loads either and records the
+//! actual embedding width by probing the graph once at load — see
+//! [`CamPlusPlusEmbedder::embed_dim`].
 
 use std::path::Path;
 use std::sync::Arc;
@@ -53,9 +63,13 @@ use crate::embedding::{l2_normalize, SpeakerEmbedder};
 /// Sample rate the ONNX export was built for.
 pub const CAMPP_SAMPLE_RATE: u32 = 16_000;
 
-/// Output embedding dimensionality (last `Gemm` layer of CAM++).
-/// The csukuangfj/speaker-embedding-models ONNX export produces 512-dim
-/// embeddings; ERes2Net from the same repo produces 192-dim.
+/// Output embedding dimensionality of the **EN-VoxCeleb** CAM++ export
+/// (`campplus_en_voxceleb.onnx`), which is the odd one out at 512-dim.
+/// Other CAM++ exports (e.g. the multilingual `zh_en-common_advanced`
+/// model) emit 192-dim. This constant is only the historical default;
+/// the effective width is detected from the loaded graph and stored in
+/// [`CamPlusPlusEmbedder::embed_dim`]. Kept for tests that load the
+/// EN-VoxCeleb model and as a documented reference value.
 pub const CAMPP_EMBED_DIM: usize = 512;
 
 /// Number of mel filterbank bins the model expects per frame.
@@ -96,13 +110,19 @@ pub struct CamPlusPlusEmbedder {
     model: Arc<TypedRunnableModel<TypedModel>>,
     fbank: Fbank,
     config: CamPlusPlusConfig,
+    /// Embedding width detected from the ONNX graph at load time (512
+    /// for the EN-VoxCeleb export, 192 for the multilingual one). All
+    /// runtime length checks and [`SpeakerEmbedder::dim`] use this
+    /// rather than [`CAMPP_EMBED_DIM`].
+    embed_dim: usize,
 }
 
 impl std::fmt::Debug for CamPlusPlusEmbedder {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CamPlusPlusEmbedder")
             .field("config", &self.config)
-            .field("model", &"<tract plan [1,T,80] -> [1,192]>")
+            .field("embed_dim", &self.embed_dim)
+            .field("model", &"<tract plan [1,T,80] -> [1,D]>")
             .finish()
     }
 }
@@ -140,6 +160,31 @@ impl CamPlusPlusEmbedder {
             .into_runnable()
             .map_err(|e| DomainError::DiarizationFailed(format!("runnable: {e}")))?;
 
+        // Probe the graph once with a zero chunk to learn the embedding
+        // width. The CAM++ exports disagree (512 EN-VoxCeleb vs 192
+        // multilingual), so we record the actual output length instead
+        // of trusting a compile-time constant. Costs one inference at
+        // load; keeps the adapter correct for any CAM++ export sharing
+        // the [1, T, 80] fbank contract.
+        let embed_dim = {
+            let zeros = vec![0.0_f32; config.target_frames * CAMPP_FBANK_DIM];
+            let probe = Tensor::from_shape(&[1, config.target_frames, CAMPP_FBANK_DIM], &zeros)
+                .map_err(|e| DomainError::DiarizationFailed(format!("probe tensor: {e}")))?;
+            let out = model
+                .run(tvec!(probe.into_tvalue()))
+                .map_err(|e| DomainError::DiarizationFailed(format!("probe inference: {e}")))?;
+            let len = out[0]
+                .to_array_view::<f32>()
+                .map_err(|e| DomainError::DiarizationFailed(format!("probe output dtype: {e}")))?
+                .len();
+            if len == 0 {
+                return Err(DomainError::DiarizationFailed(
+                    "CAM++ model produced a zero-length embedding at load".to_string(),
+                ));
+            }
+            len
+        };
+
         let fbank = Fbank::new(FbankConfig {
             sample_rate: f64::from(CAMPP_SAMPLE_RATE),
             num_mel_bins: CAMPP_FBANK_DIM,
@@ -150,6 +195,7 @@ impl CamPlusPlusEmbedder {
             model: Arc::new(model),
             fbank,
             config,
+            embed_dim,
         })
     }
 
@@ -171,7 +217,7 @@ impl SpeakerEmbedder for CamPlusPlusEmbedder {
     }
 
     fn dim(&self) -> usize {
-        CAMPP_EMBED_DIM
+        self.embed_dim
     }
 
     fn embed(&mut self, samples: &[Sample]) -> Result<Option<Vec<f32>>, DomainError> {
@@ -215,10 +261,11 @@ impl SpeakerEmbedder for CamPlusPlusEmbedder {
             .to_array_view::<f32>()
             .map_err(|e| DomainError::DiarizationFailed(format!("output dtype: {e}")))?;
 
-        if view.len() != CAMPP_EMBED_DIM {
+        if view.len() != self.embed_dim {
             return Err(DomainError::DiarizationFailed(format!(
-                "unexpected CAM++ embedding length: {} (want {CAMPP_EMBED_DIM})",
-                view.len()
+                "unexpected CAM++ embedding length: {} (want {})",
+                view.len(),
+                self.embed_dim
             )));
         }
 
@@ -312,6 +359,45 @@ mod tests {
             assert_eq!(e.dim(), CAMPP_EMBED_DIM);
             assert_eq!(e.config().target_frames, CAMPP_TARGET_FRAMES);
         }
+    }
+
+    /// The multilingual CAM++ export (`zh_en_common_advanced`) emits a
+    /// 192-dim embedding, unlike the 512-dim EN-VoxCeleb model. This
+    /// verifies the load-time dim probe adapts to it instead of
+    /// rejecting every chunk against a hard-coded 512. Gated on the file
+    /// being present (fetched via `download-models.sh embed-multi`).
+    #[test]
+    fn multilingual_model_is_detected_as_192_dim() {
+        let mut p = workspace_root();
+        p.push("models/embedder/campplus_zh_en_common_advanced.onnx");
+        if !p.exists() {
+            eprintln!(
+                "skipping multilingual CAM++ test: model absent at {}. \
+                 Run `scripts/download-models.sh embed-multi`.",
+                p.display()
+            );
+            return;
+        }
+        let mut e = CamPlusPlusEmbedder::new(&p).expect("load multilingual CAM++");
+        assert_eq!(e.dim(), 192, "zh_en common export should be 192-dim");
+
+        // A real (non-degenerate) chunk must embed to a 192-length unit
+        // vector — proves the runtime length check uses the detected dim.
+        let mut noise = Vec::with_capacity(2 * CAMPP_SAMPLE_RATE as usize);
+        let mut state: u32 = 0x9e37_79b9;
+        for _ in 0..2 * CAMPP_SAMPLE_RATE as usize {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            noise.push((state as f32 / u32::MAX as f32) * 0.02 - 0.01);
+        }
+        let emb = e
+            .embed(&noise)
+            .unwrap()
+            .expect("embedding for 2 s of noise");
+        assert_eq!(emb.len(), 192);
+        let norm = emb.iter().map(|x| x * x).sum::<f32>().sqrt();
+        assert!((norm - 1.0).abs() < 1e-3, "expected unit norm, got {norm}");
     }
 
     #[test]

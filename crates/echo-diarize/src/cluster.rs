@@ -104,7 +104,13 @@ impl Default for OnlineClusterConfig {
     fn default() -> Self {
         Self {
             similarity_threshold: 0.55,
-            max_speakers: 6,
+            // Capped at 4 to act as a safety brake against runaway
+            // over-splitting when the embedder produces noisy intra-
+            // speaker variation (most common with VoxCeleb-EN embedders
+            // on Spanish audio). Real meetings with >4 speakers are
+            // rare in the EchoNote target audience; the offline AHC
+            // pass collapses any genuine over-split below this cap.
+            max_speakers: 4,
             merge_threshold: 0.70,
             max_centroid_history: 10,
             sticky_bias: 0.05,
