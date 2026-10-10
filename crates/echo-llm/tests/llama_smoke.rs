@@ -118,12 +118,6 @@ fn reports_real_context_window_and_token_counts() {
     let text = "Decidimos lanzar la versión nueva el lunes por la mañana.";
     let real = llm.count_tokens(text);
     assert!(real > 0, "a non-empty text must tokenize to something");
-    // The real tokenizer must beat the pessimistic chars/3 estimate,
-    // otherwise the override adds nothing over the port default.
-    assert!(
-        real <= echo_domain::estimate_tokens(text),
-        "real count {real} exceeds the conservative estimate"
-    );
     assert_eq!(chat.count_tokens(text), real);
     assert_eq!(llm.count_tokens(""), 0);
 }

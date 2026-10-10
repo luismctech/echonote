@@ -6,6 +6,14 @@
 //! are supported (DEVELOPMENT_PLAN.md §3.2): General (default),
 //! OneOnOne, SprintReview, Interview, SalesCall, and Lecture.
 //!
+//! ## Long meetings
+//!
+//! The transcript is never truncated. When it does not fit the model's
+//! context window it is summarised in two stages (map-reduce, see the
+//! `map_reduce` submodule): chunks become plain-text notes, and the
+//! ordered notes feed the template prompt. A window too small for even
+//! one chunk fails with [`SummarizeMeetingError::ContextTooSmall`].
+//!
 //! ## Reliability
 //!
 //! Local 7-8B quantized models occasionally produce JSON that's not
@@ -20,6 +28,7 @@
 
 use std::sync::Arc;
 
+use futures::future;
 use futures::stream::{self, BoxStream, StreamExt};
 use thiserror::Error;
 use time::OffsetDateTime;
@@ -29,6 +38,8 @@ use echo_domain::{
     CustomTemplate, Definition, DomainError, GenerateOptions, InterviewQuote, LlmModel, Meeting,
     MeetingId, MeetingStore, Summary, SummaryContent, SummaryId, TEMPLATE_IDS,
 };
+
+mod map_reduce;
 
 use crate::sanitize::strip_chat_tokens;
 use crate::transcript::{self, Flavour};
@@ -56,6 +67,12 @@ pub enum SummarizeMeetingError {
     /// The caller passed a template id that doesn't exist.
     #[error("unknown template: {0}")]
     InvalidTemplate(String),
+
+    /// The model's context window cannot hold the prompt plus even one
+    /// chunk of the transcript, so it cannot be summarised without
+    /// dropping content. Carries a human-readable explanation.
+    #[error("context window too small to summarize: {0}")]
+    ContextTooSmall(String),
 
     /// The LLM adapter failed (load, decode, OOM, …). Wrapped so the
     /// caller doesn't need to import `DomainError`.
@@ -125,8 +142,8 @@ impl SummarizeMeeting {
             .map_err(SummarizeMeetingError::Storage)?
             .ok_or(SummarizeMeetingError::NotFound(meeting_id))?;
 
-        let transcript = render_transcript(&meeting);
-        if transcript.trim().is_empty() {
+        let lines = transcript::render_lines(&meeting, Flavour::Summary);
+        if lines.is_empty() {
             return Err(SummarizeMeetingError::EmptyTranscript(meeting_id));
         }
 
@@ -140,6 +157,22 @@ impl SummarizeMeeting {
             .map(String::from)
             .or_else(|| meeting.summary.language.clone());
         let language_instruction = language_instruction(language.as_deref());
+
+        let empty_prompt = build_prompt(
+            template,
+            "",
+            &language_instruction,
+            notes_context.as_deref(),
+            None,
+        );
+        let transcript = map_reduce::plan(
+            self.llm.as_ref(),
+            &lines,
+            &language_instruction,
+            &empty_prompt,
+        )?
+        .resolve(self.llm.as_ref(), &language_instruction)
+        .await?;
 
         let build_prompt = |feedback: Option<&str>| {
             build_prompt(
@@ -228,8 +261,8 @@ impl SummarizeMeeting {
             .map_err(SummarizeMeetingError::Storage)?
             .ok_or(SummarizeMeetingError::NotFound(meeting_id))?;
 
-        let transcript = render_transcript(&meeting);
-        if transcript.trim().is_empty() {
+        let lines = transcript::render_lines(&meeting, Flavour::Summary);
+        if lines.is_empty() {
             return Err(SummarizeMeetingError::EmptyTranscript(meeting_id));
         }
 
@@ -243,6 +276,17 @@ impl SummarizeMeeting {
             .map(String::from)
             .or_else(|| meeting.summary.language.clone());
         let language_instruction = language_instruction(language.as_deref());
+
+        let empty_prompt =
+            build_custom_prompt(custom, "", &language_instruction, notes_context.as_deref());
+        let transcript = map_reduce::plan(
+            self.llm.as_ref(),
+            &lines,
+            &language_instruction,
+            &empty_prompt,
+        )?
+        .resolve(self.llm.as_ref(), &language_instruction)
+        .await?;
 
         let prompt = build_custom_prompt(
             custom,
@@ -310,8 +354,8 @@ impl SummarizeMeeting {
             .map_err(SummarizeMeetingError::Storage)?
             .ok_or(SummarizeMeetingError::NotFound(meeting_id))?;
 
-        let transcript = render_transcript(&meeting);
-        if transcript.trim().is_empty() {
+        let lines = transcript::render_lines(&meeting, Flavour::Summary);
+        if lines.is_empty() {
             return Err(SummarizeMeetingError::EmptyTranscript(meeting_id));
         }
 
@@ -326,86 +370,149 @@ impl SummarizeMeeting {
             .or_else(|| meeting.summary.language.clone());
         let language_instruction = language_instruction(language.as_deref());
 
-        let prompt = build_prompt(
+        let empty_prompt = build_prompt(
             template,
-            &transcript,
+            "",
             &language_instruction,
             notes_context.as_deref(),
             None,
         );
+        let input = map_reduce::plan(
+            self.llm.as_ref(),
+            &lines,
+            &language_instruction,
+            &empty_prompt,
+        )?;
 
-        let model_id = self.llm.model_id().to_string();
-        let template_owned = template.to_string();
         let llm = Arc::clone(&self.llm);
-        let store = Arc::clone(&self.store);
+        let finish = FinishSummary {
+            store: Arc::clone(&self.store),
+            model_id: llm.model_id().to_string(),
+            template: template.to_string(),
+            meeting_id,
+            language,
+        };
+        let started = stream::once(future::ready(SummarizeEvent::Started {
+            model: finish.model_id.clone(),
+        }));
+        let map_language = language_instruction.clone();
+        let build = {
+            let template = template.to_string();
+            move |transcript: &str| {
+                build_prompt(
+                    &template,
+                    transcript,
+                    &language_instruction,
+                    notes_context.as_deref(),
+                    None,
+                )
+            }
+        };
 
-        let token_stream = llm
-            .generate_stream(&prompt, &generate_opts())
-            .await
-            .map_err(SummarizeMeetingError::Llm)?;
+        let events = match input {
+            // The whole transcript fits: open the token stream up front so
+            // a generation failure still surfaces as an `Err`, as before.
+            map_reduce::Input::Whole(transcript) => {
+                let token_stream = llm
+                    .generate_stream(&build(&transcript), &generate_opts())
+                    .await
+                    .map_err(SummarizeMeetingError::Llm)?;
+                finish.events(token_stream)
+            }
+            // Condensing takes several LLM calls: run them after `Started`
+            // so the UI gets its first event immediately, and report any
+            // failure through the stream.
+            map_reduce::Input::Condense(plan) => stream::once(async move {
+                let transcript = match map_reduce::condense(llm.as_ref(), plan, &map_language).await
+                {
+                    Ok(text) => text,
+                    Err(e) => return failed(e.to_string()),
+                };
+                match llm
+                    .generate_stream(&build(&transcript), &generate_opts())
+                    .await
+                {
+                    Ok(token_stream) => finish.events(token_stream),
+                    Err(e) => failed(e.to_string()),
+                }
+            })
+            .flatten()
+            .boxed(),
+        };
 
-        let started = stream::once(async move {
-            SummarizeEvent::Started {
-                model: model_id.clone(),
+        Ok(started.chain(events).boxed())
+    }
+}
+
+/// Everything needed to turn the reduce-phase token stream into the
+/// terminal [`SummarizeEvent`]s of [`SummarizeMeeting::execute_stream`].
+struct FinishSummary {
+    store: Arc<dyn MeetingStore>,
+    model_id: String,
+    template: String,
+    meeting_id: MeetingId,
+    language: Option<String>,
+}
+
+impl FinishSummary {
+    /// Forward each token as [`SummarizeEvent::Token`], then parse the
+    /// accumulated text (falling back to `FreeText`), persist it and emit
+    /// `Completed` — or `Failed` when persisting fails.
+    fn events(
+        self,
+        token_stream: BoxStream<'static, Result<String, DomainError>>,
+    ) -> BoxStream<'static, SummarizeEvent> {
+        let accumulated = Arc::new(tokio::sync::Mutex::new(String::new()));
+        let acc_for_tokens = Arc::clone(&accumulated);
+
+        let tokens = token_stream.map(move |result| match result {
+            Ok(delta) => {
+                // Accumulate without await by using try_lock (blocking context).
+                if let Ok(mut acc) = acc_for_tokens.try_lock() {
+                    acc.push_str(&delta);
+                }
+                SummarizeEvent::Token { delta }
+            }
+            Err(e) => SummarizeEvent::Failed {
+                error: e.to_string(),
+            },
+        });
+
+        let final_event = stream::once(async move {
+            let full_text = accumulated.lock().await.clone();
+
+            let content = match parse_payload(&self.template, &full_text) {
+                Ok(c) => c,
+                Err(_) => SummaryContent::FreeText { text: full_text },
+            };
+
+            let summary = Summary {
+                id: SummaryId::new(),
+                meeting_id: self.meeting_id,
+                model: self.model_id,
+                language: self.language,
+                created_at: OffsetDateTime::now_utc(),
+                content,
+            };
+
+            if let Err(e) = self.store.upsert_summary(&summary).await {
+                return SummarizeEvent::Failed {
+                    error: format!("persist summary: {e}"),
+                };
+            }
+
+            SummarizeEvent::Completed {
+                summary: Box::new(summary),
             }
         });
 
-        // Wrap the token stream, accumulate tokens, and finalize.
-        let finalize_stream = {
-            let model_id_for_final = llm.model_id().to_string();
-            let accumulated = Arc::new(tokio::sync::Mutex::new(String::new()));
-            let acc_for_tokens = Arc::clone(&accumulated);
-
-            let tokens = token_stream.map(move |result| {
-                match result {
-                    Ok(delta) => {
-                        // Accumulate without await by using try_lock (blocking context).
-                        if let Ok(mut acc) = acc_for_tokens.try_lock() {
-                            acc.push_str(&delta);
-                        }
-                        SummarizeEvent::Token { delta }
-                    }
-                    Err(e) => SummarizeEvent::Failed {
-                        error: e.to_string(),
-                    },
-                }
-            });
-
-            let final_event = stream::once(async move {
-                let full_text = accumulated.lock().await.clone();
-
-                let content = match parse_payload(&template_owned, &full_text) {
-                    Ok(c) => c,
-                    Err(_) => SummaryContent::FreeText {
-                        text: full_text.to_string(),
-                    },
-                };
-
-                let summary = Summary {
-                    id: SummaryId::new(),
-                    meeting_id,
-                    model: model_id_for_final,
-                    language,
-                    created_at: OffsetDateTime::now_utc(),
-                    content,
-                };
-
-                if let Err(e) = store.upsert_summary(&summary).await {
-                    return SummarizeEvent::Failed {
-                        error: format!("persist summary: {e}"),
-                    };
-                }
-
-                SummarizeEvent::Completed {
-                    summary: Box::new(summary),
-                }
-            });
-
-            tokens.chain(final_event)
-        };
-
-        Ok(started.chain(finalize_stream).boxed())
+        tokens.chain(final_event).boxed()
     }
+}
+
+/// A stream holding the single terminal [`SummarizeEvent::Failed`].
+fn failed(error: String) -> BoxStream<'static, SummarizeEvent> {
+    stream::once(future::ready(SummarizeEvent::Failed { error })).boxed()
 }
 
 /// Default generation knobs for summaries. Low temperature + nucleus
@@ -420,14 +527,6 @@ fn generate_opts() -> GenerateOptions {
         seed: None,
         stop: vec!["<|im_end|>".into(), "<|eot_id|>".into(), "</s>".into()],
     }
-}
-
-/// Render the meeting's transcript into a single block of text the
-/// LLM can ingest. Speakers are inlined as `Speaker N:` (or the user
-/// label, if assigned) so the model can attribute action items.
-/// Over-long transcripts are truncated by [`transcript::render_truncated`].
-fn render_transcript(meeting: &Meeting) -> String {
-    transcript::render_truncated(meeting, Flavour::Summary)
 }
 
 /// Render the meeting's notes into a context block for the LLM.
@@ -852,7 +951,6 @@ mod tests {
     use pretty_assertions::assert_eq;
     use time::OffsetDateTime;
 
-    use crate::transcript::MAX_TRANSCRIPT_CHARS;
     use echo_domain::{
         ActionItem, AudioFormat, CreateMeeting, FinalizeMeeting, MeetingSearchHit, MeetingSummary,
         Segment, SegmentId, Speaker, SpeakerId,
@@ -963,7 +1061,12 @@ mod tests {
         responses: Mutex<Vec<Result<String, DomainError>>>,
         prompts: Mutex<Vec<String>>,
         model_id: String,
+        window: u32,
+        responder: Option<Responder>,
     }
+
+    /// Computes a response from the prompt; takes precedence over the queue.
+    type Responder = Box<dyn Fn(&str) -> Result<String, DomainError> + Send + Sync>;
 
     impl ScriptedLlm {
         fn new(responses: Vec<Result<String, DomainError>>) -> Self {
@@ -971,7 +1074,38 @@ mod tests {
                 responses: Mutex::new(responses.into_iter().rev().collect()),
                 prompts: Mutex::new(Vec::new()),
                 model_id: "fake-llm".into(),
+                window: echo_domain::DEFAULT_CONTEXT_WINDOW,
+                responder: None,
             }
+        }
+
+        fn with_context_window(mut self, window: u32) -> Self {
+            self.window = window;
+            self
+        }
+
+        fn with_responder(
+            mut self,
+            responder: impl Fn(&str) -> Result<String, DomainError> + Send + Sync + 'static,
+        ) -> Self {
+            self.responder = Some(Box::new(responder));
+            self
+        }
+
+        /// Prompts of the map (and re-map) calls, in call order.
+        fn map_prompts(&self) -> Vec<String> {
+            self.prompts
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|p| is_map_prompt(p))
+                .cloned()
+                .collect()
+        }
+
+        /// The last prompt sent, i.e. the reduce / template prompt.
+        fn last_prompt(&self) -> String {
+            self.prompts.lock().unwrap().last().cloned().unwrap()
         }
 
         fn calls(&self) -> usize {
@@ -984,8 +1118,14 @@ mod tests {
         fn model_id(&self) -> &str {
             &self.model_id
         }
+        fn context_window(&self) -> u32 {
+            self.window
+        }
         async fn generate(&self, prompt: &str, _: &GenerateOptions) -> Result<String, DomainError> {
             self.prompts.lock().unwrap().push(prompt.to_string());
+            if let Some(responder) = &self.responder {
+                return responder(prompt);
+            }
             self.responses
                 .lock()
                 .unwrap()
@@ -1191,7 +1331,7 @@ mod tests {
     }
 
     #[test]
-    fn render_transcript_uses_speaker_labels() {
+    fn summary_lines_use_speaker_labels() {
         let mut meeting = Meeting {
             summary: MeetingSummary {
                 id: MeetingId::new(),
@@ -1227,48 +1367,9 @@ mod tests {
         });
         meeting.speakers = vec![s0, s1];
 
-        let rendered = render_transcript(&meeting);
+        let rendered = transcript::render_lines(&meeting, Flavour::Summary).join("\n");
         assert!(rendered.contains("Speaker 1: Hola"), "{rendered}");
         assert!(rendered.contains("Ana: Buenos días"), "{rendered}");
-    }
-
-    #[test]
-    fn render_transcript_truncates_long_input_with_marker() {
-        let mut meeting = Meeting {
-            summary: MeetingSummary {
-                id: MeetingId::new(),
-                title: "T".into(),
-                started_at: OffsetDateTime::now_utc(),
-                ended_at: None,
-                duration_ms: 0,
-                language: None,
-                segment_count: 0,
-            },
-            input_format: AudioFormat::WHISPER,
-            segments: vec![],
-            speakers: vec![],
-            notes: vec![],
-        };
-        let chunk = "x".repeat(MAX_TRANSCRIPT_CHARS);
-        meeting.segments.push(Segment {
-            id: SegmentId::new(),
-            start_ms: 0,
-            end_ms: 1_000,
-            text: chunk.clone(),
-            speaker_id: None,
-            confidence: None,
-        });
-        meeting.segments.push(Segment {
-            id: SegmentId::new(),
-            start_ms: 1_000,
-            end_ms: 2_000,
-            text: "TAIL".into(),
-            speaker_id: None,
-            confidence: None,
-        });
-        let rendered = render_transcript(&meeting);
-        assert!(rendered.contains("transcript truncated"), "{rendered}");
-        assert!(rendered.ends_with("TAIL"), "tail should be preserved");
     }
 
     #[test]
@@ -1360,6 +1461,356 @@ mod tests {
         assert!(
             matches!(err, SummarizeMeetingError::InvalidTemplate(ref t) if t == "nonexistent"),
             "{err:?}"
+        );
+    }
+
+    // ---- map-reduce (long transcripts) ------------------------------------
+
+    const GENERAL_JSON: &str = r#"{"summary":"Resumen completo.","keyPoints":[],"decisions":[],
+        "actionItems":[],"openQuestions":[]}"#;
+
+    /// Window small enough that ~20 segments of [`long_segments`] overflow it.
+    const SMALL_WINDOW: u32 = 2_600;
+
+    fn is_map_prompt(prompt: &str) -> bool {
+        prompt.contains("meticulous meeting note-taker")
+    }
+
+    /// `n` ~330-char segments, each starting with a unique `SEG-nnn` marker.
+    fn long_segments(n: usize) -> Vec<String> {
+        (0..n)
+            .map(|i| format!("SEG-{i:03} {}", "palabra ".repeat(40)))
+            .collect()
+    }
+
+    fn seed_long(store: &FakeStore, segments: &[String]) -> MeetingId {
+        seed_meeting(store, segments.iter().map(String::as_str).collect())
+    }
+
+    /// Fake that answers map prompts with `NOTE-k` (k = call number) and
+    /// every other prompt with `final_text`.
+    fn mapping_llm(window: u32, final_text: &str) -> ScriptedLlm {
+        let counter = std::sync::atomic::AtomicUsize::new(0);
+        let final_text = final_text.to_string();
+        ScriptedLlm::new(vec![])
+            .with_context_window(window)
+            .with_responder(move |prompt| {
+                if is_map_prompt(prompt) {
+                    let k = counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                    Ok(format!("NOTE-{k}"))
+                } else {
+                    Ok(final_text.clone())
+                }
+            })
+    }
+
+    fn position_of(prompts: &[String], needle: &str) -> Vec<usize> {
+        prompts
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| p.contains(needle))
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn short_transcript_is_a_single_call_with_the_whole_transcript() {
+        let store = Arc::new(FakeStore::default());
+        let segments = long_segments(3);
+        let id = seed_long(&store, &segments);
+        let llm = Arc::new(mapping_llm(
+            echo_domain::DEFAULT_CONTEXT_WINDOW,
+            GENERAL_JSON,
+        ));
+
+        let uc = SummarizeMeeting::new(llm.clone(), store);
+        uc.execute(id, "general", false, None).await.unwrap();
+
+        assert_eq!(llm.calls(), 1);
+        let prompt = llm.last_prompt();
+        for i in 0..3 {
+            assert!(
+                prompt.contains(&format!("SEG-{i:03}")),
+                "segment {i} missing"
+            );
+        }
+        assert!(!prompt.contains("truncated"));
+        assert!(!prompt.contains("sequence of notes"));
+    }
+
+    #[tokio::test]
+    async fn long_transcript_maps_every_segment_once_then_reduces_the_notes() {
+        let store = Arc::new(FakeStore::default());
+        let segments = long_segments(20);
+        let id = seed_long(&store, &segments);
+        let llm = Arc::new(mapping_llm(SMALL_WINDOW, GENERAL_JSON));
+
+        let uc = SummarizeMeeting::new(llm.clone(), store);
+        let summary = uc.execute(id, "general", false, None).await.unwrap();
+        assert_eq!(summary.template(), "general");
+
+        let maps = llm.map_prompts();
+        assert!(
+            maps.len() >= 2,
+            "expected several map calls, got {}",
+            maps.len()
+        );
+        assert_eq!(llm.calls(), maps.len() + 1, "N map calls + 1 reduce");
+
+        // Every segment lands in exactly one map prompt, in order.
+        let mut last_chunk = 0;
+        for i in 0..segments.len() {
+            let at = position_of(&maps, &format!("SEG-{i:03} "));
+            assert_eq!(at.len(), 1, "segment {i} must be in exactly one map prompt");
+            assert!(at[0] >= last_chunk, "segment {i} out of order");
+            last_chunk = at[0];
+        }
+
+        // The reduce prompt carries every note in order and no raw segment.
+        let reduce = llm.last_prompt();
+        assert!(!is_map_prompt(&reduce));
+        assert!(
+            !reduce.contains("SEG-"),
+            "reduce must not carry raw segments"
+        );
+        assert!(reduce.contains("sequence of notes"));
+        let mut cursor = 0;
+        for k in 1..=maps.len() {
+            let marker = format!("Part {k}/{}:\nNOTE-{k}", maps.len());
+            let at = reduce[cursor..]
+                .find(&marker)
+                .unwrap_or_else(|| panic!("`{marker}` missing or out of order in {reduce}"));
+            cursor += at + marker.len();
+        }
+    }
+
+    #[tokio::test]
+    async fn fact_in_the_middle_of_a_long_transcript_reaches_a_map_prompt() {
+        let store = Arc::new(FakeStore::default());
+        let mut segments = long_segments(20);
+        segments[10] = "El presupuesto aprobado es MIDDLE-FACT-4711 euros".to_string();
+        let id = seed_long(&store, &segments);
+        let llm = Arc::new(mapping_llm(SMALL_WINDOW, GENERAL_JSON));
+
+        let uc = SummarizeMeeting::new(llm.clone(), store);
+        uc.execute(id, "general", false, None).await.unwrap();
+
+        assert_eq!(position_of(&llm.map_prompts(), "MIDDLE-FACT-4711").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn map_phase_llm_error_fails_execute_with_llm_error() {
+        let store = Arc::new(FakeStore::default());
+        let id = seed_long(&store, &long_segments(20));
+        let llm = Arc::new(
+            ScriptedLlm::new(vec![])
+                .with_context_window(SMALL_WINDOW)
+                .with_responder(|_| Err(DomainError::LlmFailed("OOM".into()))),
+        );
+
+        let uc = SummarizeMeeting::new(llm.clone(), store.clone());
+        let err = uc.execute(id, "general", false, None).await.unwrap_err();
+
+        assert!(matches!(err, SummarizeMeetingError::Llm(_)), "{err:?}");
+        assert_eq!(llm.calls(), 1, "no further calls after a failed map call");
+        assert!(store.get_summary(id).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn long_stream_emits_started_first_then_fails_on_a_map_error() {
+        let store = Arc::new(FakeStore::default());
+        let id = seed_long(&store, &long_segments(20));
+        let llm = Arc::new(
+            ScriptedLlm::new(vec![])
+                .with_context_window(SMALL_WINDOW)
+                .with_responder(|_| Err(DomainError::LlmFailed("OOM".into()))),
+        );
+
+        let uc = SummarizeMeeting::new(llm, store.clone());
+        let events: Vec<SummarizeEvent> = uc
+            .execute_stream(id, "general", false, None)
+            .await
+            .unwrap()
+            .collect()
+            .await;
+
+        assert!(
+            matches!(events[0], SummarizeEvent::Started { .. }),
+            "{events:?}"
+        );
+        assert!(
+            matches!(events.last(), Some(SummarizeEvent::Failed { .. })),
+            "{events:?}"
+        );
+        assert!(!events
+            .iter()
+            .any(|e| matches!(e, SummarizeEvent::Completed { .. })));
+        assert!(store.get_summary(id).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn long_stream_maps_first_then_streams_and_persists_the_summary() {
+        let store = Arc::new(FakeStore::default());
+        let segments = long_segments(20);
+        let id = seed_long(&store, &segments);
+        let llm = Arc::new(mapping_llm(SMALL_WINDOW, GENERAL_JSON));
+
+        let uc = SummarizeMeeting::new(llm.clone(), store.clone());
+        let events: Vec<SummarizeEvent> = uc
+            .execute_stream(id, "general", false, None)
+            .await
+            .unwrap()
+            .collect()
+            .await;
+
+        assert!(
+            matches!(events[0], SummarizeEvent::Started { .. }),
+            "{events:?}"
+        );
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, SummarizeEvent::Token { .. })));
+        let Some(SummarizeEvent::Completed { summary }) = events.last() else {
+            panic!("stream must end with Completed: {events:?}");
+        };
+        assert!(matches!(summary.content, SummaryContent::General { .. }));
+        assert!(llm.map_prompts().len() >= 2);
+        assert_eq!(
+            store.get_summary(id).await.unwrap().unwrap().id,
+            summary.id,
+            "summary persisted"
+        );
+    }
+
+    #[tokio::test]
+    async fn long_custom_template_is_reduced_from_the_partial_notes() {
+        let store = Arc::new(FakeStore::default());
+        let id = seed_long(&store, &long_segments(20));
+        let llm = Arc::new(mapping_llm(SMALL_WINDOW, "  # Resumen final  "));
+        let custom = CustomTemplate {
+            id: echo_domain::CustomTemplateId::new(),
+            name: "Mi plantilla".into(),
+            prompt: "Resume en viñetas".into(),
+        };
+
+        let uc = SummarizeMeeting::new(llm.clone(), store);
+        let summary = uc.execute_custom(id, &custom, false, None).await.unwrap();
+
+        match summary.content {
+            SummaryContent::Custom {
+                template_name,
+                text,
+            } => {
+                assert_eq!(template_name, "Mi plantilla");
+                assert_eq!(text, "# Resumen final");
+            }
+            other => panic!("expected Custom, got {other:?}"),
+        }
+        let reduce = llm.last_prompt();
+        assert!(reduce.contains("Resume en viñetas"));
+        assert!(reduce.contains("Part 1/"));
+        assert!(!reduce.contains("SEG-"));
+    }
+
+    #[tokio::test]
+    async fn context_window_too_small_fails_with_a_typed_error_and_no_llm_call() {
+        let store = Arc::new(FakeStore::default());
+        let id = seed_long(&store, &long_segments(20));
+        let llm = Arc::new(mapping_llm(1_200, GENERAL_JSON));
+
+        let uc = SummarizeMeeting::new(llm.clone(), store);
+        let err = uc.execute(id, "general", false, None).await.unwrap_err();
+        assert!(
+            matches!(err, SummarizeMeetingError::ContextTooSmall(_)),
+            "{err:?}"
+        );
+        let err = uc
+            .execute_stream(id, "general", false, None)
+            .await
+            .map(|_| ())
+            .unwrap_err();
+        assert!(
+            matches!(err, SummarizeMeetingError::ContextTooSmall(_)),
+            "{err:?}"
+        );
+        assert_eq!(llm.calls(), 0);
+    }
+
+    #[tokio::test]
+    async fn oversized_notes_are_condensed_hierarchically_before_the_reduce() {
+        let store = Arc::new(FakeStore::default());
+        let segments = long_segments(40);
+        let id = seed_long(&store, &segments);
+        let counter = std::sync::atomic::AtomicUsize::new(0);
+        let llm = Arc::new(
+            ScriptedLlm::new(vec![])
+                .with_context_window(SMALL_WINDOW)
+                .with_responder(move |prompt| {
+                    let k = counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                    if !is_map_prompt(prompt) {
+                        Ok(GENERAL_JSON.to_string())
+                    } else if prompt.contains("SEG-") {
+                        // First-level notes: large enough that they cannot all fit.
+                        Ok(format!("BIG-{k} {}", "nota ".repeat(240)))
+                    } else {
+                        Ok(format!("CONDENSED-{k}"))
+                    }
+                }),
+        );
+
+        let uc = SummarizeMeeting::new(llm.clone(), store);
+        uc.execute(id, "general", false, None).await.unwrap();
+
+        let maps = llm.map_prompts();
+        let first_level = maps.iter().filter(|p| p.contains("SEG-")).count();
+        let condensing = maps.len() - first_level;
+        assert!(
+            first_level >= 3,
+            "need several first-level notes: {first_level}"
+        );
+        assert!(condensing >= 1, "notes must have been condensed again");
+        assert!(
+            condensing < first_level,
+            "condensing must shrink the note count"
+        );
+        // Each first-level note is consumed by exactly one condensing call.
+        let condensing_prompts: Vec<String> = maps
+            .iter()
+            .filter(|p| !p.contains("SEG-"))
+            .cloned()
+            .collect();
+        for k in 0..first_level {
+            // Notes are numbered by call order; first-level calls come first.
+            let at = position_of(&condensing_prompts, &format!("BIG-{} ", k + 1));
+            assert_eq!(at.len(), 1, "note {} must be condensed exactly once", k + 1);
+        }
+        let reduce = llm.last_prompt();
+        assert!(reduce.contains("CONDENSED-"));
+        assert!(!reduce.contains("BIG-"));
+        assert_eq!(llm.calls(), maps.len() + 1);
+    }
+
+    #[tokio::test]
+    async fn condensing_that_makes_no_progress_fails_instead_of_looping() {
+        let store = Arc::new(FakeStore::default());
+        let id = seed_long(&store, &long_segments(40));
+        let llm = Arc::new(
+            ScriptedLlm::new(vec![])
+                .with_context_window(SMALL_WINDOW)
+                .with_responder(|_| Ok("nota ".repeat(400))),
+        );
+
+        let uc = SummarizeMeeting::new(llm.clone(), store);
+        let err = uc.execute(id, "general", false, None).await.unwrap_err();
+
+        assert!(
+            matches!(err, SummarizeMeetingError::ContextTooSmall(_)),
+            "{err:?}"
+        );
+        let maps = llm.map_prompts();
+        assert!(
+            maps.iter().all(|p| p.contains("SEG-")) && llm.calls() == maps.len(),
+            "only the first map pass may run before giving up"
         );
     }
 }

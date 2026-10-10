@@ -125,12 +125,23 @@ impl LoadedModel {
     /// [`estimate_tokens`] instead of erroring: a budget query must not
     /// be able to abort a request the estimate could still size safely.
     pub fn count_tokens(&self, text: &str) -> usize {
-        match self.model.str_to_token(text, AddBos::Never) {
-            Ok(tokens) => tokens.len(),
-            Err(e) => {
-                tracing::warn!(error = %e, "tokenizer failed, using the chars/3 estimate");
-                estimate_tokens(text)
-            }
+        token_count_or_estimate(self.model.str_to_token(text, AddBos::Never), text)
+    }
+}
+
+/// Length of a successful tokenization, or the [`estimate_tokens`]
+/// fallback when the tokenizer failed. Split out of
+/// [`LoadedModel::count_tokens`] so the fallback is testable without a
+/// loaded model.
+fn token_count_or_estimate<T, E: std::fmt::Display>(
+    tokenized: Result<Vec<T>, E>,
+    text: &str,
+) -> usize {
+    match tokenized {
+        Ok(tokens) => tokens.len(),
+        Err(e) => {
+            tracing::warn!(error = %e, "tokenizer failed, using the chars/3 estimate");
+            estimate_tokens(text)
         }
     }
 }
@@ -142,6 +153,19 @@ impl LoadedModel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn token_count_uses_the_tokenizer_result_when_it_succeeds() {
+        let tokenized: Result<Vec<u32>, String> = Ok(vec![1, 2, 3, 4]);
+        assert_eq!(token_count_or_estimate(tokenized, "irrelevant text"), 4);
+    }
+
+    #[test]
+    fn token_count_falls_back_to_the_estimate_when_tokenizing_fails() {
+        let tokenized: Result<Vec<u32>, String> = Err("invalid utf-8".into());
+        // 7 chars -> ceil(7 / 3) = 3 tokens.
+        assert_eq!(token_count_or_estimate(tokenized, "abcdefg"), 3);
+    }
 
     #[test]
     fn strip_single_think_block() {

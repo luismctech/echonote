@@ -1,9 +1,11 @@
 //! Transcript rendering shared by the summary and chat use cases.
 //!
 //! Both use cases feed the meeting transcript to the model as one
-//! line per non-empty segment. This module owns that line format, the
-//! token-budgeted chunking used when a transcript has to be split, and
-//! the legacy head + tail truncation that both use cases still apply.
+//! line per non-empty segment. This module owns that line format and
+//! the token-budgeted chunking the summary uses when a transcript has
+//! to be split (map-reduce). The legacy head + tail truncation
+//! ([`render_truncated`]) remains only as the chat path until
+//! retrieval replaces it.
 //!
 //! ## Chunking rule
 //!
@@ -22,9 +24,9 @@ use echo_domain::{Meeting, Segment, Speaker};
 /// and short (cheap on tokens).
 pub(crate) const CITE_OPEN: &str = "[seg:";
 
-/// Maximum characters of transcript text fed to the model by the
-/// legacy truncation. Superseded by token budgets in follow-up work;
-/// kept as one shared constant until then.
+/// Maximum characters of transcript text the chat feeds to the model
+/// through [`render_truncated`]. Legacy, chat-only cap: the summary no
+/// longer truncates and is budgeted in tokens instead.
 pub(crate) const MAX_TRANSCRIPT_CHARS: usize = 6_000;
 
 /// Line format of a rendered transcript.
@@ -75,7 +77,6 @@ pub(crate) fn render_lines(meeting: &Meeting, flavour: Flavour) -> Vec<String> {
 /// `count` measures one piece of text in tokens; each joining newline
 /// is charged one extra token so the estimate never undercounts. A
 /// line that alone exceeds `budget` is emitted as its own chunk.
-#[allow(dead_code)] // consumed by the map-reduce summary
 pub(crate) fn chunk_lines(
     lines: &[String],
     budget: usize,
@@ -104,7 +105,7 @@ pub(crate) fn chunk_lines(
     chunks
 }
 
-/// Render the transcript as one block, keeping the head (4/6) and the
+/// Legacy chat path: render the transcript as one block, keeping the head (4/6) and the
 /// tail (2/6) of [`MAX_TRANSCRIPT_CHARS`] with an explicit elision
 /// marker when it is longer. Surviving citation markers stay intact, so
 /// a citation the model emits still points at a real segment id.

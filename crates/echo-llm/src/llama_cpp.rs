@@ -42,8 +42,10 @@ use crate::shared::LoadedModel;
 /// Default context window when the caller does not override it. Both
 /// Qwen 3 8B and 14B ship with `n_ctx_train = 32_768`; 8192 holds the
 /// system prompt, chat history and 1 k output tokens next to roughly
-/// 20 minutes of Spanish speech (~3.5 chars/token); longer meetings
-/// are budgeted against [`echo_domain::LlmModel::context_window`].
+/// 20 minutes of Spanish speech (~3.5 chars/token). Summaries of longer
+/// meetings are split by the application layer (map-reduce) against
+/// [`echo_domain::LlmModel::context_window`]; chat still truncates the
+/// transcript at a fixed character cap until retrieval lands.
 ///
 /// The KV cache is the cost that scales with it. Computed (not
 /// measured) from the published Qwen3-8B config — 36 layers, 8 KV

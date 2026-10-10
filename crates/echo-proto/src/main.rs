@@ -950,6 +950,7 @@ async fn run_summarize(
             SummarizeMeetingError::InvalidTemplate(t) => {
                 anyhow::anyhow!("invalid template: {t}")
             }
+            SummarizeMeetingError::ContextTooSmall(msg) => anyhow::anyhow!("llm context: {msg}"),
             SummarizeMeetingError::Llm(err) => anyhow::anyhow!("llm: {err}"),
             SummarizeMeetingError::Storage(err) => anyhow::anyhow!("storage: {err}"),
         })?;
