@@ -172,7 +172,10 @@ fn activity_to_segments(
                         .min(max_samples);
                     let end_sample =
                         (offset + (t as f32 * samples_per_frame).round() as usize).min(max_samples);
-                    if end_sample.saturating_sub(start_sample) >= min_segment_samples {
+                    // Runs that fall entirely in the zero-padded tail clamp
+                    // to an empty range; never emit those, whatever the minimum.
+                    if end_sample > start_sample && end_sample - start_sample >= min_segment_samples
+                    {
                         segments.push(SpeakerSegment {
                             start_sample,
                             end_sample,
@@ -377,6 +380,19 @@ mod tests {
         let (spf, offset) = frame_geometry(80_600, 80_000, 293);
         assert!((spf - 80_000.0 / 293.0).abs() < 1e-3, "got {spf}");
         assert_eq!(offset, 300);
+    }
+
+    #[test]
+    fn runs_entirely_in_the_padded_tail_are_dropped() {
+        // 10 frames of 100 samples, but only 300 real samples: frames
+        // 5..10 lie in the zero-padded tail. Even with no minimum length,
+        // a run that clamps to an empty range must not become a segment.
+        let mut activity = vec![[false; 3]; 10];
+        for f in activity.iter_mut().skip(5) {
+            f[0] = true;
+        }
+        let segs = activity_to_segments(&activity, 100.0, 0, 300, 0);
+        assert!(segs.is_empty(), "zero-length segments emitted: {segs:?}");
     }
 
     #[test]
