@@ -115,15 +115,45 @@ pub fn decode_powerset(log_probs: &[f32]) -> Vec<[bool; 3]> {
         .collect()
 }
 
+/// Validate the model output shape and return the number of frames.
+///
+/// The segmenter feeds exactly one window per call, so the output must
+/// be `[1, T, 7]`. Anything else (other rank, batch, or class count)
+/// would make the flattened decode walk across batch boundaries.
+fn validate_output_shape(shape: &[usize]) -> Result<usize, DomainError> {
+    if shape.len() != 3 || shape[0] != 1 || shape[2] != POWERSET_CLASSES {
+        return Err(DomainError::DiarizationFailed(format!(
+            "unexpected pyannote output shape {shape:?} (expected [1, T, {POWERSET_CLASSES}])"
+        )));
+    }
+    Ok(shape[1])
+}
+
+/// Map output frames back to sample offsets in the caller's audio.
+///
+/// The model always sees exactly `window` samples: shorter inputs are
+/// zero-padded on the right and longer ones are centre-cropped. The `T`
+/// output frames therefore always span the full window, never just the
+/// caller's audio. Returns `(samples_per_frame, offset)`: frame `t`
+/// starts at `offset + t * samples_per_frame` in the caller's buffer,
+/// where `offset` is the centre-crop start (0 when padded).
+fn frame_geometry(input_len: usize, window: usize, num_frames: usize) -> (f32, usize) {
+    let samples_per_frame = window as f32 / num_frames as f32;
+    let offset = input_len.saturating_sub(window) / 2;
+    (samples_per_frame, offset)
+}
+
 /// Run-length encode a `[T][3]` activity matrix into per-speaker
 /// segments, sorted chronologically.
 ///
-/// `samples_per_frame` maps frame indices to sample offsets; ends are
-/// clamped to `max_samples`. Runs shorter than `min_segment_samples`
+/// `samples_per_frame` and `offset` map frame indices to sample offsets
+/// in the caller's buffer (see [`frame_geometry`]); ends are clamped to
+/// `max_samples` so padded frames never extend past the real audio. Runs shorter than `min_segment_samples`
 /// are dropped.
 fn activity_to_segments(
     activity: &[[bool; 3]],
     samples_per_frame: f32,
+    offset: usize,
     max_samples: usize,
     min_segment_samples: usize,
 ) -> Vec<SpeakerSegment> {
@@ -136,9 +166,11 @@ fn activity_to_segments(
             match (active, span_start) {
                 (true, None) => span_start = Some(t),
                 (false, Some(start)) => {
-                    let start_sample = (start as f32 * samples_per_frame).round() as usize;
+                    let start_sample = (offset
+                        + (start as f32 * samples_per_frame).round() as usize)
+                        .min(max_samples);
                     let end_sample =
-                        ((t as f32 * samples_per_frame).round() as usize).min(max_samples);
+                        (offset + (t as f32 * samples_per_frame).round() as usize).min(max_samples);
                     if end_sample.saturating_sub(start_sample) >= min_segment_samples {
                         segments.push(SpeakerSegment {
                             start_sample,
@@ -290,24 +322,15 @@ impl Segmenter for PyannoteSegmenter {
             .to_array_view::<f32>()
             .map_err(|e| DomainError::DiarizationFailed(format!("output dtype: {e}")))?;
 
-        let shape = view.shape();
-        if shape.len() != 3 || shape[2] != POWERSET_CLASSES {
-            return Err(DomainError::DiarizationFailed(format!(
-                "unexpected pyannote output shape {shape:?} (expected [1, T, {POWERSET_CLASSES}])"
-            )));
-        }
-        let num_frames = shape[1];
+        let num_frames = validate_output_shape(view.shape())?;
         let flat: Vec<f32> = view.iter().copied().collect();
         let activity = decode_powerset(&flat);
-
-        // How many samples in the original (pre-pad/crop) audio does
-        // each frame represent?
-        let input_len = samples.len().min(n);
-        let samples_per_frame = input_len as f32 / num_frames as f32;
+        let (samples_per_frame, offset) = frame_geometry(samples.len(), n, num_frames);
 
         Ok(activity_to_segments(
             &activity,
             samples_per_frame,
+            offset,
             samples.len(),
             self.config.min_segment_samples,
         ))
@@ -319,6 +342,53 @@ mod tests {
     use super::*;
     use echo_domain::Segmenter;
     use std::path::PathBuf;
+
+    #[test]
+    fn output_shape_must_be_single_batch_powerset() {
+        assert_eq!(validate_output_shape(&[1, 293, 7]).unwrap(), 293);
+        assert!(
+            validate_output_shape(&[2, 293, 7]).is_err(),
+            "batch > 1 must be rejected"
+        );
+        assert!(
+            validate_output_shape(&[1, 293, 3]).is_err(),
+            "non-powerset head must be rejected"
+        );
+        assert!(
+            validate_output_shape(&[293, 7]).is_err(),
+            "rank 2 must be rejected"
+        );
+    }
+
+    #[test]
+    fn short_input_frames_cover_the_padded_window() {
+        // 2 s of audio zero-padded to a 5 s window: the T frames span the
+        // whole window, so each frame is window / T samples long.
+        let (spf, offset) = frame_geometry(32_000, 80_000, 293);
+        assert!((spf - 80_000.0 / 293.0).abs() < 1e-3, "got {spf}");
+        assert_eq!(offset, 0);
+    }
+
+    #[test]
+    fn long_input_frames_are_offset_by_the_centre_crop() {
+        // 80_600 samples centre-cropped to 80_000: frame 0 starts 300
+        // samples into the caller's buffer.
+        let (spf, offset) = frame_geometry(80_600, 80_000, 293);
+        assert!((spf - 80_000.0 / 293.0).abs() < 1e-3, "got {spf}");
+        assert_eq!(offset, 300);
+    }
+
+    #[test]
+    fn segments_are_shifted_by_offset_and_clamped_to_input() {
+        let activity = vec![[true, false, false]; 10];
+        let segs = activity_to_segments(&activity, 100.0, 300, 1_050, 0);
+        assert_eq!(segs.len(), 1);
+        assert_eq!(segs[0].start_sample, 300);
+        assert_eq!(
+            segs[0].end_sample, 1_050,
+            "end must be clamped to input length"
+        );
+    }
 
     fn model_path() -> PathBuf {
         let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -449,7 +519,7 @@ mod tests {
         for frame in &mut act[2..5] {
             frame[1] = true;
         }
-        let segs = activity_to_segments(&act, 1.0, 10, 3);
+        let segs = activity_to_segments(&act, 1.0, 0, 10, 3);
         assert_eq!(
             segs,
             vec![
@@ -470,7 +540,7 @@ mod tests {
     #[test]
     fn spans_close_when_activity_runs_to_the_last_frame() {
         let act = vec![[true, false, false]; 5];
-        let segs = activity_to_segments(&act, 2.0, 10, 4);
+        let segs = activity_to_segments(&act, 2.0, 0, 10, 4);
         assert_eq!(segs.len(), 1);
         assert_eq!((segs[0].start_sample, segs[0].end_sample), (0, 10));
     }
