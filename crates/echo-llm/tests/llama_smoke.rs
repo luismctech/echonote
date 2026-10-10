@@ -6,9 +6,13 @@
 //!
 //! ```sh
 //! ./scripts/download-models.sh llm
-//! ECHO_LLM_MODEL=$(pwd)/models/llm/qwen2.5-7b-instruct-q4_k_m.gguf \
-//!   cargo test -p echo-llm --test llama_smoke -- --ignored --nocapture
+//! ECHO_LLM_MODEL=$(pwd)/models/llm/Qwen3-8B-Q4_K_M.gguf \
+//!   cargo test -p echo-llm --test llama_smoke -- --ignored --nocapture --test-threads=1
 //! ```
+//!
+//! Keep `--test-threads=1`: each test loads its own copy of the model, and
+//! loading several multi-GB copies at once can fail on machines with
+//! limited memory.
 //!
 //! The point of the smoke test is to prove the FFI bridge, Metal/CPU
 //! backend, model loading, sampler chain and stop-sequence handling
@@ -59,7 +63,7 @@ async fn loads_model_and_completes_a_short_greedy_prompt() {
     // the model will continue it; the test only cares that we get a
     // non-empty completion back.
     let prompt = "<|im_start|>system\nYou are a helpful assistant. Answer with a single short sentence.<|im_end|>\n\
-                  <|im_start|>user\nReply with the literal word OK and nothing else.<|im_end|>\n\
+                  <|im_start|>user\nReply with the literal word OK and nothing else. /no_think<|im_end|>\n\
                   <|im_start|>assistant\n";
 
     let opts = GenerateOptions {
@@ -128,4 +132,41 @@ async fn rejects_missing_model_path() {
     let bogus = PathBuf::from("/tmp/this/path/should/not/exist.gguf");
     let err = LlamaCppLlm::load(&bogus).unwrap_err();
     assert!(matches!(err, echo_domain::DomainError::ModelNotLoaded(_)));
+}
+
+/// Evidence for the `estimate_tokens` contract: on every sample, including
+/// the accent-dense worst case, the real tokenizer count must not exceed
+/// the fallback estimate, or budgets built on the fallback could overflow.
+#[test]
+#[ignore = "requires ECHO_LLM_MODEL to point at a .gguf file"]
+fn fallback_estimate_is_never_below_the_real_token_count() {
+    let Some(model_path) = model_from_env() else {
+        eprintln!("skipping: ECHO_LLM_MODEL not set");
+        return;
+    };
+    let llm = LlamaCppLlm::load_with(
+        &model_path,
+        LoadOptions::default().with_n_ctx(2_048).with_n_threads(4),
+    )
+    .expect("load gguf");
+    let samples = [
+        "Decidimos lanzar la versión nueva el lunes por la mañana.",
+        "Además, la configuración de producción necesitará aprobación: ¿quién se encargará de la migración?",
+        "Ñandú, canción, pingüino, acción, información, característica, económicamente, comunicación.",
+        "Ana: Sí, también revisé la planificación del trimestre y creo que deberíamos reorganizar las prioridades según la capacidad del equipo.",
+        "We decided to launch the new version on Monday morning and review the rollout plan afterwards.",
+        "Speaker 2: The quarterly numbers look fine, but the infrastructure budget needs another review.",
+        "Reunión técnica sobre la implementación de microservicios, contenedores y orquestación en la nube.",
+        "áéíóúñ áéíóúñ áéíóúñ áéíóúñ áéíóúñ áéíóúñ áéíóúñ áéíóúñ",
+    ];
+    for text in samples {
+        let real = llm.count_tokens(text);
+        let estimate = echo_domain::estimate_tokens(text);
+        eprintln!(
+            "real={real} estimate={estimate} chars={} bytes={}",
+            text.chars().count(),
+            text.len()
+        );
+        assert!(real <= estimate, "estimate undercounts {text:?}");
+    }
 }

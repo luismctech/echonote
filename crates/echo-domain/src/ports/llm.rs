@@ -84,17 +84,22 @@ impl Default for GenerateOptions {
 /// report its own. Matches the default `n_ctx` of the llama.cpp adapter.
 pub const DEFAULT_CONTEXT_WINDOW: u32 = 8_192;
 
-/// Conservative token estimate: one token per 3 characters, rounded up.
+/// Conservative token estimate: one token per 2 UTF-8 bytes, rounded up.
 ///
-/// Real tokenizers produce roughly 3.5-4 characters per token on Latin
-/// scripts, so dividing by 3 over-counts. Over-counting is the safe
+/// Byte-level BPE tokenizers split accented and non-Latin characters
+/// into several byte tokens, so a character count can undercount by a
+/// wide margin. Measured with the Qwen3-8B tokenizer: natural Spanish
+/// and English run at 3.5-5 bytes per token, but a text made only of
+/// accented vowels (`áéíóúñ`) costs about one token per 2.1 bytes, 2.5x
+/// more than `chars / 3`. Two bytes per token stays at or above every
+/// measured sample, including that worst case. Over-counting is the safe
 /// direction for a budget: a prompt sized with this estimate can only
 /// end up smaller than the window, never larger. Adapters with a real
 /// tokenizer should override `count_tokens` and may fall back to this
 /// function when tokenization fails.
 #[must_use]
 pub fn estimate_tokens(text: &str) -> usize {
-    text.chars().count().div_ceil(3)
+    text.len().div_ceil(2)
 }
 
 /// Async port over a local large language model.
@@ -122,7 +127,7 @@ pub trait LlmModel: Send + Sync {
     /// Number of tokens `text` occupies for this model.
     ///
     /// The default is [`estimate_tokens`], a deliberately pessimistic
-    /// chars/3 estimate, so budgets built on it stay safe when no real
+    /// bytes/2 estimate, so budgets built on it stay safe when no real
     /// tokenizer is available. Adapters SHOULD override it with the
     /// model's own tokenizer.
     fn count_tokens(&self, text: &str) -> usize {
@@ -195,8 +200,29 @@ mod tests {
         // usable window and an estimate that errs on the high side.
         let llm = MinimalLlm;
         assert_eq!(llm.context_window(), 8_192);
-        assert_eq!(llm.count_tokens("abcdefg"), 3);
+        assert_eq!(llm.count_tokens("abcdefg"), 4);
         assert_eq!(llm.count_tokens(""), 0);
+    }
+
+    #[test]
+    fn estimate_is_half_the_utf8_bytes_rounded_up() {
+        assert_eq!(estimate_tokens(""), 0);
+        assert_eq!(estimate_tokens("abc"), 2);
+        // Accented letters weigh two bytes each: 6 chars, 12 bytes.
+        assert_eq!(estimate_tokens("áéíóúñ"), 6);
+    }
+
+    #[test]
+    fn estimate_never_drops_below_the_previous_chars_over_three() {
+        for text in [
+            "",
+            "a",
+            "hello world",
+            "Además, la configuración",
+            "日本語のテキスト",
+        ] {
+            assert!(estimate_tokens(text) >= text.len().div_ceil(2), "{text:?}");
+        }
     }
 
     #[test]

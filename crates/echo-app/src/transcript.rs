@@ -11,9 +11,10 @@
 //!
 //! Chunks are cut **only on segment boundaries**. A segment is the
 //! smallest unit the model can attribute (and, in chat, cite), so a
-//! segment is never split mid-line and never dropped: when one line
-//! alone exceeds the budget it becomes a chunk of its own and the
-//! caller decides what to do with the overflow.
+//! segment is never dropped. A segment that alone exceeds the budget is
+//! the one exception to "never split": it is cut into pieces that each
+//! fit (sentences, then words, then characters), every piece repeating
+//! the speaker label so attribution survives.
 
 use std::fmt::Write;
 
@@ -75,8 +76,11 @@ pub(crate) fn render_lines(meeting: &Meeting, flavour: Flavour) -> Vec<String> {
 /// the chunks with `\n` reproduces the full transcript.
 ///
 /// `count` measures one piece of text in tokens; each joining newline
-/// is charged one extra token so the estimate never undercounts. A
-/// line that alone exceeds `budget` is emitted as its own chunk.
+/// is charged one extra token so the estimate never undercounts.
+///
+/// A line that alone exceeds `budget` is first split into pieces that
+/// each fit (see [`split_oversized`]), so no emitted line is over budget
+/// unless `budget` is too small for even one character after the label.
 pub(crate) fn chunk_lines(
     lines: &[String],
     budget: usize,
@@ -86,23 +90,148 @@ pub(crate) fn chunk_lines(
     let mut current = String::new();
     let mut used = 0usize;
     for line in lines {
-        let cost = count(line);
-        if !current.is_empty() && used + 1 + cost > budget {
-            chunks.push(std::mem::take(&mut current));
-            used = 0;
-        }
-        if current.is_empty() {
-            used = cost;
+        let pieces = if count(line) > budget {
+            split_oversized(line, budget, count)
         } else {
-            current.push('\n');
-            used += 1 + cost;
+            vec![line.clone()]
+        };
+        for piece in &pieces {
+            let cost = count(piece);
+            if !current.is_empty() && used + 1 + cost > budget {
+                chunks.push(std::mem::take(&mut current));
+                used = 0;
+            }
+            if current.is_empty() {
+                used = cost;
+            } else {
+                current.push('\n');
+                used += 1 + cost;
+            }
+            current.push_str(piece);
         }
-        current.push_str(line);
     }
     if !current.is_empty() {
         chunks.push(current);
     }
     chunks
+}
+
+/// Split one line that exceeds `budget` into lines that each fit.
+///
+/// The text up to and including the first `": "` (the speaker label,
+/// plus the citation marker in the chat flavour) is repeated on every
+/// piece, so each piece keeps its attribution and, in chat, its citable
+/// segment id. The remaining body is cut at the coarsest boundary that
+/// fits: sentence ends (`.`, `?`, `!`, `…` followed by whitespace), then
+/// whitespace, then characters. Only the whitespace at a cut is
+/// dropped; the cut never falls inside a UTF-8 character.
+fn split_oversized(line: &str, budget: usize, count: &dyn Fn(&str) -> usize) -> Vec<String> {
+    let (prefix, body) = line
+        .split_once(": ")
+        .map_or(("", line), |(label, body)| (&line[..label.len() + 2], body));
+    let fits = |body: &str| count(&format!("{prefix}{body}")) <= budget;
+    split_body(body, &fits, Boundary::Sentence)
+        .into_iter()
+        .map(|piece| format!("{prefix}{piece}"))
+        .collect()
+}
+
+/// Boundary a body is cut at, from coarsest to finest.
+#[derive(Clone, Copy)]
+enum Boundary {
+    Sentence,
+    Whitespace,
+    Char,
+}
+
+/// Greedy packing of `body` into pieces accepted by `fits`: atoms of the
+/// given `boundary` are appended while they fit; an atom that does not
+/// fit on its own is split again at the next finer boundary.
+fn split_body(body: &str, fits: &dyn Fn(&str) -> bool, boundary: Boundary) -> Vec<String> {
+    if fits(body) {
+        return vec![body.to_string()];
+    }
+    let atoms = match boundary {
+        Boundary::Sentence => sentence_atoms(body),
+        Boundary::Whitespace => body.split_inclusive(char::is_whitespace).collect(),
+        Boundary::Char => return split_by_chars(body, fits),
+    };
+    let finer = match boundary {
+        Boundary::Sentence => Boundary::Whitespace,
+        _ => Boundary::Char,
+    };
+
+    let mut pieces = Vec::new();
+    let mut current = String::new();
+    for atom in atoms {
+        let candidate = format!("{current}{atom}");
+        if fits(candidate.trim_end()) {
+            current = candidate;
+            continue;
+        }
+        if !current.trim().is_empty() {
+            pieces.push(current.trim().to_string());
+        }
+        current.clear();
+        if fits(atom.trim_end()) {
+            current.push_str(atom);
+        } else {
+            pieces.extend(split_body(atom.trim(), fits, finer));
+        }
+    }
+    if !current.trim().is_empty() {
+        pieces.push(current.trim().to_string());
+    }
+    pieces
+}
+
+/// Cut `body` into the longest prefixes accepted by `fits`, always on a
+/// char boundary and always advancing by at least one character.
+fn split_by_chars(body: &str, fits: &dyn Fn(&str) -> bool) -> Vec<String> {
+    let mut pieces = Vec::new();
+    let mut rest = body;
+    while !rest.is_empty() {
+        let ends: Vec<usize> = rest.char_indices().map(|(i, c)| i + c.len_utf8()).collect();
+        // Binary search for the longest prefix that fits; the count of a
+        // prefix grows with its length, and one char is always taken.
+        let (mut lo, mut hi) = (1usize, ends.len());
+        while lo < hi {
+            let mid = (lo + hi).div_ceil(2);
+            if fits(&rest[..ends[mid - 1]]) {
+                lo = mid;
+            } else {
+                hi = mid - 1;
+            }
+        }
+        let (piece, tail) = rest.split_at(ends[lo - 1]);
+        pieces.push(piece.to_string());
+        rest = tail;
+    }
+    pieces
+}
+
+/// Split after every sentence terminator (`.`, `?`, `!`, `…`) that is
+/// followed by whitespace; the whitespace stays with the sentence it
+/// ends. A text without terminators is a single atom.
+fn sentence_atoms(text: &str) -> Vec<&str> {
+    let mut atoms = Vec::new();
+    let mut start = 0;
+    let mut chars = text.char_indices().peekable();
+    while let Some((_, c)) = chars.next() {
+        if !matches!(c, '.' | '?' | '!' | '…') {
+            continue;
+        }
+        if let Some(&(j, next)) = chars.peek().filter(|(_, n)| n.is_whitespace()) {
+            let end = j + next.len_utf8();
+            chars.next();
+            atoms.push(&text[start..end]);
+            start = end;
+        }
+    }
+    if start < text.len() {
+        atoms.push(&text[start..]);
+    }
+    atoms
 }
 
 /// Legacy chat path: render the transcript as one block, keeping the head (4/6) and the
@@ -244,13 +373,80 @@ mod tests {
         );
     }
 
+    /// Every line of every chunk, in order.
+    fn flat_lines(chunks: &[String]) -> Vec<String> {
+        chunks
+            .iter()
+            .flat_map(|c| c.split('\n').map(str::to_string))
+            .collect()
+    }
+
+    fn without_whitespace(text: &str) -> String {
+        text.chars().filter(|c| !c.is_whitespace()).collect()
+    }
+
     #[test]
-    fn chunker_emits_an_oversized_segment_as_its_own_chunk() {
-        let input = lines(&["aa", "bbbbbbbbbbbb", "cc"]);
+    fn oversized_segment_is_split_at_sentence_boundaries_keeping_the_label() {
+        let input = lines(&["Ana: Uno dos. Tres cuatro. Cinco seis."]);
+        let chunks = chunk_lines(&input, 25, &per_char);
         assert_eq!(
-            chunk_lines(&input, 5, &per_char),
-            vec!["aa", "bbbbbbbbbbbb", "cc"]
+            flat_lines(&chunks),
+            vec!["Ana: Uno dos.", "Ana: Tres cuatro.", "Ana: Cinco seis."]
         );
+        assert!(chunks.iter().all(|c| per_char(c) <= 25));
+    }
+
+    #[test]
+    fn oversized_sentence_falls_back_to_whitespace() {
+        let input = lines(&["Ana: aaa bbb ccc ddd eee"]);
+        let chunks = chunk_lines(&input, 14, &per_char);
+        assert_eq!(
+            flat_lines(&chunks),
+            vec!["Ana: aaa bbb", "Ana: ccc ddd", "Ana: eee"]
+        );
+    }
+
+    #[test]
+    fn oversized_word_falls_back_to_char_boundaries_without_splitting_utf8() {
+        let body = "ñ".repeat(23);
+        let input = lines(&[&format!("Ana: {body}")]);
+        let chunks = chunk_lines(&input, 10, &per_char);
+        let pieces = flat_lines(&chunks);
+        assert!(pieces.len() > 1);
+        assert!(pieces
+            .iter()
+            .all(|p| p.starts_with("Ana: ") && per_char(p) <= 10));
+        let rejoined: String = pieces.iter().map(|p| &p["Ana: ".len()..]).collect();
+        assert_eq!(rejoined, body);
+    }
+
+    #[test]
+    fn splitting_an_oversized_segment_drops_nothing_and_keeps_the_neighbours() {
+        let long = "Ana: Primera frase larga, con comas. ¿Segunda frase? ¡Tercera! \
+                    Cuarta sin puntuación final alguna que se pueda cortar";
+        let input = lines(&["Beto: antes", long, "Beto: después"]);
+        let chunks = chunk_lines(&input, 30, &per_char);
+        let pieces = flat_lines(&chunks);
+        assert_eq!(pieces.first().map(String::as_str), Some("Beto: antes"));
+        assert_eq!(pieces.last().map(String::as_str), Some("Beto: después"));
+        let middle = &pieces[1..pieces.len() - 1];
+        assert!(middle.iter().all(|p| p.starts_with("Ana: ")));
+        assert!(pieces.iter().all(|p| per_char(p) <= 30));
+        let rejoined: String = middle.iter().map(|p| &p["Ana: ".len()..]).collect();
+        assert_eq!(
+            without_whitespace(&rejoined),
+            without_whitespace(&long["Ana: ".len()..])
+        );
+    }
+
+    #[test]
+    fn chat_pieces_repeat_the_citation_prefix() {
+        let prefix = "[seg:abc] (0:05) Ana: ";
+        let input = lines(&[&format!("{prefix}Uno dos tres. Cuatro cinco seis.")]);
+        let chunks = chunk_lines(&input, 40, &per_char);
+        let pieces = flat_lines(&chunks);
+        assert_eq!(pieces.len(), 2);
+        assert!(pieces.iter().all(|p| p.starts_with(prefix)), "{pieces:?}");
     }
 
     #[test]

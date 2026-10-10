@@ -260,7 +260,7 @@ pub trait ChatAssistant: Send + Sync {
     }
 
     /// Number of tokens `text` occupies for this model. Same contract
-    /// and conservative chars/3 default as [`crate::LlmModel::count_tokens`].
+    /// and conservative bytes/2 default as [`crate::LlmModel::count_tokens`].
     fn count_tokens(&self, text: &str) -> usize {
         estimate_tokens(text)
     }
@@ -408,7 +408,7 @@ mod tests {
         // trait defaults every fake relies on.
         let assistant = MockChatAssistant::new(vec![]);
         assert_eq!(assistant.context_window(), 8_192);
-        assert_eq!(assistant.count_tokens("abcdefg"), 3);
+        assert_eq!(assistant.count_tokens("abcdefg"), 4);
     }
 
     #[tokio::test]

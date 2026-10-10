@@ -11,8 +11,10 @@
 //! The transcript is never truncated. When it does not fit the model's
 //! context window it is summarised in two stages (map-reduce, see the
 //! `map_reduce` submodule): chunks become plain-text notes, and the
-//! ordered notes feed the template prompt. A window too small for even
-//! one chunk fails with [`SummarizeMeetingError::ContextTooSmall`].
+//! ordered notes feed the template prompt. A segment larger than a
+//! chunk is split at sentence, word or character boundaries rather than
+//! rejected. A window too small for even one chunk fails with
+//! [`SummarizeMeetingError::ContextTooSmall`].
 //!
 //! ## Reliability
 //!
@@ -1736,6 +1738,57 @@ mod tests {
         assert_eq!(llm.calls(), 0);
     }
 
+    /// One segment far larger than a chunk: `n` numbered sentences.
+    fn monologue(n: usize) -> String {
+        (0..n)
+            .map(|i| format!("Oración {i:03} del discurso largo."))
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    #[tokio::test]
+    async fn a_single_oversized_segment_is_split_instead_of_failing() {
+        let store = Arc::new(FakeStore::default());
+        let text = monologue(120);
+        let id = seed_meeting(&store, vec!["Hola a todos", &text, "Adiós"]);
+        let llm = Arc::new(mapping_llm(SMALL_WINDOW, GENERAL_JSON));
+
+        let uc = SummarizeMeeting::new(llm.clone(), store);
+        uc.execute(id, "general", false, None).await.unwrap();
+
+        let maps = llm.map_prompts();
+        assert!(maps.len() >= 3, "got {} map calls", maps.len());
+        for i in 0..120 {
+            let at = position_of(&maps, &format!("Oración {i:03} "));
+            assert_eq!(
+                at.len(),
+                1,
+                "sentence {i} must be in exactly one map prompt"
+            );
+        }
+        assert_eq!(position_of(&maps, "Hola a todos").len(), 1);
+        assert_eq!(position_of(&maps, "Adiós").len(), 1);
+        assert_eq!(llm.calls(), maps.len() + 1);
+    }
+
+    #[tokio::test]
+    async fn a_single_oversized_segment_without_any_break_still_succeeds() {
+        let store = Arc::new(FakeStore::default());
+        let text = "ß".repeat(9_000);
+        let id = seed_meeting(&store, vec![&text]);
+        let llm = Arc::new(mapping_llm(SMALL_WINDOW, GENERAL_JSON));
+
+        let uc = SummarizeMeeting::new(llm.clone(), store);
+        uc.execute(id, "general", false, None).await.unwrap();
+
+        let carried: usize = llm
+            .map_prompts()
+            .iter()
+            .map(|p| p.matches('ß').count())
+            .sum();
+        assert_eq!(carried, 9_000, "every character must reach a map prompt");
+    }
+
     #[tokio::test]
     async fn oversized_notes_are_condensed_hierarchically_before_the_reduce() {
         let store = Arc::new(FakeStore::default());
@@ -1751,7 +1804,7 @@ mod tests {
                         Ok(GENERAL_JSON.to_string())
                     } else if prompt.contains("SEG-") {
                         // First-level notes: large enough that they cannot all fit.
-                        Ok(format!("BIG-{k} {}", "nota ".repeat(240)))
+                        Ok(format!("BIG-{k} {}", "nota ".repeat(120)))
                     } else {
                         Ok(format!("CONDENSED-{k}"))
                     }

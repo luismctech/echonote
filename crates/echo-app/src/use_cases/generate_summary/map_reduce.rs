@@ -93,8 +93,8 @@ fn safety_margin(window: usize) -> usize {
 /// # Errors
 ///
 /// [`SummarizeMeetingError::ContextTooSmall`] when the window leaves
-/// less than [`MIN_BUDGET_TOKENS`] for chunks or for the reduce input,
-/// or when a single segment alone exceeds the chunk budget.
+/// less than [`MIN_BUDGET_TOKENS`] for chunks or for the reduce input.
+/// A segment larger than a chunk is split by [`chunk_lines`], not rejected.
 pub(super) fn plan(
     llm: &dyn LlmModel,
     lines: &[String],
@@ -177,8 +177,10 @@ pub(super) async fn condense(
     )))
 }
 
-/// `chunk_lines` emits a line that alone exceeds the budget as its own
-/// chunk; sending it would overflow the window, so refuse instead.
+/// `chunk_lines` splits oversized lines, so a chunk over budget means the
+/// budget cannot hold even one character after the speaker label (or the
+/// token counter is not monotonic); sending it would overflow the
+/// window, so refuse instead.
 fn ensure_chunks_fit(
     chunks: &[String],
     budget: usize,

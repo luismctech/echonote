@@ -140,7 +140,7 @@ fn token_count_or_estimate<T, E: std::fmt::Display>(
     match tokenized {
         Ok(tokens) => tokens.len(),
         Err(e) => {
-            tracing::warn!(error = %e, "tokenizer failed, using the chars/3 estimate");
+            tracing::warn!(error = %e, "tokenizer failed, using the bytes/2 estimate");
             estimate_tokens(text)
         }
     }
@@ -163,8 +163,8 @@ mod tests {
     #[test]
     fn token_count_falls_back_to_the_estimate_when_tokenizing_fails() {
         let tokenized: Result<Vec<u32>, String> = Err("invalid utf-8".into());
-        // 7 chars -> ceil(7 / 3) = 3 tokens.
-        assert_eq!(token_count_or_estimate(tokenized, "abcdefg"), 3);
+        // 7 bytes -> ceil(7 / 2) = 4 tokens.
+        assert_eq!(token_count_or_estimate(tokenized, "abcdefg"), 4);
     }
 
     #[test]
