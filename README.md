@@ -185,6 +185,11 @@ Models are downloaded on-demand from the built-in model manager (**Settings → 
 | **Windows** | 10/11 (64-bit) | 16 GB RAM |
 | **Linux** | Ubuntu 22.04+ / AppImage-compatible | 16 GB RAM |
 | **Disk** | ~3 GB (app + base models) | ~12 GB (with full LLM) |
+| **Web engine** | Safari/WebKit 16.4+ (macOS) · WebView2 (Windows) · an up-to-date WebKitGTK (Linux) | Latest OS updates |
+
+> **macOS note.** The app installs on macOS 11 (Big Sur) and later, but capturing system audio (the other side of a call) needs macOS 12.3+.
+> On every macOS version, the interface needs **Safari 16.4 or newer** installed, because EchoNote renders with the system's WebKit and its styles rely on modern CSS.
+> Safari 16.4+ is available for Big Sur and Monterey through Software Update. If the app opens without styles, update Safari and relaunch.
 
 ---
 
