@@ -1,0 +1,6 @@
+# pnpm settings (pnpm 10 no longer reads the "pnpm" field in package.json).
+# Only these packages may run install/build scripts.
+onlyBuiltDependencies:
+  - esbuild
+  - "@tauri-apps/cli"
+  - "@parcel/watcher"
