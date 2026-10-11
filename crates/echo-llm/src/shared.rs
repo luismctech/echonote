@@ -67,9 +67,10 @@ pub(crate) const CONTEXT_IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 // ---------------------------------------------------------------------------
 
 /// Reasoning-block delimiters, as `(open, close)`: Qwen 3's
-/// `<think>…</think>` and Gemma 4's `<|channel>thought…<channel|>`.
-const THINK_BLOCKS: &[(&str, &str)] =
-    &[("<think>", "</think>"), ("<|channel>thought", "<channel|>")];
+/// `<think>…</think>` and Gemma 4's `<|channel>…<channel|>` (the thought
+/// channel is `<|channel>thought\n…`; any channel a template opens before
+/// the final answer is likewise not user-facing text).
+const THINK_BLOCKS: &[(&str, &str)] = &[("<think>", "</think>"), ("<|channel>", "<channel|>")];
 
 /// Remove reasoning blocks (see [`THINK_BLOCKS`]) that a model emits when
 /// its internal "thinking" mode is active. They are never useful to
@@ -112,6 +113,109 @@ pub(crate) fn strip_think_blocks(text: &str) -> String {
     result
 }
 
+/// Streaming counterpart of [`strip_think_blocks`]: feed decoder pieces to
+/// [`Self::push`], forward what it returns, then forward [`Self::finish`].
+///
+/// A marker may arrive split across pieces (`<|chan` + `nel>`), so text
+/// that could still turn into an opening marker is held back until the next
+/// piece settles it (at most the longest marker minus one byte); inside a
+/// block only a tail that could be a partial closing marker is kept. Like
+/// [`strip_think_blocks`] it drops an unclosed block at the end and trims
+/// the whitespace a block leaves in front of the answer.
+#[derive(Debug, Default)]
+pub(crate) struct ReasoningFilter {
+    pending: String,
+    /// Closing marker of the block being skipped, if inside one.
+    closing: Option<&'static str>,
+    /// Trim leading whitespace of the next visible text (set when a block
+    /// closes, cleared by the first non-blank visible text).
+    trim: bool,
+}
+
+impl ReasoningFilter {
+    /// A filter at the start of a reply.
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    /// Consume one decoder piece; returns the text now known to be visible.
+    pub(crate) fn push(&mut self, piece: &str) -> String {
+        self.pending.push_str(piece);
+        let mut out = String::new();
+        loop {
+            if let Some(close) = self.closing {
+                if let Some(at) = self.pending.find(close) {
+                    self.pending.drain(..at + close.len());
+                    self.closing = None;
+                    self.trim = true;
+                } else {
+                    let mut cut = self.pending.len().saturating_sub(close.len() - 1);
+                    while !self.pending.is_char_boundary(cut) {
+                        cut += 1;
+                    }
+                    self.pending.drain(..cut);
+                    return out;
+                }
+            } else if let Some((at, open, close)) = THINK_BLOCKS
+                .iter()
+                .filter_map(|&(open, close)| self.pending.find(open).map(|at| (at, open, close)))
+                .min_by_key(|&(at, _, _)| at)
+            {
+                let visible: String = self.pending.drain(..at).collect();
+                out.push_str(self.visible(&visible));
+                self.pending.drain(..open.len());
+                self.closing = Some(close);
+            } else {
+                let upto = self.pending.len() - partial_open_suffix(&self.pending);
+                let visible: String = self.pending.drain(..upto).collect();
+                out.push_str(self.visible(&visible));
+                return out;
+            }
+        }
+    }
+
+    /// End of stream: releases held-back text that never became a marker; an
+    /// unclosed block yields nothing.
+    pub(crate) fn finish(&mut self) -> String {
+        let rest = std::mem::take(&mut self.pending);
+        if self.closing.take().is_some() {
+            return String::new();
+        }
+        self.visible(&rest).to_string()
+    }
+
+    fn visible<'a>(&mut self, text: &'a str) -> &'a str {
+        if !self.trim {
+            return text;
+        }
+        let trimmed = text.trim_start();
+        if !trimmed.is_empty() {
+            self.trim = false;
+        }
+        trimmed
+    }
+}
+
+/// Length of the longest suffix of `text` that is a proper prefix of an
+/// opening marker (and so may still become one).
+fn partial_open_suffix(text: &str) -> usize {
+    let longest = THINK_BLOCKS
+        .iter()
+        .map(|(open, _)| open.len())
+        .max()
+        .unwrap_or(1);
+    (1..longest)
+        .rev()
+        .filter(|&k| k <= text.len() && text.is_char_boundary(text.len() - k))
+        .find(|&k| {
+            let tail = &text[text.len() - k..];
+            THINK_BLOCKS
+                .iter()
+                .any(|(open, _)| open.len() > k && open.starts_with(tail))
+        })
+        .unwrap_or(0)
+}
+
 /// Per-process loaded model + the knobs needed to build the decoding
 /// context.
 pub(crate) struct LoadedModel {
@@ -147,9 +251,8 @@ impl LoadedModel {
     /// `/no_think` to the last user turn (summaries); Jinja families are
     /// always rendered with thinking off, chat included.
     ///
-    /// The prompt is tokenized with special-token parsing and no extra
-    /// BOS (see `LlamaEngine`): a template that writes `<bos>` yields
-    /// exactly one BOS token, and one that does not yields none.
+    /// The prompt is tokenized by [`Self::tokenize`]: special tokens are
+    /// parsed and exactly one BOS is present if the vocabulary wants one.
     pub fn render_chat(&self, messages: &[ChatMessage], qwen_no_think: bool) -> Rendered {
         self.profile.render(messages, qwen_no_think, |messages| {
             self.apply_template(messages)
@@ -226,8 +329,10 @@ impl LoadedModel {
             use_jinja: true,
             parallel_tool_calls: false,
             enable_thinking: false,
-            // The tokenizer adds no BOS (`AddBos::Never`), so a BOS the
-            // template writes must stay in the text.
+            // llama.cpp overrides this with the vocabulary's own `add_bos`
+            // flag: for a model that wants a BOS (Gemma) the template's
+            // `<bos>` is stripped from the text and the tokenizer adds it
+            // (see [`LoadedModel::tokenize`]).
             add_bos: false,
             add_eos: false,
             parse_tool_calls: false,
@@ -244,14 +349,41 @@ impl LoadedModel {
     /// Token count of `text` under the model's own tokenizer, shared by
     /// the `count_tokens` overrides of every adapter.
     ///
-    /// `AddBos::Never` mirrors how prompts are tokenized at generation
-    /// time, so the count matches what the context will actually hold.
+    /// [`Self::tokenize`] is how prompts are tokenized at generation time,
+    /// so the count matches what the context will actually hold.
     /// A tokenizer failure falls back to the conservative
     /// [`estimate_tokens`] instead of erroring: a budget query must not
     /// be able to abort a request the estimate could still size safely.
     pub fn count_tokens(&self, text: &str) -> usize {
-        token_count_or_estimate(self.model.str_to_token(text, AddBos::Never), text)
+        token_count_or_estimate(self.tokenize(text), text)
     }
+
+    /// Tokenize a prompt with special-token parsing and the vocabulary's own
+    /// BOS policy: `AddBos::Always` makes llama.cpp prepend BOS exactly when
+    /// the model's `tokenizer.ggml.add_bos_token` says so (Gemma yes, Qwen
+    /// no), and a prompt that already starts with a BOS token (a raw prompt
+    /// carrying `<bos>`) is not given a second one.
+    ///
+    /// The chat-template path relies on this: llama.cpp strips the template's
+    /// leading `<bos>` for such vocabularies, so tokenizing with
+    /// `AddBos::Never` would leave a Gemma prompt without any BOS. Empty
+    /// text has no tokens (not a lone BOS).
+    pub fn tokenize(&self, text: &str) -> Result<Vec<LlamaToken>, llama_cpp_2::StringToTokenError> {
+        if text.is_empty() {
+            return Ok(Vec::new());
+        }
+        let tokens = self.model.str_to_token(text, AddBos::Always)?;
+        Ok(dedup_leading_bos(tokens, self.model.token_bos()))
+    }
+}
+
+/// `tokens` without a doubled leading `bos` (only the first of two
+/// consecutive BOS tokens at the start is dropped).
+fn dedup_leading_bos(mut tokens: Vec<LlamaToken>, bos: LlamaToken) -> Vec<LlamaToken> {
+    if tokens.len() >= 2 && tokens[0] == bos && tokens[1] == bos {
+        tokens.remove(0);
+    }
+    tokens
 }
 
 /// A [`LoadedModel`] plus the worker thread that owns its reusable
@@ -351,6 +483,109 @@ mod tests {
     fn strip_mixed_markers_in_order_and_an_unclosed_channel() {
         let input = "<think>a</think>One <|channel>thought\nb<channel|>two <|channel>thought\ncut";
         assert_eq!(strip_think_blocks(input), "One two ");
+    }
+
+    #[test]
+    fn a_doubled_leading_bos_collapses_to_one() {
+        let bos = LlamaToken(2);
+        let t = |ids: &[i32]| ids.iter().map(|&i| LlamaToken(i)).collect::<Vec<_>>();
+        assert_eq!(dedup_leading_bos(t(&[2, 2, 7, 8]), bos), t(&[2, 7, 8]));
+        assert_eq!(dedup_leading_bos(t(&[2, 7, 2]), bos), t(&[2, 7, 2]));
+        assert_eq!(dedup_leading_bos(t(&[7, 2, 2]), bos), t(&[7, 2, 2]));
+        assert_eq!(dedup_leading_bos(t(&[2]), bos), t(&[2]));
+        assert_eq!(dedup_leading_bos(t(&[]), bos), t(&[]));
+    }
+
+    // ---- streaming reasoning filter ----------------------------------------
+
+    /// Feed `pieces` through a fresh filter; returns what each push shows and
+    /// the final flush.
+    fn filter_run(pieces: &[&str]) -> (Vec<String>, String) {
+        let mut f = ReasoningFilter::new();
+        let shown = pieces.iter().map(|p| f.push(p)).collect();
+        (shown, f.finish())
+    }
+
+    fn filter_text(pieces: &[&str]) -> String {
+        let (shown, tail) = filter_run(pieces);
+        shown.concat() + &tail
+    }
+
+    #[test]
+    fn filter_passes_plain_text_through_piece_by_piece() {
+        let (shown, tail) = filter_run(&["Hola", " mundo"]);
+        assert_eq!(shown, ["Hola", " mundo"]);
+        assert_eq!(tail, "");
+    }
+
+    #[test]
+    fn filter_suppresses_a_think_block_and_trims_the_gap_after_it() {
+        assert_eq!(
+            filter_text(&["<think>", "hidden", "</think>", "\n\nHola"]),
+            "Hola"
+        );
+    }
+
+    #[test]
+    fn filter_suppresses_a_gemma_thought_channel() {
+        let pieces = [
+            "<|channel>",
+            "thought",
+            "\nplan it",
+            "<channel|>",
+            "Respuesta",
+        ];
+        assert_eq!(filter_text(&pieces), "Respuesta");
+    }
+
+    #[test]
+    fn filter_suppresses_an_empty_gemma_channel_and_any_other_channel_name() {
+        assert_eq!(filter_text(&["<|channel>thought\n<channel|>Hola"]), "Hola");
+        assert_eq!(
+            filter_text(&["<|channel>analysis\nx<channel|>Hola"]),
+            "Hola"
+        );
+    }
+
+    #[test]
+    fn filter_handles_markers_split_in_the_middle() {
+        let pieces = ["<|chan", "nel>thou", "ght\nx<chan", "nel|>Res", "puesta"];
+        assert_eq!(filter_text(&pieces), "Respuesta");
+        let pieces = ["<thi", "nk>a</th", "ink>ok"];
+        assert_eq!(filter_text(&pieces), "ok");
+    }
+
+    #[test]
+    fn filter_never_shows_a_split_open_marker_before_it_is_complete() {
+        let mut f = ReasoningFilter::new();
+        assert_eq!(f.push("Hola <|chan"), "Hola ");
+        assert_eq!(f.push("nel>thought\nsecret<channel|>fin"), "fin");
+    }
+
+    #[test]
+    fn filter_releases_a_held_back_prefix_that_turns_out_to_be_text() {
+        let mut f = ReasoningFilter::new();
+        assert_eq!(f.push("a <"), "a ");
+        assert_eq!(f.push(" b"), "< b");
+        // A prefix still pending when the stream ends is plain text.
+        assert_eq!(f.push("x <"), "x ");
+        assert_eq!(f.finish(), "<");
+    }
+
+    #[test]
+    fn filter_drops_an_unclosed_block_at_the_end() {
+        let (shown, tail) = filter_run(&["Hola <|channel>thought\ncut off"]);
+        assert_eq!(shown.concat() + &tail, "Hola ");
+    }
+
+    #[test]
+    fn filter_handles_several_blocks_and_chat_markers_that_are_not_reasoning() {
+        let pieces = [
+            "<think>a</think>One ",
+            "<|channel>thought\nb<channel|>",
+            "two<|im_end|>",
+        ];
+        assert_eq!(filter_text(&pieces), "One two<|im_end|>");
     }
 
     #[test]

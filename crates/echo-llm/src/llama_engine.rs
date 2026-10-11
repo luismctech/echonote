@@ -27,7 +27,6 @@ use std::sync::Arc;
 use llama_cpp_2::context::params::LlamaContextParams;
 use llama_cpp_2::context::LlamaContext;
 use llama_cpp_2::llama_batch::LlamaBatch;
-use llama_cpp_2::model::AddBos;
 use llama_cpp_2::sampling::LlamaSampler;
 use llama_cpp_2::token::LlamaToken;
 use tracing::{debug, warn};
@@ -175,13 +174,11 @@ impl LlamaEngine<'_> {
         let loaded = self.loaded;
 
         // The prompt was rendered with the model's chat template (see
-        // `crate::template`), which writes any BOS marker it needs as text;
-        // tokenizing with special-token parsing turns that text into the
-        // BOS token, so none is added here: `AddBos::Never` avoids a
-        // duplicate.
+        // `crate::template`); `tokenize` parses its special tokens and
+        // applies the vocabulary's BOS policy (one BOS for Gemma, none for
+        // Qwen).
         let prompt_tokens = loaded
-            .model
-            .str_to_token(prompt, AddBos::Never)
+            .tokenize(prompt)
             .map_err(|e| DomainError::LlmFailed(format!("tokenize prompt: {e}")))?;
 
         if prompt_tokens.is_empty() {
