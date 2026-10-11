@@ -66,7 +66,7 @@ use echo_domain::{ChatAssistant, ChatMessage, ChatRequest, ChatToken, DomainErro
 
 use crate::llama_cpp::{LlamaCppLlm, LoadOptions};
 use crate::shared::{SharedModel, StreamState};
-use crate::template::merge_stops;
+use crate::template::{merge_stops, NoThink};
 use crate::worker::{
     drain_stream, Cancel, Flow, Job, Outlet, PieceSink, Priority, SamplingParams, Sink,
 };
@@ -155,7 +155,7 @@ impl ChatAssistant for LlamaCppChat {
     }
 
     fn count_chat_tokens(&self, messages: &[ChatMessage]) -> usize {
-        self.inner.count_chat_tokens(messages, false)
+        self.inner.count_chat_tokens(messages, NoThink::EveryTurn)
     }
 
     #[instrument(
@@ -185,10 +185,14 @@ impl ChatAssistant for LlamaCppChat {
             ));
         }
 
-        // Chat sends no Qwen `/no_think` and keeps its default reasoning
-        // behaviour (Jinja families render with thinking off regardless):
-        // any think block is suppressed from the stream by `StreamState`.
-        let rendered = self.inner.render_chat(&request.messages, false);
+        // Qwen gets `/no_think` on every user turn (no hidden reasoning
+        // before the answer; every turn so the history prefix stays stable
+        // for KV reuse); Jinja families render with thinking off anyway.
+        // A think block a model emits regardless is still suppressed from
+        // the stream by `StreamState`.
+        let rendered = self
+            .inner
+            .render_chat(&request.messages, NoThink::EveryTurn);
         let prompt = rendered.text;
         let stops = merge_stops(&request.options.stop, &rendered.stops);
 

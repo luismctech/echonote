@@ -128,9 +128,9 @@ async fn llama_latency_and_memory_baseline() {
     let tiny = conversation("Answer with one word.", "Say OK.");
     for call in 1..=2 {
         let started = Instant::now();
-        let out = llm.generate_chat(&tiny, &greedy(1)).await.expect("tiny");
+        let out = llm.generate_chat(&tiny, &greedy(16)).await.expect("tiny");
         eprintln!(
-            "[bench] tiny request #{call} (1 token, tiny prompt): {} ms (output {out:?})",
+            "[bench] tiny request #{call} (16 tokens max, tiny prompt): {} ms (output {out:?})",
             started.elapsed().as_millis()
         );
         report_rss(&format!("after tiny request #{call}"));
@@ -139,16 +139,7 @@ async fn llama_latency_and_memory_baseline() {
     // (b) prompt-eval throughput on a ~6k-token prompt.
     let transcript = synthetic_transcript(&llm, TARGET_PROMPT_TOKENS);
     let system = format!("You answer questions about this meeting transcript.\n\n{transcript}");
-    // Qwen's chat keeps its default reasoning, so the question switches it
-    // off by hand; the Jinja families already render with thinking off.
-    let no_think = if llm.prompt_format_name() == "Qwen" {
-        " /no_think"
-    } else {
-        ""
-    };
-    let question =
-        format!("¿Qué se acordó sobre el informe de costes? Responde en una frase.{no_think}");
-    let question = question.as_str();
+    let question = "¿Qué se acordó sobre el informe de costes? Responde en una frase.";
     let long = conversation(&system, question);
     let (rendered, _) = llm.rendered_chat_prompt(&long);
     let n_prompt = llm.count_tokens(&rendered);
@@ -158,12 +149,12 @@ async fn llama_latency_and_memory_baseline() {
     );
     let started = Instant::now();
     let _ = llm
-        .generate_chat(&long, &greedy(1))
+        .generate_chat(&long, &greedy(16))
         .await
         .expect("long prompt");
     let eval = started.elapsed();
     eprintln!(
-        "[bench] prompt eval: {n_prompt} tokens in {} ms = {:.1} tok/s (includes 1 generated token)",
+        "[bench] prompt eval: {n_prompt} tokens in {} ms = {:.1} tok/s (includes up to 16 generated tokens: Qwen's empty think block first)",
         eval.as_millis(),
         n_prompt as f64 / eval.as_secs_f64()
     );
@@ -174,7 +165,7 @@ async fn llama_latency_and_memory_baseline() {
     let chat = llm.chat_handle();
     // Step (b) left this very prompt in the KV cache; evict it with an
     // unrelated request so turn 1 below is a true cold start.
-    let _ = llm.generate_chat(&tiny, &greedy(1)).await.expect("evict");
+    let _ = llm.generate_chat(&tiny, &greedy(16)).await.expect("evict");
     let options = ChatOptions {
         max_tokens: 64,
         temperature: 0.0,
@@ -194,9 +185,7 @@ async fn llama_latency_and_memory_baseline() {
                 ChatMessage::system(system.clone()),
                 ChatMessage::user(question),
                 ChatMessage::assistant(first_answer.clone()),
-                ChatMessage::user(format!(
-                    "¿Quién se encarga de ello? Responde en una frase.{no_think}"
-                )),
+                ChatMessage::user("¿Quién se encarga de ello? Responde en una frase."),
             ]
         };
         let request = ChatRequest {

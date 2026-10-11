@@ -46,7 +46,7 @@ use echo_domain::{ChatMessage, DomainError, GenerateOptions, LlmModel};
 use crate::backend::backend_singleton;
 use crate::llama_cpp_chat::LlamaCppChat;
 use crate::shared::{probe_bos_policy, LoadedModel, SharedModel, StreamState};
-use crate::template::{merge_stops, PromptFormat, PromptProfile, Rendering};
+use crate::template::{merge_stops, NoThink, PromptFormat, PromptProfile, Rendering};
 use crate::worker::{
     drain_stream, Cancel, Flow, Job, Outlet, PieceSink, Priority, SamplingParams, Sink,
 };
@@ -354,7 +354,7 @@ impl LlamaCppLlm {
     #[doc(hidden)]
     #[must_use]
     pub fn rendered_chat_prompt(&self, messages: &[ChatMessage]) -> (String, Vec<String>) {
-        let r = self.inner.render_chat(messages, true);
+        let r = self.inner.render_chat(messages, NoThink::LastTurn);
         (r.text, r.stops)
     }
 
@@ -379,7 +379,7 @@ impl LlamaCppLlm {
         if messages.is_empty() {
             return Err(DomainError::Invariant("chat prompt has no messages".into()));
         }
-        let rendered = self.inner.render_chat(messages, true);
+        let rendered = self.inner.render_chat(messages, NoThink::LastTurn);
         let options = GenerateOptions {
             stop: merge_stops(&options.stop, &rendered.stops),
             ..options.clone()
@@ -444,7 +444,7 @@ impl LlmModel for LlamaCppLlm {
     }
 
     fn count_chat_tokens(&self, messages: &[ChatMessage]) -> usize {
-        self.inner.count_chat_tokens(messages, true)
+        self.inner.count_chat_tokens(messages, NoThink::LastTurn)
     }
 
     #[instrument(skip(self, prompt, options), fields(prompt_chars = prompt.len(), max_tokens = options.max_tokens))]

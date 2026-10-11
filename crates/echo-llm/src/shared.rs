@@ -55,7 +55,7 @@ use llama_cpp_2::token_type::LlamaTokenAttr;
 use echo_domain::{estimate_tokens, ChatMessage, DomainError};
 
 use crate::llama_engine::LlamaSource;
-use crate::template::{self, PromptProfile, Rendered, TemplateOutput};
+use crate::template::{self, NoThink, PromptProfile, Rendered, TemplateOutput};
 use crate::worker::{Job, Worker};
 
 /// How long the persistent context may sit unused before it is dropped to
@@ -469,22 +469,21 @@ pub(crate) struct LoadedModel {
 impl LoadedModel {
     /// Render `messages` with this model's chat template (see
     /// [`crate::template`]), after stripping the model's special-token
-    /// texts from their contents. `qwen_no_think` appends Qwen's
-    /// `/no_think` to the last user turn (summaries); Jinja families are
-    /// always rendered with thinking off, chat included.
+    /// texts from their contents. `no_think` places Qwen's
+    /// `/no_think` (last turn for summaries, every turn for chat); Jinja
+    /// families are always rendered with thinking off, chat included.
     ///
     /// The prompt is tokenized by [`Self::tokenize`]: special tokens are
     /// parsed and exactly one BOS is present if the vocabulary wants one.
-    pub fn render_chat(&self, messages: &[ChatMessage], qwen_no_think: bool) -> Rendered {
-        self.profile.render(messages, qwen_no_think, |messages| {
-            self.apply_template(messages)
-        })
+    pub fn render_chat(&self, messages: &[ChatMessage], no_think: NoThink) -> Rendered {
+        self.profile
+            .render(messages, no_think, |messages| self.apply_template(messages))
     }
 
     /// Token count of `messages` rendered by [`Self::render_chat`], the
     /// way a request would carry them.
-    pub fn count_chat_tokens(&self, messages: &[ChatMessage], qwen_no_think: bool) -> usize {
-        self.count_tokens(&self.render_chat(messages, qwen_no_think).text)
+    pub fn count_chat_tokens(&self, messages: &[ChatMessage], no_think: NoThink) -> usize {
+        self.count_tokens(&self.render_chat(messages, no_think).text)
     }
 
     /// Render the probe conversation with the GGUF's Jinja template; the
