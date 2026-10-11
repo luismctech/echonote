@@ -5,10 +5,12 @@
  * SVG mark inside a tinted rounded container.
  */
 
-type Provider = "openai" | "qwen" | "silero" | "3dspeaker" | "pyannote";
+export type Provider = "openai" | "qwen" | "gemma" | "silero" | "3dspeaker" | "pyannote";
 
-function resolveProvider(modelId: string): Provider {
+/** Maps a catalog model id to its provider; `llm-gemma*` is Gemma, any other `llm-*` Qwen. */
+export function resolveProvider(modelId: string): Provider {
   if (modelId.startsWith("asr-")) return "openai";
+  if (modelId.startsWith("llm-gemma")) return "gemma";
   if (modelId.startsWith("llm-")) return "qwen";
   if (modelId.startsWith("vad-")) return "silero";
   if (modelId.startsWith("embedder-")) return "3dspeaker";
@@ -19,14 +21,16 @@ function resolveProvider(modelId: string): Provider {
 const BG: Record<Provider, string> = {
   openai: "bg-neutral-900 dark:bg-neutral-200",
   qwen: "bg-[#615EFF]",
+  gemma: "bg-blue-600",
   silero: "bg-amber-500",
   "3dspeaker": "bg-sky-600",
   pyannote: "bg-violet-600",
 };
 
-const LABEL: Record<Provider, string> = {
+export const LABEL: Record<Provider, string> = {
   openai: "OpenAI Whisper",
   qwen: "Qwen · Alibaba",
+  gemma: "Gemma · Google",
   silero: "Silero",
   "3dspeaker": "3D-Speaker · DAMO",
   pyannote: "pyannote",
@@ -59,6 +63,8 @@ function ProviderSvg({ provider, size }: Readonly<{ provider: Provider; size: nu
       return <OpenAISvg size={size} />;
     case "qwen":
       return <QwenSvg size={size} />;
+    case "gemma":
+      return <GemmaSvg size={size} />;
     case "silero":
       return <SileroSvg size={size} />;
     case "3dspeaker":
@@ -92,6 +98,16 @@ function QwenSvg({ size }: Readonly<{ size: number }>) {
         className="fill-white"
         d="M12 2L14 10L22 12L14 14L12 22L10 14L2 12L10 10Z"
       />
+    </svg>
+  );
+}
+
+/** Gemma — twin sparkles (generic mark; the vendor artwork is not bundled). */
+function GemmaSvg({ size }: Readonly<{ size: number }>) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" aria-hidden="true">
+      <path className="fill-white" d="M9 2L11 9L18 11L11 13L9 20L7 13L0 11L7 9Z" transform="translate(2 0)" />
+      <path className="fill-white/70" d="M19 14L20 17.5L23.5 18.5L20 19.5L19 23L18 19.5L14.5 18.5L18 17.5Z" />
     </svg>
   );
 }
