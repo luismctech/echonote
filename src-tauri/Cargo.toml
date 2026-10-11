@@ -60,8 +60,8 @@ keepawake = "0.6"
 sha2 = "0.11"
 scopeguard = "1"
 sysinfo = { version = "0.33", default-features = false, features = ["system"] }
-tauri-plugin-dialog = "2.7.1"
-tauri-plugin-global-shortcut = "2.3.1"
+tauri-plugin-dialog = "2.8.2"
+tauri-plugin-global-shortcut = "2.4.1"
 specta.workspace = true
 specta-typescript.workspace = true
 tauri-specta.workspace = true
