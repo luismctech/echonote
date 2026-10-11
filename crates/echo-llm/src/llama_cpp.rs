@@ -41,11 +41,12 @@ use llama_cpp_2::model::LlamaModel;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, instrument};
 
-use echo_domain::{DomainError, GenerateOptions, LlmModel};
+use echo_domain::{ChatMessage, DomainError, GenerateOptions, LlmModel};
 
 use crate::backend::backend_singleton;
 use crate::llama_cpp_chat::LlamaCppChat;
 use crate::shared::{LoadedModel, SharedModel};
+use crate::template::{merge_stops, PromptFormat};
 use crate::worker::{
     drain_stream, Cancel, Flow, Job, Outlet, PieceSink, Priority, SamplingParams, Sink,
 };
@@ -200,6 +201,19 @@ impl LlamaCppLlm {
         let model = LlamaModel::load_from_file(backend, path, &model_params)
             .map_err(|e| DomainError::ModelNotLoaded(format!("llama.cpp: {e}")))?;
 
+        let architecture = model.meta_val_str("general.architecture").ok();
+        let template = model.chat_template(None).ok();
+        let format = PromptFormat::detect(
+            architecture.as_deref(),
+            template.as_ref().and_then(|t| t.to_str().ok()),
+        );
+        info!(
+            architecture = architecture.as_deref().unwrap_or("unknown"),
+            has_template = template.is_some(),
+            ?format,
+            "detected prompt format"
+        );
+
         Ok(Self {
             inner: Arc::new(SharedModel::new(LoadedModel {
                 backend,
@@ -208,6 +222,8 @@ impl LlamaCppLlm {
                 model_path: path.to_path_buf(),
                 n_ctx: opts.n_ctx,
                 n_threads: opts.n_threads,
+                format,
+                template,
             })),
         })
     }
@@ -246,6 +262,55 @@ impl LlamaCppLlm {
     #[must_use]
     pub fn last_reused_tokens(&self) -> usize {
         self.inner.last_reused_tokens()
+    }
+
+    /// Prompt family detected from the GGUF (`"Qwen"`, `"Gemma4"` or
+    /// `"Other"`). Test support behind the `test-hooks` feature.
+    #[cfg(any(test, feature = "test-hooks"))]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn prompt_format_name(&self) -> String {
+        format!("{:?}", self.inner.format)
+    }
+
+    /// The prompt [`LlmModel::generate_chat`] would send for `messages`
+    /// (reasoning off) and the stop sequences it adds. Test support behind
+    /// the `test-hooks` feature.
+    #[cfg(any(test, feature = "test-hooks"))]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn rendered_chat_prompt(&self, messages: &[ChatMessage]) -> (String, Vec<String>) {
+        let r = self.inner.render_chat(messages, true);
+        (r.text, r.stops)
+    }
+
+    /// The prompt the GGUF's own Jinja template renders for `messages`,
+    /// independent of the family. Test support behind the `test-hooks`
+    /// feature.
+    #[cfg(any(test, feature = "test-hooks"))]
+    #[doc(hidden)]
+    pub fn jinja_chat_prompt(&self, messages: &[ChatMessage]) -> Result<String, String> {
+        self.inner.jinja_prompt(messages)
+    }
+}
+
+impl LlamaCppLlm {
+    /// Render `messages` for this model (reasoning switched off) and add
+    /// the model's own stop sequences to `options`.
+    fn chat_request(
+        &self,
+        messages: &[ChatMessage],
+        options: &GenerateOptions,
+    ) -> Result<(String, GenerateOptions), DomainError> {
+        if messages.is_empty() {
+            return Err(DomainError::Invariant("chat prompt has no messages".into()));
+        }
+        let rendered = self.inner.render_chat(messages, true);
+        let options = GenerateOptions {
+            stop: merge_stops(&options.stop, &rendered.stops),
+            ..options.clone()
+        };
+        Ok((rendered.text, options))
     }
 }
 
@@ -288,6 +353,28 @@ impl LlmModel for LlamaCppLlm {
         })?;
         rx.await
             .map_err(|_| DomainError::LlmFailed("generation worker dropped the request".into()))?
+    }
+
+    async fn generate_chat(
+        &self,
+        messages: &[ChatMessage],
+        options: &GenerateOptions,
+    ) -> Result<String, DomainError> {
+        let (prompt, options) = self.chat_request(messages, options)?;
+        self.generate(&prompt, &options).await
+    }
+
+    async fn generate_chat_stream(
+        &self,
+        messages: &[ChatMessage],
+        options: &GenerateOptions,
+    ) -> Result<BoxStream<'static, Result<String, DomainError>>, DomainError> {
+        let (prompt, options) = self.chat_request(messages, options)?;
+        self.generate_stream(&prompt, &options).await
+    }
+
+    fn count_chat_tokens(&self, messages: &[ChatMessage]) -> usize {
+        self.inner.count_chat_tokens(messages, true)
     }
 
     #[instrument(skip(self, prompt, options), fields(prompt_chars = prompt.len(), max_tokens = options.max_tokens))]

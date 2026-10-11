@@ -47,11 +47,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use llama_cpp_2::llama_backend::LlamaBackend;
-use llama_cpp_2::model::{AddBos, LlamaModel};
+use llama_cpp_2::model::{AddBos, LlamaChatTemplate, LlamaModel};
+use llama_cpp_2::openai::OpenAIChatTemplateParams;
 
-use echo_domain::{estimate_tokens, DomainError};
+use echo_domain::{estimate_tokens, ChatMessage, DomainError};
 
 use crate::llama_engine::LlamaSource;
+use crate::template::{self, PromptFormat, Rendered, TemplateOutput};
 use crate::worker::{Job, Worker};
 
 /// How long the persistent context may sit unused before it is dropped to
@@ -62,27 +64,37 @@ pub(crate) const CONTEXT_IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 // Think-block stripping (Qwen 3 reasoning suppression)
 // ---------------------------------------------------------------------------
 
-/// Remove `<think>…</think>` reasoning blocks that Qwen 3 emits when
-/// its internal "thinking" mode is active.  These blocks are never
-/// useful to end-users — they contain raw chain-of-thought reasoning
-/// that adds noise to summaries and chat replies.
+/// Reasoning-block delimiters, as `(open, close)`: Qwen 3's
+/// `<think>…</think>` and Gemma 4's `<|channel>thought…<channel|>`.
+const THINK_BLOCKS: &[(&str, &str)] =
+    &[("<think>", "</think>"), ("<|channel>thought", "<channel|>")];
+
+/// Remove reasoning blocks (see [`THINK_BLOCKS`]) that a model emits when
+/// its internal "thinking" mode is active. They are never useful to
+/// end-users: they contain raw chain-of-thought that adds noise to
+/// summaries and chat replies. Gemma's are stripped defensively, since the
+/// prompt renderer asks for thinking to be off.
 ///
-/// Handles multiple blocks, nested whitespace, and a trailing
-/// unclosed `<think>` (the model hit max_tokens mid-thought).
+/// Handles multiple blocks, nested whitespace, and a trailing unclosed
+/// block (the model hit max_tokens mid-thought).
 pub(crate) fn strip_think_blocks(text: &str) -> String {
     let mut result = String::with_capacity(text.len());
     let mut remaining = text;
 
-    while let Some(start) = remaining.find("<think>") {
-        // Keep everything before <think>
+    while let Some((start, open, close)) = THINK_BLOCKS
+        .iter()
+        .filter_map(|&(open, close)| remaining.find(open).map(|at| (at, open, close)))
+        .min_by_key(|&(at, _, _)| at)
+    {
+        // Keep everything before the opening marker
         result.push_str(&remaining[..start]);
 
-        // Find matching </think>
-        let after_tag = &remaining[start + "<think>".len()..];
-        if let Some(end) = after_tag.find("</think>") {
-            remaining = &after_tag[end + "</think>".len()..];
+        // Find the matching closing marker
+        let after_tag = &remaining[start + open.len()..];
+        if let Some(end) = after_tag.find(close) {
+            remaining = &after_tag[end + close.len()..];
         } else {
-            // Unclosed <think> — discard everything after it
+            // Unclosed block — discard everything after it
             remaining = "";
             break;
         }
@@ -119,9 +131,75 @@ pub(crate) struct LoadedModel {
     /// Optional decoder thread count. `None` defers to llama.cpp's
     /// default (typically `num_cpus`). Useful in tests.
     pub n_threads: Option<i32>,
+    /// Prompt family, detected from the GGUF metadata at load time.
+    pub format: PromptFormat,
+    /// The chat template embedded in the GGUF, when it has one.
+    pub template: Option<LlamaChatTemplate>,
 }
 
 impl LoadedModel {
+    /// Render `messages` with this model's chat template (see
+    /// [`crate::template`]). `suppress_thinking` is for requests that
+    /// want no reasoning (summaries); chat leaves the model's default.
+    ///
+    /// The prompt is tokenized with special-token parsing and no extra
+    /// BOS (see `LlamaEngine`): a template that writes `<bos>` yields
+    /// exactly one BOS token, and one that does not yields none.
+    pub fn render_chat(&self, messages: &[ChatMessage], suppress_thinking: bool) -> Rendered {
+        template::render_chat(self.format, messages, suppress_thinking, |messages| {
+            self.apply_template(messages)
+        })
+    }
+
+    /// Token count of `messages` rendered by [`Self::render_chat`], the
+    /// way a request would carry them.
+    pub fn count_chat_tokens(&self, messages: &[ChatMessage], suppress_thinking: bool) -> usize {
+        self.count_tokens(&self.render_chat(messages, suppress_thinking).text)
+    }
+
+    /// Test support: the prompt the GGUF's own Jinja template renders for
+    /// `messages`, whatever the family ([`Self::render_chat`] uses ChatML
+    /// for Qwen).
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn jinja_prompt(&self, messages: &[ChatMessage]) -> Result<String, String> {
+        self.apply_template(messages).map(|out| out.prompt)
+    }
+
+    /// Render with the GGUF's Jinja template through llama.cpp's
+    /// OpenAI-compatible path, thinking disabled.
+    fn apply_template(&self, messages: &[ChatMessage]) -> Result<TemplateOutput, String> {
+        let template = self
+            .template
+            .as_ref()
+            .ok_or_else(|| "the model has no chat template".to_string())?;
+        let json = template::messages_json(messages);
+        let params = OpenAIChatTemplateParams {
+            messages_json: &json,
+            tools_json: None,
+            tool_choice: None,
+            json_schema: None,
+            grammar: None,
+            reasoning_format: None,
+            chat_template_kwargs: None,
+            add_generation_prompt: true,
+            use_jinja: true,
+            parallel_tool_calls: false,
+            enable_thinking: false,
+            // The tokenizer adds no BOS (`AddBos::Never`), so a BOS the
+            // template writes must stay in the text.
+            add_bos: false,
+            add_eos: false,
+            parse_tool_calls: false,
+        };
+        self.model
+            .apply_chat_template_oaicompat(template, &params)
+            .map(|r| TemplateOutput {
+                prompt: r.prompt,
+                additional_stops: r.additional_stops,
+            })
+            .map_err(|e| e.to_string())
+    }
+
     /// Token count of `text` under the model's own tokenizer, shared by
     /// the `count_tokens` overrides of every adapter.
     ///
@@ -220,6 +298,18 @@ mod tests {
         let tokenized: Result<Vec<u32>, String> = Err("invalid utf-8".into());
         // 7 bytes -> ceil(7 / 2) = 4 tokens.
         assert_eq!(token_count_or_estimate(tokenized, "abcdefg"), 4);
+    }
+
+    #[test]
+    fn strip_gemma_thought_channel() {
+        let input = "<|channel>thought\nplanning the answer<channel|>The summary.";
+        assert_eq!(strip_think_blocks(input), "The summary.");
+    }
+
+    #[test]
+    fn strip_mixed_markers_in_order_and_an_unclosed_channel() {
+        let input = "<think>a</think>One <|channel>thought\nb<channel|>two <|channel>thought\ncut";
+        assert_eq!(strip_think_blocks(input), "One two ");
     }
 
     #[test]

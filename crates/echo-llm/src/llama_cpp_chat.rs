@@ -40,12 +40,12 @@
 //!
 //! ## Stop-sequence handling
 //!
-//! Most well-behaved chat-template models emit `<|im_end|>` (Qwen) or
-//! `<|eot_id|>` (Llama 3) as a special **EOG** token, which
+//! Most well-behaved chat-template models emit `<|im_end|>` (Qwen),
+//! `<turn|>` (Gemma 4) or `<|eot_id|>` (Llama 3) as a special **EOG** token, which
 //! [`LlamaModel::is_eog_token`] catches before the piece ever leaves
 //! the decoder. As a belt-and-braces measure we also scan the running
-//! reply for any of the user-supplied
-//! [`ChatOptions::stop`] strings; if one matches, we trim the latest
+//! reply for any of the user-supplied [`ChatOptions::stop`] strings and
+//! the ones of the model family (see [`crate::template`]); if one matches, we trim the latest
 //! piece at the stop position before sending and then end the stream.
 //! The two layers together cover the cases (a) model behaving
 //! correctly (EOG fires), (b) model emitting the marker as text
@@ -61,10 +61,11 @@ use futures::stream::BoxStream;
 use tokio::sync::mpsc;
 use tracing::{debug, info, instrument};
 
-use echo_domain::{ChatAssistant, ChatMessage, ChatRequest, ChatRole, ChatToken, DomainError};
+use echo_domain::{ChatAssistant, ChatMessage, ChatRequest, ChatToken, DomainError};
 
 use crate::llama_cpp::{LlamaCppLlm, LoadOptions};
 use crate::shared::SharedModel;
+use crate::template::merge_stops;
 use crate::worker::{
     drain_stream, Cancel, Flow, Job, Outlet, PieceSink, Priority, SamplingParams, Sink,
 };
@@ -152,6 +153,10 @@ impl ChatAssistant for LlamaCppChat {
         self.inner.count_tokens(text)
     }
 
+    fn count_chat_tokens(&self, messages: &[ChatMessage]) -> usize {
+        self.inner.count_chat_tokens(messages, false)
+    }
+
     #[instrument(
         skip(self, request),
         fields(
@@ -179,7 +184,11 @@ impl ChatAssistant for LlamaCppChat {
             ));
         }
 
-        let prompt = render_qwen_chat_prompt(&request.messages);
+        // Chat keeps the model's default reasoning behaviour: think blocks
+        // are suppressed from the stream by `StreamState` instead.
+        let rendered = self.inner.render_chat(&request.messages, false);
+        let prompt = rendered.text;
+        let stops = merge_stops(&request.options.stop, &rendered.stops);
 
         // ---- queue the decode on the worker + bridge it to a stream -----
         // Decoder failures travel through the channel as the final item.
@@ -194,7 +203,7 @@ impl ChatAssistant for LlamaCppChat {
             prompt,
             params: SamplingParams::from_chat(&request.options),
             sink: Box::new(ChatSink {
-                state: StreamState::new(request.options.stop.clone()),
+                state: StreamState::new(stops),
                 out,
             }),
         })?;
@@ -241,51 +250,6 @@ impl Sink for ChatSink {
             self.out.fail(e);
         }
     }
-}
-
-/// Render a chat message list into the Qwen chat-template wire format.
-///
-/// The template is shared by Qwen 2.5 / Qwen 3 (our default) and
-/// understood as plain text by Llama 3, Mistral and Phi 3 instructs —
-/// the comment in `echo_app::SummarizeMeeting` notes the same
-/// trade-off. Once the use case base of CU-05 is wider we can switch
-/// to `LlamaModel::apply_chat_template` and pull the template from
-/// the GGUF metadata directly.
-///
-/// ## Layout
-///
-/// ```text
-/// <|im_start|>system
-/// {system}<|im_end|>
-/// <|im_start|>user
-/// {user1}<|im_end|>
-/// <|im_start|>assistant
-/// {assistant1}<|im_end|>
-/// …
-/// <|im_start|>assistant
-/// ```
-///
-/// The trailing `<|im_start|>assistant\n` (without a closing
-/// `<|im_end|>`) primes the model to generate the next assistant
-/// turn. The use case is responsible for shape (system → user →
-/// assistant alternation) — see `echo_app::AskAboutMeeting`.
-pub(crate) fn render_qwen_chat_prompt(messages: &[ChatMessage]) -> String {
-    let mut out =
-        String::with_capacity(messages.iter().map(|m| m.content.len() + 32).sum::<usize>() + 64);
-    for msg in messages {
-        let role = match msg.role {
-            ChatRole::System => "system",
-            ChatRole::User => "user",
-            ChatRole::Assistant => "assistant",
-        };
-        out.push_str("<|im_start|>");
-        out.push_str(role);
-        out.push('\n');
-        out.push_str(&msg.content);
-        out.push_str("<|im_end|>\n");
-    }
-    out.push_str("<|im_start|>assistant\n");
-    out
 }
 
 /// Tracks the running reply text so we can apply the user-supplied
@@ -456,14 +420,14 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     #[test]
-    fn render_qwen_chat_prompt_emits_full_template_with_assistant_prime() {
+    fn chatml_fallback_emits_full_template_with_assistant_prime() {
         let msgs = vec![
             ChatMessage::system("You are helpful."),
             ChatMessage::user("Hi."),
             ChatMessage::assistant("Hello!"),
             ChatMessage::user("What's 2+2?"),
         ];
-        let rendered = render_qwen_chat_prompt(&msgs);
+        let rendered = echo_domain::render_chatml(&msgs);
         let expected = "\
 <|im_start|>system
 You are helpful.<|im_end|>
@@ -479,9 +443,9 @@ What's 2+2?<|im_end|>
     }
 
     #[test]
-    fn render_qwen_chat_prompt_handles_only_a_user_turn() {
+    fn chatml_fallback_handles_only_a_user_turn() {
         let msgs = vec![ChatMessage::user("hola")];
-        let rendered = render_qwen_chat_prompt(&msgs);
+        let rendered = echo_domain::render_chatml(&msgs);
         assert!(rendered.starts_with("<|im_start|>user\nhola<|im_end|>\n"));
         assert!(rendered.ends_with("<|im_start|>assistant\n"));
     }

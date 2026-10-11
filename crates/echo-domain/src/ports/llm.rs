@@ -31,6 +31,7 @@ use async_trait::async_trait;
 use futures::stream::BoxStream;
 use serde::{Deserialize, Serialize};
 
+use crate::ports::chat::{render_chatml, ChatMessage};
 use crate::DomainError;
 
 /// Knobs the application layer can pass to the LLM. Defaults are
@@ -61,6 +62,8 @@ pub struct GenerateOptions {
     /// Optional list of strings that, when produced, terminate
     /// decoding. Useful to stop on `"\n```"` after a JSON block, for
     /// instance. The matching string is *not* included in the output.
+    /// Template terminators (`<|im_end|>`, `<turn|>`, …) do not belong
+    /// here: adapters add the ones of the model they loaded.
     pub stop: Vec<String>,
 }
 
@@ -134,11 +137,10 @@ pub trait LlmModel: Send + Sync {
         estimate_tokens(text)
     }
 
-    /// Generate a completion for `prompt`. The prompt is expected to
-    /// already include any chat template wrapping (`<|im_start|>` for
-    /// Qwen, `<s>[INST]` for Llama, …) — the adapter passes it
-    /// through verbatim so the use-case layer keeps full control over
-    /// the conversation shape.
+    /// Generate a completion for a raw `prompt`. The prompt is passed
+    /// to the model verbatim: it must already carry whatever framing the
+    /// model needs. Prefer [`Self::generate_chat`], which lets the adapter
+    /// apply the model's own chat template.
     ///
     /// Returns the decoded text, **without** the prompt prefix and
     /// without any trailing stop-sequence match.
@@ -162,11 +164,47 @@ pub trait LlmModel: Send + Sync {
         let text = self.generate(prompt, options).await?;
         Ok(Box::pin(futures::stream::once(async move { Ok(text) })))
     }
+
+    /// Generate a completion for a conversation. The adapter renders
+    /// `messages` with the chat template of the model it loaded and adds
+    /// that model's own stop sequences to `options.stop`.
+    ///
+    /// The default renders [`render_chatml`] and calls [`Self::generate`],
+    /// which keeps fakes and template-less adapters working.
+    async fn generate_chat(
+        &self,
+        messages: &[ChatMessage],
+        options: &GenerateOptions,
+    ) -> Result<String, DomainError> {
+        self.generate(&render_chatml(messages), options).await
+    }
+
+    /// Streaming counterpart of [`Self::generate_chat`]; same default
+    /// rendering, delegating to [`Self::generate_stream`].
+    async fn generate_chat_stream(
+        &self,
+        messages: &[ChatMessage],
+        options: &GenerateOptions,
+    ) -> Result<BoxStream<'static, Result<String, DomainError>>, DomainError> {
+        self.generate_stream(&render_chatml(messages), options)
+            .await
+    }
+
+    /// Number of tokens `messages` occupies once rendered the way
+    /// [`Self::generate_chat`] renders them (framing and assistant prime
+    /// included). Budgets MUST use this, not [`Self::count_tokens`] on
+    /// their own concatenation, so they follow the model's template.
+    ///
+    /// The default counts the [`render_chatml`] rendering.
+    fn count_chat_tokens(&self, messages: &[ChatMessage]) -> usize {
+        self.count_tokens(&render_chatml(messages))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ports::chat::render_chatml;
 
     #[test]
     fn default_options_are_structured_output_friendly() {
@@ -192,6 +230,53 @@ mod tests {
         async fn generate(&self, _: &str, _: &GenerateOptions) -> Result<String, DomainError> {
             Ok(String::new())
         }
+    }
+
+    struct EchoLlm;
+
+    #[async_trait]
+    impl LlmModel for EchoLlm {
+        fn model_id(&self) -> &str {
+            "echo"
+        }
+
+        async fn generate(&self, prompt: &str, _: &GenerateOptions) -> Result<String, DomainError> {
+            Ok(prompt.to_string())
+        }
+    }
+
+    #[tokio::test]
+    async fn generate_chat_defaults_to_the_chatml_rendering() {
+        let messages = [ChatMessage::system("S"), ChatMessage::user("U")];
+        let out = EchoLlm
+            .generate_chat(&messages, &GenerateOptions::default())
+            .await
+            .unwrap();
+        assert_eq!(out, render_chatml(&messages));
+        assert!(out.ends_with("<|im_start|>assistant\n"));
+    }
+
+    #[tokio::test]
+    async fn generate_chat_stream_defaults_to_the_chatml_rendering() {
+        use futures::StreamExt;
+        let messages = [ChatMessage::user("U")];
+        let mut stream = EchoLlm
+            .generate_chat_stream(&messages, &GenerateOptions::default())
+            .await
+            .unwrap();
+        assert_eq!(
+            stream.next().await.unwrap().unwrap(),
+            render_chatml(&messages)
+        );
+    }
+
+    #[test]
+    fn count_chat_tokens_defaults_to_counting_the_rendered_prompt() {
+        let messages = [ChatMessage::user("abcdefg")];
+        assert_eq!(
+            EchoLlm.count_chat_tokens(&messages),
+            EchoLlm.count_tokens(&render_chatml(&messages))
+        );
     }
 
     #[test]

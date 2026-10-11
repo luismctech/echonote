@@ -298,12 +298,14 @@ impl AskAboutMeeting {
         // there, out of this budget.
         let budget = transcript_budget(
             chat.context_window() as usize,
-            count(&build_system_prompt(&Grounding {
+            // Counted as a rendered conversation, so the framing of the
+            // model's own chat template is part of the fixed cost.
+            chat.count_chat_tokens(&[ChatMessage::system(build_system_prompt(&Grounding {
                 notes: &notes_block,
                 language: &language_instruction,
                 scope_notice: EXCERPTS_NOTICE,
                 ..Grounding::default()
-            })),
+            }))]),
             &mut history,
             count(&question),
             &count,
@@ -565,16 +567,16 @@ fn join_runs(indexed: &[(SegmentId, String)], picked: &[usize]) -> String {
     out
 }
 
-/// Default chat options. Matches the port's defaults but with explicit
-/// stop sequences for the chat-template terminators we know about, so
-/// the model doesn't keep decoding past `<|im_end|>`.
+/// Default chat options: the port's conversational defaults. No stop
+/// sequences: the adapter adds the terminators of the model's own chat
+/// template, so the model doesn't keep decoding past its end-of-turn.
 fn chat_options() -> ChatOptions {
     ChatOptions {
         max_tokens: CHAT_MAX_TOKENS,
         temperature: 0.7,
         top_p: 0.95,
         seed: None,
-        stop: vec!["<|im_end|>".into(), "<|eot_id|>".into(), "</s>".into()],
+        stop: Vec::new(),
     }
 }
 
@@ -1024,9 +1026,16 @@ mod tests {
         tokens: Mutex<Option<Vec<Result<ChatToken, DomainError>>>>,
         ask_result: Mutex<Option<DomainError>>,
         recorded: Mutex<Vec<ChatRequest>>,
+        /// Tokens the fake chat template adds to every rendered prompt.
+        template_overhead: usize,
     }
 
     impl ScriptedChat {
+        fn with_template_overhead(mut self, tokens: usize) -> Self {
+            self.template_overhead = tokens;
+            self
+        }
+
         fn replying(deltas: &[&str]) -> Self {
             Self {
                 window: DEFAULT_CONTEXT_WINDOW,
@@ -1038,6 +1047,7 @@ mod tests {
                 )),
                 ask_result: Mutex::new(None),
                 recorded: Mutex::new(Vec::new()),
+                template_overhead: 0,
             }
         }
 
@@ -1047,6 +1057,7 @@ mod tests {
                 tokens: Mutex::new(Some(tokens)),
                 ask_result: Mutex::new(None),
                 recorded: Mutex::new(Vec::new()),
+                template_overhead: 0,
             }
         }
 
@@ -1056,6 +1067,7 @@ mod tests {
                 tokens: Mutex::new(Some(Vec::new())),
                 ask_result: Mutex::new(Some(err)),
                 recorded: Mutex::new(Vec::new()),
+                template_overhead: 0,
             }
         }
 
@@ -1071,6 +1083,9 @@ mod tests {
         }
         fn context_window(&self) -> u32 {
             self.window
+        }
+        fn count_chat_tokens(&self, messages: &[ChatMessage]) -> usize {
+            self.template_overhead + self.count_tokens(&echo_domain::render_chatml(messages))
         }
         async fn ask(
             &self,
@@ -1542,6 +1557,29 @@ mod tests {
         let uc = AskAboutMeeting::new(chat.clone(), store.clone(), retriever);
         let events = collect(uc.execute(id, history, question.into()).await.unwrap()).await;
         (chat, events)
+    }
+
+    #[test]
+    fn chat_options_carry_no_template_specific_stops() {
+        assert!(chat_options().stop.is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_budget_is_charged_the_rendered_template_overhead() {
+        let store = Arc::new(FakeStore::default());
+        let (id, ids) = seed_meeting(&store, vec!["Hola equipo", "Decidimos lanzar el lunes"]);
+        let retriever = Arc::new(FakeRetriever::returning(vec![ids[1]]));
+
+        // The same short meeting is rejected once the model's template
+        // costs more than the whole window.
+        let chat = Arc::new(ScriptedChat::replying(&["ok"]).with_template_overhead(100_000));
+        let uc = AskAboutMeeting::new(chat, store.clone(), retriever);
+        let err = expect_err(uc.execute(id, vec![], "¿Qué decidimos?".into()).await);
+
+        assert!(
+            matches!(err, AskAboutMeetingError::PromptTooLarge),
+            "{err:?}"
+        );
     }
 
     #[tokio::test]

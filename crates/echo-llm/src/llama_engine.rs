@@ -63,6 +63,11 @@ impl EngineSource for LlamaSource {
         let n_ctx = NonZeroU32::new(loaded.n_ctx)
             .ok_or_else(|| DomainError::Invariant("n_ctx must be > 0".into()))?;
 
+        // `swa_full` stays at llama.cpp's default (true) on purpose: sliding-
+        // window models (Gemma 4) then keep the whole prompt in the KV cache,
+        // which is what makes the partial removal behind prefix reuse (see
+        // `crate::prefix`) safe. With `swa_full = false` the window layers
+        // drop old positions and a reused prefix could miss them.
         let mut ctx_params = LlamaContextParams::default()
             .with_n_ctx(Some(n_ctx))
             .with_n_batch(loaded.n_ctx);
@@ -169,9 +174,11 @@ impl LlamaEngine<'_> {
     ) -> Result<(), DomainError> {
         let loaded = self.loaded;
 
-        // The use-case layer wraps the prompt with the model's chat
-        // template (including any BOS marker it needs), so no BOS is
-        // added here: `AddBos::Never` avoids a duplicate.
+        // The prompt was rendered with the model's chat template (see
+        // `crate::template`), which writes any BOS marker it needs as text;
+        // tokenizing with special-token parsing turns that text into the
+        // BOS token, so none is added here: `AddBos::Never` avoids a
+        // duplicate.
         let prompt_tokens = loaded
             .model
             .str_to_token(prompt, AddBos::Never)

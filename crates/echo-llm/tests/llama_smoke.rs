@@ -494,3 +494,57 @@ async fn chat_turn_two_reuses_turn_one_and_matches_a_cold_run() {
         .expect("cold turn 2");
     assert_equivalent(&cold, &warm, "chat turn 2");
 }
+
+/// The Qwen GGUF is detected as the Qwen family, and `generate_chat`
+/// sends exactly the ChatML prompt the app used to build by hand (with
+/// `/no_think` on the last user turn).
+///
+/// The model's own Jinja template is rendered too and compared, to document
+/// why Qwen keeps the ChatML path: with thinking off, Qwen3's template adds
+/// an empty `<think>` block after the assistant prime.
+#[tokio::test]
+#[ignore = "requires ECHO_LLM_MODEL to point at a .gguf file"]
+async fn qwen_is_detected_and_renders_the_legacy_chatml_prompt() {
+    let Some(llm) = load_small() else {
+        eprintln!("skipping: ECHO_LLM_MODEL not set");
+        return;
+    };
+    let name = llm.model_path().to_string_lossy().to_lowercase();
+    if !name.contains("qwen") {
+        eprintln!("skipping: {name} is not a Qwen model");
+        return;
+    }
+    assert_eq!(llm.prompt_format_name(), "Qwen");
+
+    let messages = [
+        ChatMessage::system("You are a careful meeting assistant."),
+        ChatMessage::user("Which milestone has the latest date?"),
+        ChatMessage::assistant("Milestone 7."),
+        ChatMessage::user("And the earliest?"),
+    ];
+    let (prompt, stops) = llm.rendered_chat_prompt(&messages);
+    let legacy = "<|im_start|>system\nYou are a careful meeting assistant.<|im_end|>\n\
+                  <|im_start|>user\nWhich milestone has the latest date?<|im_end|>\n\
+                  <|im_start|>assistant\nMilestone 7.<|im_end|>\n\
+                  <|im_start|>user\nAnd the earliest?\n/no_think<|im_end|>\n\
+                  <|im_start|>assistant\n";
+    assert_eq!(prompt, legacy);
+    assert_eq!(stops, vec!["<|im_end|>".to_string()]);
+
+    match llm.jinja_chat_prompt(&messages) {
+        Ok(jinja) => {
+            eprintln!("[template] jinja == chatml (no /no_think): {}", {
+                let plain = echo_domain::render_chatml(&messages);
+                jinja == plain
+            });
+            eprintln!("[template] jinja prompt: {jinja:?}");
+        }
+        Err(e) => eprintln!("[template] jinja render failed: {e}"),
+    }
+
+    // The structured entry point answers like the raw prompt does.
+    let opts = greedy_options(24);
+    let via_messages = llm.generate_chat(&messages, &opts).await.expect("chat");
+    let via_raw = llm.generate(&prompt, &opts).await.expect("raw");
+    assert_eq!(via_messages, via_raw);
+}

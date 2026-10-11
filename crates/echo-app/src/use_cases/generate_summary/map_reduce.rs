@@ -31,7 +31,7 @@
 //! is taken as cut off; its chunk is then split in two and mapped again
 //! (at most [`MAX_SPLIT_DEPTH`] times), never kept silently.
 
-use echo_domain::{GenerateOptions, LlmModel};
+use echo_domain::{ChatMessage, GenerateOptions, LlmModel};
 use tracing::warn;
 
 use super::{generate_opts, SummarizeMeetingError, SUMMARY_MAX_TOKENS};
@@ -119,11 +119,11 @@ pub(super) fn plan(
     llm: &dyn LlmModel,
     lines: &[String],
     language_instruction: &str,
-    empty_prompt: &str,
+    empty_prompt: &[ChatMessage],
 ) -> Result<Input, SummarizeMeetingError> {
     let window = llm.context_window() as usize;
     let base = window.saturating_sub(SUMMARY_MAX_TOKENS as usize + safety_margin(window));
-    let single_budget = base.saturating_sub(llm.count_tokens(empty_prompt));
+    let single_budget = base.saturating_sub(llm.count_chat_tokens(empty_prompt));
 
     let whole = lines.join("\n");
     if llm.count_tokens(&whole) <= single_budget {
@@ -133,7 +133,7 @@ pub(super) fn plan(
     let reduce_budget = single_budget.saturating_sub(llm.count_tokens(REDUCE_INTRO) + 2);
     let map_avail = window
         .saturating_sub(safety_margin(window))
-        .saturating_sub(llm.count_tokens(&map_prompt(language_instruction, "", 1, 1)));
+        .saturating_sub(llm.count_chat_tokens(&map_prompt(language_instruction, "", 1, 1)));
     let map_max_tokens = (map_avail / 2).min(MAP_OUTPUT_CEILING_TOKENS);
     let chunk_budget = map_avail.saturating_sub(map_max_tokens).min(map_max_tokens);
     if reduce_budget < MIN_BUDGET_TOKENS || chunk_budget < MIN_BUDGET_TOKENS {
@@ -248,7 +248,7 @@ async fn map_all(
         while let Some((text, depth)) = pending.pop() {
             let prompt = map_prompt(language_instruction, &text, i + 1, total);
             let response = llm
-                .generate(&prompt, &opts)
+                .generate_chat(&prompt, &opts)
                 .await
                 .map_err(SummarizeMeetingError::Llm)?;
             // Measured raw: tokens spent on stripped content still count
@@ -298,22 +298,25 @@ fn label_notes(notes: &[String]) -> Vec<String> {
 
 /// Prompt of one map call. `excerpt` is a transcript chunk, or the
 /// labelled notes of a previous pass when condensing again.
-fn map_prompt(language_instruction: &str, excerpt: &str, position: usize, total: usize) -> String {
+fn map_prompt(
+    language_instruction: &str,
+    excerpt: &str,
+    position: usize,
+    total: usize,
+) -> Vec<ChatMessage> {
     let safe_excerpt = strip_chat_tokens(excerpt);
-    format!(
-        "<|im_start|>system\n\
-         You are a meticulous meeting note-taker. {language_instruction}\n\
+    let system = format!(
+        "You are a meticulous meeting note-taker. {language_instruction}\n\
          You will receive one part of a long meeting, either as a transcript excerpt or as \
          notes already taken from one. Write faithful plain-text notes of that part only: \
          topics discussed, decisions, action items with their owners, numbers, dates and \
          names, and who said what. Condense: paraphrase in short bullet points instead of \
          copying sentences, so the notes are roughly a quarter of the length of the part, \
          but never drop a figure, amount, date or name. Do not invent anything, do not add an introduction or a \
-         conclusion, and do not use JSON or markdown fences.<|im_end|>\n\
-         <|im_start|>user\n\
-         Part {position} of {total}:\n---\n{safe_excerpt}\n---\n/no_think<|im_end|>\n\
-         <|im_start|>assistant\n"
-    )
+         conclusion, and do not use JSON or markdown fences."
+    );
+    let user = format!("Part {position} of {total}:\n---\n{safe_excerpt}\n---");
+    vec![ChatMessage::system(system), ChatMessage::user(user)]
 }
 
 #[cfg(test)]
@@ -346,6 +349,44 @@ mod tests {
         }
     }
 
+    fn stub_prompt() -> Vec<ChatMessage> {
+        vec![ChatMessage::user("x")]
+    }
+
+    /// LLM whose chat template costs `overhead` tokens per rendered prompt
+    /// on top of the plain text, as a real adapter's does.
+    struct TemplatedLlm {
+        overhead: usize,
+    }
+
+    #[async_trait]
+    impl LlmModel for TemplatedLlm {
+        fn model_id(&self) -> &str {
+            "templated"
+        }
+        async fn generate(&self, _: &str, _: &GenerateOptions) -> Result<String, DomainError> {
+            Ok(String::new())
+        }
+        fn count_chat_tokens(&self, messages: &[ChatMessage]) -> usize {
+            self.overhead
+                + messages
+                    .iter()
+                    .map(|m| self.count_tokens(&m.content))
+                    .sum::<usize>()
+        }
+    }
+
+    #[test]
+    fn the_single_pass_budget_is_charged_the_rendered_prompt_overhead() {
+        let few = lines(10);
+        let fits = plan(&TemplatedLlm { overhead: 0 }, &few, "x", &stub_prompt()).unwrap();
+        assert!(matches!(fits, Input::Whole(_)));
+
+        // Same transcript, a template that eats most of the window.
+        let heavy = plan(&TemplatedLlm { overhead: 6_000 }, &few, "x", &stub_prompt());
+        assert!(!matches!(heavy, Ok(Input::Whole(_))), "{heavy:?}");
+    }
+
     fn fixed(window: u32, response: String) -> FixedLlm {
         FixedLlm {
             window,
@@ -364,11 +405,19 @@ mod tests {
     fn chunk_and_note_budgets_fit_the_window_for_any_window() {
         for window in [2_600u32, 4_096, 8_192, 32_768] {
             let llm = fixed(window, String::new());
-            let plan = match plan(&llm, &lines(2_000), "Always respond in English.", "x").unwrap() {
+            let plan = match plan(
+                &llm,
+                &lines(2_000),
+                "Always respond in English.",
+                &stub_prompt(),
+            )
+            .unwrap()
+            {
                 Input::Condense(plan) => plan,
                 Input::Whole(_) => panic!("{window}: expected map-reduce"),
             };
-            let overhead = llm.count_tokens(&map_prompt("Always respond in English.", "", 1, 1));
+            let overhead =
+                llm.count_chat_tokens(&map_prompt("Always respond in English.", "", 1, 1));
             let used =
                 overhead + plan.chunk_budget + plan.map_max_tokens + safety_margin(window as usize);
             assert!(used <= window as usize, "{window}: map call needs {used}");
@@ -381,7 +430,7 @@ mod tests {
     fn the_map_output_budget_grows_with_the_window_up_to_the_ceiling() {
         let budget = |window| {
             let llm = fixed(window, String::new());
-            match plan(&llm, &lines(2_000), "x", "x").unwrap() {
+            match plan(&llm, &lines(2_000), "x", &stub_prompt()).unwrap() {
                 Input::Condense(plan) => plan.map_max_tokens,
                 Input::Whole(_) => unreachable!(),
             }
