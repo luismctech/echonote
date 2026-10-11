@@ -90,6 +90,19 @@ pub enum ChatRole {
     Assistant,
 }
 
+impl ChatRole {
+    /// The role name every chat template and the OpenAI message format
+    /// use (`system`, `user`, `assistant`); identical to the serde form.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::System => "system",
+            Self::User => "user",
+            Self::Assistant => "assistant",
+        }
+    }
+}
+
 /// A single message inside a [`ChatRequest`].
 ///
 /// `content` is plain UTF-8 text — adapters wrap each `ChatMessage` in
@@ -160,13 +173,8 @@ pub fn render_chatml(messages: &[ChatMessage]) -> String {
     let mut out =
         String::with_capacity(messages.iter().map(|m| m.content.len() + 32).sum::<usize>() + 64);
     for msg in messages {
-        let role = match msg.role {
-            ChatRole::System => "system",
-            ChatRole::User => "user",
-            ChatRole::Assistant => "assistant",
-        };
         out.push_str("<|im_start|>");
-        out.push_str(role);
+        out.push_str(msg.role.as_str());
         out.push('\n');
         out.push_str(&msg.content);
         out.push_str("<|im_end|>\n");
@@ -397,6 +405,14 @@ mod tests {
             serde_json::to_string(&ChatRole::Assistant).unwrap(),
             "\"assistant\""
         );
+    }
+
+    #[test]
+    fn chat_role_as_str_matches_the_serde_form() {
+        for role in [ChatRole::System, ChatRole::User, ChatRole::Assistant] {
+            let json = serde_json::to_string(&role).unwrap();
+            assert_eq!(json, format!("\"{}\"", role.as_str()));
+        }
     }
 
     #[test]

@@ -1353,7 +1353,9 @@ mod tests {
                 self.0.dropping.store(true, Ordering::SeqCst);
                 let gate = self.0.gate.lock().unwrap().take();
                 if let Some(gate) = gate {
-                    let _ = gate.recv();
+                    // Bounded so a test that forgets to open the gate fails
+                    // instead of hanging the suite.
+                    let _ = gate.recv_timeout(Duration::from_secs(10));
                 }
                 panic!("engine drop blew up");
             }

@@ -46,7 +46,7 @@ use echo_domain::{ChatMessage, DomainError, GenerateOptions, LlmModel};
 use crate::backend::backend_singleton;
 use crate::llama_cpp_chat::LlamaCppChat;
 use crate::shared::{LoadedModel, SharedModel};
-use crate::template::{merge_stops, PromptFormat};
+use crate::template::{merge_stops, PromptFormat, PromptProfile, Rendering};
 use crate::worker::{
     drain_stream, Cancel, Flow, Job, Outlet, PieceSink, Priority, SamplingParams, Sink,
 };
@@ -207,24 +207,31 @@ impl LlamaCppLlm {
             architecture.as_deref(),
             template.as_ref().and_then(|t| t.to_str().ok()),
         );
+        let specials = LoadedModel::special_token_texts(&model);
+        let mut loaded = LoadedModel {
+            backend,
+            model,
+            model_id,
+            model_path: path.to_path_buf(),
+            n_ctx: opts.n_ctx,
+            n_threads: opts.n_threads,
+            profile: PromptProfile::new(format, Rendering::ChatMl, specials),
+            template,
+        };
+        // Decided once, here: a template that cannot render the probe is
+        // never tried again on a request.
+        loaded.profile.rendering = Rendering::resolve(format, || loaded.probe_template());
         info!(
             architecture = architecture.as_deref().unwrap_or("unknown"),
-            has_template = template.is_some(),
+            has_template = loaded.template.is_some(),
             ?format,
+            rendering = ?loaded.profile.rendering,
+            special_tokens = loaded.profile.specials.len(),
             "detected prompt format"
         );
 
         Ok(Self {
-            inner: Arc::new(SharedModel::new(LoadedModel {
-                backend,
-                model,
-                model_id,
-                model_path: path.to_path_buf(),
-                n_ctx: opts.n_ctx,
-                n_threads: opts.n_threads,
-                format,
-                template,
-            })),
+            inner: Arc::new(SharedModel::new(loaded)),
         })
     }
 
@@ -270,7 +277,27 @@ impl LlamaCppLlm {
     #[doc(hidden)]
     #[must_use]
     pub fn prompt_format_name(&self) -> String {
-        format!("{:?}", self.inner.format)
+        format!("{:?}", self.inner.profile.format)
+    }
+
+    /// How prompts are rendered for this model, decided once at load:
+    /// `Jinja` or `ChatMl` (always the case for Qwen, or when the GGUF's
+    /// template failed the load-time probe). Test support behind the
+    /// `test-hooks` feature.
+    #[cfg(any(test, feature = "test-hooks"))]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn prompt_rendering_name(&self) -> String {
+        format!("{:?}", self.inner.profile.rendering)
+    }
+
+    /// How many special-token texts are stripped from message contents.
+    /// Test support behind `test-hooks`.
+    #[cfg(any(test, feature = "test-hooks"))]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn special_token_count(&self) -> usize {
+        self.inner.profile.specials.len()
     }
 
     /// The prompt [`LlmModel::generate_chat`] would send for `messages`

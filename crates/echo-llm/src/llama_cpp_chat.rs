@@ -184,8 +184,9 @@ impl ChatAssistant for LlamaCppChat {
             ));
         }
 
-        // Chat keeps the model's default reasoning behaviour: think blocks
-        // are suppressed from the stream by `StreamState` instead.
+        // Chat sends no Qwen `/no_think` and keeps its default reasoning
+        // behaviour (Jinja families render with thinking off regardless):
+        // any think block is suppressed from the stream by `StreamState`.
         let rendered = self.inner.render_chat(&request.messages, false);
         let prompt = rendered.text;
         let stops = merge_stops(&request.options.stop, &rendered.stops);
@@ -416,39 +417,7 @@ impl StreamState {
 mod tests {
     use super::*;
 
-    use echo_domain::ChatMessage;
     use pretty_assertions::assert_eq;
-
-    #[test]
-    fn chatml_fallback_emits_full_template_with_assistant_prime() {
-        let msgs = vec![
-            ChatMessage::system("You are helpful."),
-            ChatMessage::user("Hi."),
-            ChatMessage::assistant("Hello!"),
-            ChatMessage::user("What's 2+2?"),
-        ];
-        let rendered = echo_domain::render_chatml(&msgs);
-        let expected = "\
-<|im_start|>system
-You are helpful.<|im_end|>
-<|im_start|>user
-Hi.<|im_end|>
-<|im_start|>assistant
-Hello!<|im_end|>
-<|im_start|>user
-What's 2+2?<|im_end|>
-<|im_start|>assistant
-";
-        assert_eq!(rendered, expected);
-    }
-
-    #[test]
-    fn chatml_fallback_handles_only_a_user_turn() {
-        let msgs = vec![ChatMessage::user("hola")];
-        let rendered = echo_domain::render_chatml(&msgs);
-        assert!(rendered.starts_with("<|im_start|>user\nhola<|im_end|>\n"));
-        assert!(rendered.ends_with("<|im_start|>assistant\n"));
-    }
 
     #[test]
     fn stream_state_forwards_unrelated_pieces_unchanged() {

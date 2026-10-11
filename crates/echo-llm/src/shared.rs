@@ -49,11 +49,13 @@ use std::time::Duration;
 use llama_cpp_2::llama_backend::LlamaBackend;
 use llama_cpp_2::model::{AddBos, LlamaChatTemplate, LlamaModel};
 use llama_cpp_2::openai::OpenAIChatTemplateParams;
+use llama_cpp_2::token::LlamaToken;
+use llama_cpp_2::token_type::LlamaTokenAttr;
 
 use echo_domain::{estimate_tokens, ChatMessage, DomainError};
 
 use crate::llama_engine::LlamaSource;
-use crate::template::{self, PromptFormat, Rendered, TemplateOutput};
+use crate::template::{self, PromptProfile, Rendered, TemplateOutput};
 use crate::worker::{Job, Worker};
 
 /// How long the persistent context may sit unused before it is dropped to
@@ -131,30 +133,44 @@ pub(crate) struct LoadedModel {
     /// Optional decoder thread count. `None` defers to llama.cpp's
     /// default (typically `num_cpus`). Useful in tests.
     pub n_threads: Option<i32>,
-    /// Prompt family, detected from the GGUF metadata at load time.
-    pub format: PromptFormat,
+    /// Prompt family, renderer and special-token texts, all decided once
+    /// at load time.
+    pub profile: PromptProfile,
     /// The chat template embedded in the GGUF, when it has one.
     pub template: Option<LlamaChatTemplate>,
 }
 
 impl LoadedModel {
     /// Render `messages` with this model's chat template (see
-    /// [`crate::template`]). `suppress_thinking` is for requests that
-    /// want no reasoning (summaries); chat leaves the model's default.
+    /// [`crate::template`]), after stripping the model's special-token
+    /// texts from their contents. `qwen_no_think` appends Qwen's
+    /// `/no_think` to the last user turn (summaries); Jinja families are
+    /// always rendered with thinking off, chat included.
     ///
     /// The prompt is tokenized with special-token parsing and no extra
     /// BOS (see `LlamaEngine`): a template that writes `<bos>` yields
     /// exactly one BOS token, and one that does not yields none.
-    pub fn render_chat(&self, messages: &[ChatMessage], suppress_thinking: bool) -> Rendered {
-        template::render_chat(self.format, messages, suppress_thinking, |messages| {
+    pub fn render_chat(&self, messages: &[ChatMessage], qwen_no_think: bool) -> Rendered {
+        self.profile.render(messages, qwen_no_think, |messages| {
             self.apply_template(messages)
         })
     }
 
     /// Token count of `messages` rendered by [`Self::render_chat`], the
     /// way a request would carry them.
-    pub fn count_chat_tokens(&self, messages: &[ChatMessage], suppress_thinking: bool) -> usize {
-        self.count_tokens(&self.render_chat(messages, suppress_thinking).text)
+    pub fn count_chat_tokens(&self, messages: &[ChatMessage], qwen_no_think: bool) -> usize {
+        self.count_tokens(&self.render_chat(messages, qwen_no_think).text)
+    }
+
+    /// Render the probe conversation with the GGUF's Jinja template; the
+    /// load-time check behind [`template::Rendering::resolve`].
+    pub fn probe_template(&self) -> Result<(), String> {
+        let out = self.apply_template(&template::probe_messages())?;
+        if out.prompt.contains("probe follow-up") {
+            Ok(())
+        } else {
+            Err("the template dropped the conversation".to_string())
+        }
     }
 
     /// Test support: the prompt the GGUF's own Jinja template renders for
@@ -163,6 +179,31 @@ impl LoadedModel {
     #[cfg(any(test, feature = "test-hooks"))]
     pub fn jinja_prompt(&self, messages: &[ChatMessage]) -> Result<String, String> {
         self.apply_template(messages).map(|out| out.prompt)
+    }
+
+    /// Texts of the control and framing-like user-defined tokens of
+    /// `model`'s vocabulary (see [`template::is_template_marker`]).
+    /// Enumerated once at load; a token whose attributes llama.cpp-2 cannot
+    /// decode is skipped.
+    pub fn special_token_texts(model: &LlamaModel) -> Vec<String> {
+        let mut texts = Vec::new();
+        for id in 0..model.n_vocab() {
+            let token = LlamaToken(id);
+            let attrs =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| model.token_attr(token)));
+            let Ok(attrs) = attrs else { continue };
+            let is_control = attrs.contains(LlamaTokenAttr::Control);
+            if !is_control && !attrs.contains(LlamaTokenAttr::UserDefined) {
+                continue;
+            }
+            let mut decoder = encoding_rs::UTF_8.new_decoder();
+            if let Ok(text) = model.token_to_piece(token, &mut decoder, true, None) {
+                if template::is_template_marker(&text, is_control) {
+                    texts.push(text);
+                }
+            }
+        }
+        texts
     }
 
     /// Render with the GGUF's Jinja template through llama.cpp's

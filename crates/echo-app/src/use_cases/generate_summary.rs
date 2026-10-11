@@ -1544,6 +1544,19 @@ mod tests {
             .ends_with("Return the JSON object only."));
     }
 
+    #[test]
+    fn the_retry_feedback_follows_the_json_instruction_in_the_user_turn() {
+        // Pins the shape the adapter appends Qwen's `/no_think` to (after
+        // the feedback block, a deliberate change from the pre-template
+        // prompt, where it preceded the feedback).
+        let messages = wrap_prompt("R", "L", "{}", "hola", None, Some("bad json"));
+        let user = &messages[1].content;
+        let instruction = user.find("Return the JSON object only.").unwrap();
+        let feedback = user.find("Parser error: bad json").unwrap();
+        assert!(instruction < feedback, "{user}");
+        assert!(user.ends_with("Do not include any text before or after the JSON."));
+    }
+
     #[tokio::test]
     async fn the_custom_prompt_is_built_as_neutral_messages() {
         let store = Arc::new(FakeStore::default());
