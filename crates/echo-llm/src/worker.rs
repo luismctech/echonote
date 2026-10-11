@@ -84,6 +84,12 @@ fn shutdown_error() -> DomainError {
     DomainError::LlmFailed("llm worker is shutting down".into())
 }
 
+/// Error for a job that can no longer be served because the worker thread
+/// died unexpectedly.
+fn worker_died_error() -> DomainError {
+    DomainError::LlmFailed("llm worker stopped unexpectedly".into())
+}
+
 /// Whether the producer should keep generating after a piece was handed
 /// to a [`PieceSink`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -475,9 +481,17 @@ impl Queue {
     /// The worker thread is unwinding: mark the queue dead and fail every
     /// queued job, so no caller waits for a thread that is gone.
     fn fail_dead(&self) {
-        self.drain(true, || {
-            DomainError::LlmFailed("llm worker stopped unexpectedly".into())
-        });
+        self.mark_dead();
+        self.drain(worker_died_error);
+    }
+
+    /// Make [`Queue::push`] refuse every later job until [`Queue::revive`].
+    /// Without this, a job pushed after the thread's last drain would wait
+    /// for a thread that is gone. Callers pair it with a drain; the mark is
+    /// set under the lock, so a push either lands before it (and the drain
+    /// fails the job) or is refused.
+    fn mark_dead(&self) {
+        self.lock().dead = true;
     }
 
     /// Raise the shutdown flag and wake the worker. The flag is set before
@@ -490,18 +504,14 @@ impl Queue {
 
     /// Fail every still-queued job with the shutdown error.
     fn fail_pending(&self) {
-        self.drain(false, shutdown_error);
+        self.drain(shutdown_error);
     }
 
-    /// Remove every queued job (interactive first), optionally marking the
-    /// queue dead in the same critical section, and finish each with the
+    /// Remove every queued job (interactive first) and finish each with the
     /// error `error` builds. The sinks run outside the lock.
-    fn drain(&self, mark_dead: bool, error: fn() -> DomainError) {
+    fn drain(&self, error: fn() -> DomainError) {
         let jobs: Vec<Job> = {
             let mut pending = self.lock();
-            if mark_dead {
-                pending.dead = true;
-            }
             let interactive = std::mem::take(&mut pending.interactive);
             let background = std::mem::take(&mut pending.background);
             interactive.into_iter().chain(background).collect()
@@ -594,9 +604,7 @@ impl Worker {
         // the queue then refuses the job and one more thread is started.
         if let Err(job) = self.queue.push(job) {
             self.respawn(&mut thread)?;
-            self.queue
-                .push(job)
-                .map_err(|_| DomainError::LlmFailed("llm worker stopped unexpectedly".into()))?;
+            self.queue.push(job).map_err(|_| worker_died_error())?;
         }
         Ok(())
     }
@@ -1309,10 +1317,25 @@ mod tests {
     }
 
     /// Engine whose drop panics once armed: kills the thread outside every
-    /// `catch_unwind`, after the idle release.
+    /// `catch_unwind`, after the idle release. With a `gate` the drop first
+    /// blocks until the test sends on it, so the test decides exactly when
+    /// the thread dies.
     struct BombSource {
         armed: AtomicBool,
         probe: Arc<Probe>,
+        gate: Mutex<Option<Receiver<()>>>,
+        dropping: AtomicBool,
+    }
+
+    impl BombSource {
+        fn new(probe: &Arc<Probe>, gate: Option<Receiver<()>>) -> Arc<Self> {
+            Arc::new(Self {
+                armed: AtomicBool::new(true),
+                probe: Arc::clone(probe),
+                gate: Mutex::new(gate),
+                dropping: AtomicBool::new(false),
+            })
+        }
     }
 
     struct BombEngine<'a>(&'a BombSource);
@@ -1327,6 +1350,11 @@ mod tests {
     impl Drop for BombEngine<'_> {
         fn drop(&mut self) {
             if self.0.armed.swap(false, Ordering::SeqCst) {
+                self.0.dropping.store(true, Ordering::SeqCst);
+                let gate = self.0.gate.lock().unwrap().take();
+                if let Some(gate) = gate {
+                    let _ = gate.recv();
+                }
                 panic!("engine drop blew up");
             }
         }
@@ -1347,10 +1375,7 @@ mod tests {
     #[test]
     fn a_worker_whose_thread_died_serves_the_next_submit_on_a_new_thread() {
         let probe = Arc::new(Probe::default());
-        let source = Arc::new(BombSource {
-            armed: AtomicBool::new(true),
-            probe: Arc::clone(&probe),
-        });
+        let source = BombSource::new(&probe, None);
         let w = Worker::new(
             Arc::clone(&source) as Arc<dyn EngineSource>,
             Duration::from_millis(30),
@@ -1366,20 +1391,21 @@ mod tests {
     #[test]
     fn a_job_submitted_while_the_thread_dies_is_still_served() {
         let probe = Arc::new(Probe::default());
-        let source = Arc::new(BombSource {
-            armed: AtomicBool::new(true),
-            probe: Arc::clone(&probe),
-        });
-        // Long enough that the second `submit` passes its liveness check
-        // long before the idle release kills the thread.
+        let (kill, gate) = channel();
+        let source = BombSource::new(&probe, Some(gate));
         let w = Worker::new(
             Arc::clone(&source) as Arc<dyn EngineSource>,
-            Duration::from_millis(300),
+            Duration::from_millis(30),
         );
         assert_eq!(submit(&w, "one").wait(), Ok(()));
-        // Between the check and the push, wait for the thread to die: the
-        // push then lands in a queue nobody will ever drain.
-        *w.before_push.lock().unwrap() = Some(Box::new(|queue| {
+        // The idle release starts dropping the engine, which then blocks on
+        // the gate: the thread is alive, so `submit` passes its liveness
+        // check, until the test opens the gate.
+        assert!(eventually(|| source.dropping.load(Ordering::SeqCst)));
+        // Between the check and the push, let the thread die: the push then
+        // lands in a queue nobody will ever drain unless it refuses the job.
+        *w.before_push.lock().unwrap() = Some(Box::new(move |queue| {
+            kill.send(()).unwrap();
             assert!(eventually(|| queue.is_dead()));
         }));
 

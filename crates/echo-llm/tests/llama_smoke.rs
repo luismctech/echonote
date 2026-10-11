@@ -373,33 +373,37 @@ fn load_small() -> Option<LlamaCppLlm> {
     )
 }
 
-/// Output with reuse must match the cold run. Reuse feeds the model the same
-/// tokens, but a backend may evaluate the reused prefix under another batch
-/// shape than a cold run, so bitwise identity is expected, not guaranteed.
+/// Output with reuse must match the cold run exactly. Reuse feeds the model
+/// the same tokens and greedy decoding is deterministic, so the texts are
+/// identical on the backend this suite is validated on (Metal).
 ///
-/// Identical output passes. A divergence is tolerated only when it happens
-/// at least [`EARLY_DIVERGENCE_CHARS`] characters in (a near-tie token
-/// flipped by numerics, reported as a warning): a wrong or stale KV state
-/// corrupts the answer from the start, so an early divergence fails with
-/// the position and both texts.
+/// llama.cpp kernels are not guaranteed to be bitwise-invariant across
+/// batch shapes, and reuse evaluates the prefix under a different shape
+/// than a cold run. A mismatch on another backend must therefore be
+/// investigated (stale KV state versus numeric drift), not ignored; the
+/// failure reports the first divergence and both texts to make that
+/// possible.
 fn assert_equivalent(cold: &str, warm: &str, what: &str) {
     if cold == warm {
         return;
     }
-    let at = cold
-        .chars()
-        .zip(warm.chars())
-        .position(|(a, b)| a != b)
-        .unwrap_or_else(|| cold.chars().count().min(warm.chars().count()));
-    assert!(
-        at >= EARLY_DIVERGENCE_CHARS,
-        "{what}: output diverged from the cold run at char {at}\n cold: {cold:?}\n warm: {warm:?}"
+    let at = first_divergence(cold, warm);
+    panic!(
+        "{what}: output diverged from the cold run at char {at}\n cold: {cold:?}\n warm: {warm:?}\n\
+         llama.cpp kernels are not guaranteed bitwise-invariant across batch shapes: on a \
+         backend other than Metal, investigate whether this is numeric drift or a stale KV \
+         state instead of ignoring it"
     );
-    eprintln!("[warn] {what}: output diverged from the cold run at char {at} (numeric drift?)");
 }
 
-/// See [`assert_equivalent`].
-const EARLY_DIVERGENCE_CHARS: usize = 16;
+/// Char index of the first difference between `a` and `b`. When one is a
+/// strict prefix of the other, that is the shorter length.
+fn first_divergence(a: &str, b: &str) -> usize {
+    a.chars()
+        .zip(b.chars())
+        .position(|(x, y)| x != y)
+        .unwrap_or_else(|| a.chars().count().min(b.chars().count()))
+}
 
 /// A prompt that partially overlaps the one left in the KV cache must
 /// produce the same greedy output as the same prompt on a fresh worker with
