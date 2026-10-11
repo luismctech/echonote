@@ -22,13 +22,14 @@
 //! `Send`, and cannot be decoded from two threads at once. The crate
 //! therefore keeps **one** context (one KV cache, ~1.2 GB for Qwen3-8B at
 //! the default `n_ctx`) alive on a dedicated worker thread and serves
-//! summary and chat requests through it one at a time, in arrival order
+//! summary and chat requests through it one at a time, chat first
 //! (see [`crate::worker`]). Requests do not pay for context creation, and
 //! the context is released after [`CONTEXT_IDLE_TIMEOUT`] without
 //! requests so an idle app does not pin the KV cache.
 //!
-//! Dropping the last `Arc<SharedModel>` closes the worker's queue; the
-//! thread drops its context and exits, and frees the model.
+//! Dropping the last `Arc<SharedModel>` shuts the worker down: the running
+//! request is aborted, queued ones fail, the thread drops its context and
+//! exits, and the model is freed.
 //!
 //! ## Why this lives in its own module
 //!

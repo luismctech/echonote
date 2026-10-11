@@ -15,7 +15,7 @@ use tracing::{debug, warn};
 use echo_domain::DomainError;
 
 use crate::shared::LoadedModel;
-use crate::worker::{Engine, EngineSource, Flow, SamplingParams, Sink};
+use crate::worker::{Engine, EngineSource, Flow, PieceSink, SamplingParams};
 
 /// Initial size of the decoding batch. Resized on demand when the prompt
 /// is larger.
@@ -69,7 +69,7 @@ impl Engine for LlamaEngine<'_> {
         &mut self,
         prompt: &str,
         params: &SamplingParams,
-        sink: &mut dyn Sink,
+        sink: &mut dyn PieceSink,
     ) -> Result<(), DomainError> {
         let loaded = self.loaded;
 

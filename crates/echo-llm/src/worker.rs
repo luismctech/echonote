@@ -3,9 +3,23 @@
 //! A `llama_cpp_2::context::LlamaContext` borrows its model and is not
 //! `Send`, so a context that outlives one request has to live on a single
 //! OS thread for its whole life. [`Worker`] is that thread: requests
-//! ([`Job`]s) are queued over a channel and served one at a time against
-//! one persistent [`Engine`] (the context), instead of building and
-//! dropping a ~1.2 GB KV cache per request.
+//! ([`Job`]s) are queued and served one at a time against one persistent
+//! [`Engine`] (the context), instead of building and dropping a ~1.2 GB KV
+//! cache per request.
+//!
+//! ## Scheduling
+//!
+//! The queue has two classes ([`Priority`]). The worker always takes the
+//! oldest queued [`Priority::Interactive`] job (chat) before any queued
+//! [`Priority::Background`] job (summaries), FIFO within a class. A running
+//! job is never preempted mid-decode: a map-reduce summary is many separate
+//! `generate` calls, so a chat turn gets in between them and waits for at
+//! most the call in flight.
+//!
+//! Trade-off: a continuous stream of chat turns can delay a queued summary
+//! indefinitely (starvation). That is acceptable for a single-user desktop
+//! app, where one person is either chatting or waiting for a summary, and
+//! it keeps a single context (one KV cache) instead of a pool.
 //!
 //! ## Lifecycle
 //!
@@ -16,37 +30,186 @@
 //! * After `idle` without a job the engine is dropped (freeing the KV
 //!   cache); the thread stays parked on the queue and the next job
 //!   recreates the engine.
-//! * Dropping the [`Worker`] closes the queue and joins the thread: it
-//!   finishes (or, its consumer being gone, abandons) the job in hand,
-//!   drops the engine and exits, so the GPU/KV resources are released
-//!   before the drop returns (a detached thread could still hold them
-//!   while the process tears down its Metal device).
+//! * Dropping the [`Worker`] raises a shutdown flag, wakes the queue and
+//!   joins the thread. The job in hand stops at its next token (its
+//!   [`Sink`] reports it as closed and its output is failed with a
+//!   shutdown error), queued jobs fail fast with the same error, the
+//!   engine is dropped and the thread exits. The join is therefore bounded
+//!   by one decode step, and it must stay: a detached thread could still
+//!   hold the GPU/KV resources while the process tears down its Metal
+//!   device, which aborts the process (`ggml_metal_device_free`).
 //! * A job whose consumer is already gone is skipped, and a consumer that
-//!   goes away mid-job is observed through [`Sink`] so decoding stops at
-//!   the next token instead of blocking the queue.
+//!   goes away mid-job is observed through [`PieceSink::is_closed`] so
+//!   decoding stops at the next token instead of blocking the queue.
+//! * A consumer that is alive but stops draining its channel cannot block
+//!   the queue either: sinks send through [`send_bounded`], which gives up
+//!   after a stall timeout.
 //!
 //! The worker is generic over [`EngineSource`]/[`Engine`] so the queueing,
-//! idle-release and cancellation policy is tested with a fake engine, no
-//! model required.
+//! idle-release, shutdown and cancellation policy is tested with a fake
+//! engine, no model required.
 
+use std::collections::VecDeque;
 use std::panic::{self, AssertUnwindSafe};
-use std::sync::mpsc::{self, RecvTimeoutError, Sender};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use tokio::sync::mpsc::error::TrySendError;
+use tokio::sync::mpsc::Sender;
 use tracing::{debug, error};
 
 use echo_domain::{ChatOptions, DomainError, GenerateOptions};
 
+/// How long a sink waits for a consumer to make room in a full channel
+/// before it gives up and cancels the job.
+pub(crate) const CONSUMER_STALL_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Poll interval while a channel is full.
+const SEND_POLL: Duration = Duration::from_millis(5);
+
+/// Error every job gets when the worker is dropped before serving it.
+fn shutdown_error() -> DomainError {
+    DomainError::LlmFailed("llm worker is shutting down".into())
+}
+
 /// Whether the producer should keep generating after a piece was handed
-/// to a [`Sink`].
+/// to a [`PieceSink`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Flow {
     /// Keep decoding.
     Continue,
     /// A stop condition was met or the consumer is gone: end this job.
     Stop,
+}
+
+/// Cooperative cancellation flag raised when the worker shuts down.
+///
+/// Cloning shares the flag.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Cancel(Arc<AtomicBool>);
+
+impl Cancel {
+    /// `true` once cancellation was requested.
+    pub(crate) fn is_set(&self) -> bool {
+        self.0.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn set(&self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
+/// Outcome of [`send_bounded`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SendOutcome {
+    /// The item is in the channel.
+    Sent,
+    /// The receiver is gone.
+    Closed,
+    /// The job was cancelled (worker shutdown) while the channel was full.
+    Cancelled,
+    /// The channel stayed full for the whole stall timeout.
+    Stalled,
+}
+
+/// Send `item` without ever blocking forever: `try_send` in a loop with
+/// short sleeps, giving up when the receiver is gone, the job is
+/// cancelled, or the channel stays full for `stall`.
+///
+/// This replaces `blocking_send`, which would park the worker (and, through
+/// `Worker::drop`'s join, possibly a runtime thread) for as long as a stuck
+/// consumer holds a full buffer.
+pub(crate) fn send_bounded<T>(
+    tx: &Sender<T>,
+    mut item: T,
+    cancel: &Cancel,
+    stall: Duration,
+) -> SendOutcome {
+    let started = Instant::now();
+    loop {
+        match tx.try_send(item) {
+            Ok(()) => return SendOutcome::Sent,
+            Err(TrySendError::Closed(_)) => return SendOutcome::Closed,
+            Err(TrySendError::Full(back)) => item = back,
+        }
+        if cancel.is_set() {
+            return SendOutcome::Cancelled;
+        }
+        let waited = started.elapsed();
+        if waited >= stall {
+            return SendOutcome::Stalled;
+        }
+        thread::sleep(SEND_POLL.min(stall - waited));
+    }
+}
+
+/// Streaming half of a [`Sink`]: a bounded channel to the consumer plus the
+/// stall policy of [`send_bounded`], shared by the stream-shaped sinks.
+pub(crate) struct Outlet<T> {
+    tx: Sender<Result<T, DomainError>>,
+    cancel: Cancel,
+    stall: Duration,
+    stalled: bool,
+}
+
+impl<T> Outlet<T> {
+    /// Outlet over `tx` with the default [`CONSUMER_STALL_TIMEOUT`].
+    pub(crate) fn new(tx: Sender<Result<T, DomainError>>) -> Self {
+        Self {
+            tx,
+            cancel: Cancel::default(),
+            stall: CONSUMER_STALL_TIMEOUT,
+            stalled: false,
+        }
+    }
+
+    /// Override the stall timeout (tests use a short one).
+    #[cfg(test)]
+    pub(crate) fn with_stall(mut self, stall: Duration) -> Self {
+        self.stall = stall;
+        self
+    }
+
+    /// Adopt the worker's cancellation flag.
+    pub(crate) fn bind_cancel(&mut self, cancel: Cancel) {
+        self.cancel = cancel;
+    }
+
+    /// Forward one item; [`Flow::Stop`] when the consumer is gone, the job
+    /// was cancelled, or the consumer stalled past the timeout (the job is
+    /// then abandoned so the queue moves on).
+    pub(crate) fn push(&mut self, item: T) -> Flow {
+        match send_bounded(&self.tx, Ok(item), &self.cancel, self.stall) {
+            SendOutcome::Sent => Flow::Continue,
+            SendOutcome::Closed | SendOutcome::Cancelled => Flow::Stop,
+            SendOutcome::Stalled => {
+                self.stalled = true;
+                tracing::warn!(
+                    stall_secs = self.stall.as_secs_f32(),
+                    "stream consumer stopped draining; cancelling the llm job"
+                );
+                Flow::Stop
+            }
+        }
+    }
+
+    /// `true` once the receiver is gone.
+    pub(crate) fn is_closed(&self) -> bool {
+        self.tx.is_closed()
+    }
+
+    /// Deliver `error` as the stream's final item. Skipped after a stall:
+    /// the buffer is still full and waiting again would only delay the
+    /// queue a second time.
+    pub(crate) fn fail(&mut self, error: DomainError) {
+        if self.stalled {
+            tracing::warn!(%error, "dropping the final error of a stalled stream");
+            return;
+        }
+        let _ = send_bounded(&self.tx, Err(error), &self.cancel, self.stall);
+    }
 }
 
 /// Sampling knobs for one request, shared by every entry point.
@@ -88,24 +251,43 @@ impl SamplingParams {
     }
 }
 
-/// Receives the output of one job and owns its completion.
-pub(crate) trait Sink: Send {
+/// The part of a job's output the decode loop talks to.
+pub(crate) trait PieceSink {
     /// Handle one decoded text piece; stop decoding when it returns
     /// [`Flow::Stop`].
     fn on_piece(&mut self, piece: &str) -> Flow;
 
     /// `true` once nobody is listening any more (stream receiver or
-    /// result future dropped). Polled between tokens and before a queued
-    /// job starts.
+    /// result future dropped) or the worker is shutting down. Polled
+    /// between tokens and before a queued job starts.
     fn is_closed(&self) -> bool;
+}
+
+/// Receives the output of one job and owns its completion.
+pub(crate) trait Sink: PieceSink + Send {
+    /// Hand the sink the worker's cancellation flag before the job is
+    /// served, so a bounded send can notice a shutdown. Sinks that never
+    /// wait on a consumer may ignore it.
+    fn bind_cancel(&mut self, _cancel: Cancel) {}
 
     /// Report how the job ended. Not called for jobs skipped because the
     /// sink was already closed.
     fn finish(self: Box<Self>, result: Result<(), DomainError>);
 }
 
+/// Scheduling class of a [`Job`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Priority {
+    /// A person is waiting on the reply (chat).
+    Interactive,
+    /// Bulk work that can wait a turn (summaries, map-reduce steps).
+    Background,
+}
+
 /// One queued request.
 pub(crate) struct Job {
+    /// Scheduling class.
+    pub priority: Priority,
     /// Fully rendered prompt (chat template already applied).
     pub prompt: String,
     /// Sampling knobs.
@@ -116,12 +298,13 @@ pub(crate) struct Job {
 
 /// A live inference context, used on the worker thread only.
 pub(crate) trait Engine {
-    /// Run one request to completion, feeding pieces to `sink`.
+    /// Run one request to completion, feeding pieces to `sink`. Must poll
+    /// [`PieceSink::is_closed`] between tokens.
     fn serve(
         &mut self,
         prompt: &str,
         params: &SamplingParams,
-        sink: &mut dyn Sink,
+        sink: &mut dyn PieceSink,
     ) -> Result<(), DomainError>;
 }
 
@@ -132,17 +315,116 @@ pub(crate) trait EngineSource: Send + Sync + 'static {
     fn create(&self) -> Result<Box<dyn Engine + '_>, DomainError>;
 }
 
+/// Jobs waiting for the worker, one FIFO per [`Priority`].
+#[derive(Default)]
+struct Pending {
+    interactive: VecDeque<Job>,
+    background: VecDeque<Job>,
+}
+
+/// What the worker should do next.
+enum Next {
+    Job(Job),
+    /// Nothing arrived within the idle period.
+    Idle,
+    Shutdown,
+}
+
+/// Two-class job queue shared between submitters and the worker thread.
+struct Queue {
+    pending: Mutex<Pending>,
+    ready: Condvar,
+    cancel: Cancel,
+}
+
+impl Queue {
+    fn new() -> Self {
+        Self {
+            pending: Mutex::new(Pending::default()),
+            ready: Condvar::new(),
+            cancel: Cancel::default(),
+        }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Pending> {
+        self.pending.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn push(&self, job: Job) {
+        {
+            let mut pending = self.lock();
+            match job.priority {
+                Priority::Interactive => pending.interactive.push_back(job),
+                Priority::Background => pending.background.push_back(job),
+            }
+        }
+        self.ready.notify_one();
+    }
+
+    /// Block until a job is available (interactive first), `idle` passes
+    /// (when given) or shutdown is requested.
+    fn next(&self, idle: Option<Duration>) -> Next {
+        let deadline = idle.map(|idle| Instant::now() + idle);
+        let mut pending = self.lock();
+        loop {
+            if self.cancel.is_set() {
+                return Next::Shutdown;
+            }
+            if let Some(job) = pending
+                .interactive
+                .pop_front()
+                .or_else(|| pending.background.pop_front())
+            {
+                return Next::Job(job);
+            }
+            pending = match deadline {
+                None => self
+                    .ready
+                    .wait(pending)
+                    .unwrap_or_else(PoisonError::into_inner),
+                Some(deadline) => {
+                    let left = deadline.saturating_duration_since(Instant::now());
+                    if left.is_zero() {
+                        return Next::Idle;
+                    }
+                    self.ready
+                        .wait_timeout(pending, left)
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .0
+                }
+            };
+        }
+    }
+
+    /// Raise the shutdown flag and wake the worker. The flag is set before
+    /// taking the lock so a worker about to wait still sees it.
+    fn shutdown(&self) {
+        self.cancel.set();
+        drop(self.lock());
+        self.ready.notify_all();
+    }
+
+    /// Fail every still-queued job with the shutdown error.
+    fn fail_pending(&self) {
+        let jobs: Vec<Job> = {
+            let mut pending = self.lock();
+            let interactive = std::mem::take(&mut pending.interactive);
+            let background = std::mem::take(&mut pending.background);
+            interactive.into_iter().chain(background).collect()
+        };
+        for mut job in jobs {
+            job.sink.bind_cancel(self.cancel.clone());
+            job.sink.finish(Err(shutdown_error()));
+        }
+    }
+}
+
 /// Handle to the worker thread. Dropping it shuts the thread down.
 pub(crate) struct Worker {
     source: Arc<dyn EngineSource>,
     idle: Duration,
-    queue: Mutex<Option<Running>>,
-}
-
-/// The queue and thread of a started worker.
-struct Running {
-    tx: Sender<Job>,
-    thread: thread::JoinHandle<()>,
+    queue: Arc<Queue>,
+    thread: Mutex<Option<thread::JoinHandle<()>>>,
 }
 
 impl Worker {
@@ -152,77 +434,86 @@ impl Worker {
         Self {
             source,
             idle,
-            queue: Mutex::new(None),
+            queue: Arc::new(Queue::new()),
+            thread: Mutex::new(None),
         }
     }
 
-    /// Queue `job` behind the ones already waiting, starting the thread if
-    /// it is not running (first use, or it died).
+    /// Queue `job` in its priority class, starting the thread if it is not
+    /// running (first use, or it died).
+    ///
+    /// The thread only exits on shutdown, so a finished handle means it
+    /// died unexpectedly; it is replaced once, and a spawn failure is
+    /// reported instead of retried.
     pub(crate) fn submit(&self, job: Job) -> Result<(), DomainError> {
-        let mut queue = self.queue.lock().unwrap_or_else(PoisonError::into_inner);
-        let mut job = job;
-        // At most one respawn: a send only fails when the thread is gone.
-        for _ in 0..2 {
-            if queue.is_none() {
-                let (tx, rx) = mpsc::channel();
-                let source = Arc::clone(&self.source);
-                let idle = self.idle;
-                let thread = thread::Builder::new()
-                    .name("echo-llm-worker".into())
-                    .spawn(move || run(&*source, &rx, idle))
-                    .map_err(|e| DomainError::LlmFailed(format!("spawn llm worker: {e}")))?;
-                *queue = Some(Running { tx, thread });
-            }
-            let Some(running) = queue.as_ref() else {
-                continue;
-            };
-            match running.tx.send(job) {
-                Ok(()) => return Ok(()),
-                Err(mpsc::SendError(returned)) => {
-                    job = returned;
-                    *queue = None;
-                }
-            }
+        let mut thread = self.thread.lock().unwrap_or_else(PoisonError::into_inner);
+        if thread.as_ref().is_none_or(thread::JoinHandle::is_finished) {
+            let source = Arc::clone(&self.source);
+            let queue = Arc::clone(&self.queue);
+            let idle = self.idle;
+            let handle = thread::Builder::new()
+                .name("echo-llm-worker".into())
+                .spawn(move || run(&*source, &queue, idle))
+                .map_err(|e| DomainError::LlmFailed(format!("spawn llm worker: {e}")))?;
+            *thread = Some(handle);
         }
-        Err(DomainError::LlmFailed("llm worker is not running".into()))
+        self.queue.push(job);
+        Ok(())
     }
 }
 
-/// Worker thread body: serve jobs until every [`Worker`] handle is gone.
 impl Drop for Worker {
     fn drop(&mut self) {
-        let running = self
-            .queue
+        self.queue.shutdown();
+        let thread = self
+            .thread
             .get_mut()
             .unwrap_or_else(PoisonError::into_inner)
             .take();
-        if let Some(Running { tx, thread }) = running {
-            drop(tx);
+        if let Some(thread) = thread {
             let _ = thread.join();
         }
+        // Covers jobs queued behind a thread that died on its own.
+        self.queue.fail_pending();
     }
 }
 
-fn run(source: &dyn EngineSource, rx: &mpsc::Receiver<Job>, idle: Duration) {
+/// Reports a worker shutdown to the engine as a closed consumer, so the
+/// decode loop stops at its next token.
+struct Guarded<'a> {
+    inner: &'a mut dyn PieceSink,
+    cancel: &'a Cancel,
+}
+
+impl PieceSink for Guarded<'_> {
+    fn on_piece(&mut self, piece: &str) -> Flow {
+        if self.cancel.is_set() {
+            return Flow::Stop;
+        }
+        self.inner.on_piece(piece)
+    }
+
+    fn is_closed(&self) -> bool {
+        self.cancel.is_set() || self.inner.is_closed()
+    }
+}
+
+/// Worker thread body: serve jobs (interactive first) until shutdown, then
+/// fail whatever is still queued.
+fn run(source: &dyn EngineSource, queue: &Queue, idle: Duration) {
     // Declared after `source` is borrowed so the engine drops first.
     let mut engine: Option<Box<dyn Engine + '_>> = None;
     loop {
-        let job = if engine.is_some() {
-            match rx.recv_timeout(idle) {
-                Ok(job) => job,
-                Err(RecvTimeoutError::Timeout) => {
-                    debug!("llm worker idle: releasing the context");
-                    engine = None;
-                    continue;
-                }
-                Err(RecvTimeoutError::Disconnected) => break,
+        let mut job = match queue.next(engine.is_some().then_some(idle)) {
+            Next::Job(job) => job,
+            Next::Idle => {
+                debug!("llm worker idle: releasing the context");
+                engine = None;
+                continue;
             }
-        } else {
-            match rx.recv() {
-                Ok(job) => job,
-                Err(_) => break,
-            }
+            Next::Shutdown => break,
         };
+        job.sink.bind_cancel(queue.cancel.clone());
         if job.sink.is_closed() {
             debug!("skipping a queued llm job whose consumer is gone");
             continue;
@@ -240,15 +531,25 @@ fn run(source: &dyn EngineSource, rx: &mpsc::Receiver<Job>, idle: Duration) {
             continue;
         };
         let Job {
+            priority: _,
             prompt,
             params,
             mut sink,
         } = job;
         // A panic in the engine must not take the queue down with it; the
         // context may be left in an unknown state, so it is rebuilt.
-        match panic::catch_unwind(AssertUnwindSafe(|| {
-            eng.serve(&prompt, &params, sink.as_mut())
-        })) {
+        let mut guarded = Guarded {
+            inner: sink.as_mut(),
+            cancel: &queue.cancel,
+        };
+        let outcome = panic::catch_unwind(AssertUnwindSafe(|| {
+            eng.serve(&prompt, &params, &mut guarded)
+        }));
+        match outcome {
+            // An abort by shutdown ends the engine loop "successfully";
+            // the consumer must not mistake the truncated output for a
+            // complete one.
+            Ok(Ok(())) if queue.cancel.is_set() => sink.finish(Err(shutdown_error())),
             Ok(result) => sink.finish(result),
             Err(_) => {
                 error!("llm engine panicked; discarding the context");
@@ -259,13 +560,15 @@ fn run(source: &dyn EngineSource, rx: &mpsc::Receiver<Job>, idle: Duration) {
             }
         }
     }
+    drop(engine);
+    queue.fail_pending();
     debug!("llm worker stopped");
 }
 
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use std::sync::mpsc::{channel, Receiver};
+    use std::sync::mpsc::{channel, Receiver, Sender};
     use std::time::Instant;
 
     use super::*;
@@ -331,7 +634,7 @@ mod tests {
             &mut self,
             prompt: &str,
             _params: &SamplingParams,
-            sink: &mut dyn Sink,
+            sink: &mut dyn PieceSink,
         ) -> Result<(), DomainError> {
             self.source.probe.served.lock().unwrap().push(prompt.into());
             if let Some(gate) = self.source.gate.lock().unwrap().take() {
@@ -339,6 +642,15 @@ mod tests {
             }
             if prompt == "panic" {
                 panic!("engine blew up");
+            }
+            if prompt.starts_with("spin") {
+                // A long decode that only ends when told to stop.
+                let deadline = Instant::now() + Duration::from_secs(5);
+                while !sink.is_closed() && Instant::now() < deadline {
+                    let _ = sink.on_piece("x");
+                    thread::sleep(Duration::from_millis(1));
+                }
+                return Ok(());
             }
             for piece in ["a", "b", "c"] {
                 if sink.on_piece(piece) == Flow::Stop {
@@ -355,7 +667,7 @@ mod tests {
         done: Sender<Result<(), String>>,
     }
 
-    impl Sink for TestSink {
+    impl PieceSink for TestSink {
         fn on_piece(&mut self, piece: &str) -> Flow {
             self.pieces.lock().unwrap().push_str(piece);
             Flow::Continue
@@ -363,6 +675,9 @@ mod tests {
         fn is_closed(&self) -> bool {
             self.closed.load(Ordering::SeqCst)
         }
+    }
+
+    impl Sink for TestSink {
         fn finish(self: Box<Self>, result: Result<(), DomainError>) {
             let _ = self.done.send(result.map_err(|e| e.to_string()));
         }
@@ -383,11 +698,16 @@ mod tests {
     }
 
     fn submit(worker: &Worker, prompt: &str) -> Submitted {
+        submit_with(worker, prompt, Priority::Background)
+    }
+
+    fn submit_with(worker: &Worker, prompt: &str, priority: Priority) -> Submitted {
         let (done_tx, done) = channel();
         let pieces = Arc::new(Mutex::new(String::new()));
         let closed = Arc::new(AtomicBool::new(false));
         worker
             .submit(Job {
+                priority,
                 prompt: prompt.into(),
                 params: SamplingParams {
                     max_tokens: 8,
@@ -521,5 +841,195 @@ mod tests {
 
         assert_eq!(submit(&w, "after").wait(), Ok(()));
         assert_eq!(probe.created.load(Ordering::SeqCst), 2, "fresh engine");
+    }
+
+    /// Wait until the engine has started serving `prompt`.
+    fn wait_until_serving(probe: &Probe, prompt: &str) {
+        assert!(
+            eventually(|| probe.served.lock().unwrap().iter().any(|p| p == prompt)),
+            "{prompt} never started"
+        );
+    }
+
+    #[test]
+    fn an_interactive_job_is_served_before_queued_background_jobs() {
+        let probe = Arc::new(Probe::default());
+        let source = FakeSource::new(&probe);
+        let (release, gate) = channel();
+        *source.gate.lock().unwrap() = Some(gate);
+        let w = worker(source, Duration::from_secs(60));
+
+        let running = submit(&w, "bg-running");
+        wait_until_serving(&probe, "bg-running");
+        let queued_bg_one = submit(&w, "bg-queued-1");
+        let queued_bg_two = submit(&w, "bg-queued-2");
+        let chat_one = submit_with(&w, "chat-1", Priority::Interactive);
+        let chat_two = submit_with(&w, "chat-2", Priority::Interactive);
+        release.send(()).unwrap();
+
+        for job in [
+            &running,
+            &queued_bg_one,
+            &queued_bg_two,
+            &chat_one,
+            &chat_two,
+        ] {
+            assert_eq!(job.wait(), Ok(()));
+        }
+        // The running job is never preempted; interactive jobs then go
+        // first (FIFO among themselves), background jobs keep their order.
+        assert_eq!(
+            *probe.served.lock().unwrap(),
+            [
+                "bg-running",
+                "chat-1",
+                "chat-2",
+                "bg-queued-1",
+                "bg-queued-2"
+            ]
+        );
+    }
+
+    #[test]
+    fn the_idle_release_still_works_with_the_priority_queue() {
+        let probe = Arc::new(Probe::default());
+        let w = worker(FakeSource::new(&probe), Duration::from_millis(40));
+        assert_eq!(
+            submit_with(&w, "chat", Priority::Interactive).wait(),
+            Ok(())
+        );
+        assert!(eventually(|| probe.dropped.load(Ordering::SeqCst) == 1));
+        assert_eq!(submit(&w, "bg").wait(), Ok(()));
+        assert_eq!(probe.created.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn dropping_the_worker_aborts_the_running_job_and_fails_the_queued_ones() {
+        let probe = Arc::new(Probe::default());
+        let w = worker(FakeSource::new(&probe), Duration::from_secs(60));
+        let running = submit(&w, "spin");
+        wait_until_serving(&probe, "spin");
+        let queued_bg = submit(&w, "queued-bg");
+        let queued_chat = submit_with(&w, "queued-chat", Priority::Interactive);
+
+        let started = Instant::now();
+        drop(w);
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "drop must not wait for the running job: {:?}",
+            started.elapsed()
+        );
+
+        for job in [&running, &queued_bg, &queued_chat] {
+            let err = job.wait().unwrap_err();
+            assert!(err.contains("shutting down"), "{err}");
+        }
+        assert_eq!(*probe.served.lock().unwrap(), ["spin"], "queued never ran");
+    }
+
+    /// Sink that streams through an [`Outlet`] nobody reads, so it stalls
+    /// as soon as the one-slot buffer is full.
+    struct StuckStreamSink {
+        out: Outlet<String>,
+        done: Sender<Result<(), String>>,
+    }
+
+    impl PieceSink for StuckStreamSink {
+        fn on_piece(&mut self, piece: &str) -> Flow {
+            self.out.push(piece.to_string())
+        }
+        fn is_closed(&self) -> bool {
+            self.out.is_closed()
+        }
+    }
+
+    impl Sink for StuckStreamSink {
+        fn bind_cancel(&mut self, cancel: Cancel) {
+            self.out.bind_cancel(cancel);
+        }
+        fn finish(self: Box<Self>, result: Result<(), DomainError>) {
+            let _ = self.done.send(result.map_err(|e| e.to_string()));
+        }
+    }
+
+    type StuckReceiver = tokio::sync::mpsc::Receiver<Result<String, DomainError>>;
+
+    /// Queue a job whose consumer never drains its one-slot channel; the
+    /// receiver is returned so the channel stays open.
+    fn submit_stuck(
+        worker: &Worker,
+        stall: Duration,
+    ) -> (Receiver<Result<(), String>>, StuckReceiver) {
+        let (done_tx, done) = channel();
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        worker
+            .submit(Job {
+                priority: Priority::Interactive,
+                prompt: "stuck".into(),
+                params: SamplingParams::from_generate(&GenerateOptions::default()),
+                sink: Box::new(StuckStreamSink {
+                    out: Outlet::new(tx).with_stall(stall),
+                    done: done_tx,
+                }),
+            })
+            .expect("submit");
+        (done, rx)
+    }
+
+    #[test]
+    fn a_stalled_consumer_is_cut_off_and_the_queue_moves_on() {
+        let probe = Arc::new(Probe::default());
+        let w = worker(FakeSource::new(&probe), Duration::from_secs(60));
+        let (stuck_done, _rx_kept_open) = submit_stuck(&w, Duration::from_millis(50));
+        let next = submit(&w, "next");
+
+        // The stuck job ends (without an error: nobody is listening) and
+        // the following job is served instead of waiting forever.
+        assert_eq!(
+            stuck_done
+                .recv_timeout(Duration::from_secs(5))
+                .expect("ended"),
+            Ok(())
+        );
+        assert_eq!(next.wait(), Ok(()));
+    }
+
+    #[test]
+    fn dropping_the_worker_does_not_wait_for_a_stalled_consumer() {
+        let probe = Arc::new(Probe::default());
+        let w = worker(FakeSource::new(&probe), Duration::from_secs(60));
+        let (stuck_done, _rx_kept_open) = submit_stuck(&w, Duration::from_secs(60));
+        wait_until_serving(&probe, "stuck");
+        // Let the sink fill its buffer and start waiting.
+        thread::sleep(Duration::from_millis(100));
+
+        let started = Instant::now();
+        drop(w);
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "drop waited for the consumer: {:?}",
+            started.elapsed()
+        );
+        let err = stuck_done
+            .recv_timeout(Duration::from_secs(1))
+            .expect("ended")
+            .unwrap_err();
+        assert!(err.contains("shutting down"), "{err}");
+    }
+
+    #[test]
+    fn send_bounded_reports_each_way_a_send_can_end() {
+        let cancel = Cancel::default();
+        let (tx, rx) = tokio::sync::mpsc::channel::<u8>(1);
+        let short = Duration::from_millis(20);
+        assert_eq!(send_bounded(&tx, 1, &cancel, short), SendOutcome::Sent);
+        assert_eq!(send_bounded(&tx, 2, &cancel, short), SendOutcome::Stalled);
+        cancel.set();
+        assert_eq!(
+            send_bounded(&tx, 3, &cancel, Duration::from_secs(60)),
+            SendOutcome::Cancelled
+        );
+        drop(rx);
+        assert_eq!(send_bounded(&tx, 4, &cancel, short), SendOutcome::Closed);
     }
 }

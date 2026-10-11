@@ -74,7 +74,7 @@ async fn long_meeting_chat_answers_from_a_fact_in_the_middle_with_a_valid_citati
     // The fixture meeting has no language tag: the answer must follow the
     // Spanish question instead of defaulting to English.
     assert!(
-        text.to_lowercase().contains("presupuesto"),
+        looks_spanish(text),
         "answer is not in the question's language: {text}"
     );
     assert!(*had_citations, "answer carries no valid citation: {text}");
@@ -82,4 +82,19 @@ async fn long_meeting_chat_answers_from_a_fact_in_the_middle_with_a_valid_citati
         citations.contains(&planted),
         "citations {citations:?} do not include the planted segment {planted:?}"
     );
+}
+
+/// Robust language signal: several common Spanish function words and no
+/// common English ones, instead of one content word the model may rephrase.
+fn looks_spanish(text: &str) -> bool {
+    let padded = format!(
+        " {} ",
+        text.to_lowercase().replace(['\n', ',', '.', ':', ';'], " ")
+    );
+    let spanish = [
+        " el ", " la ", " de ", " es ", " que ", " en ", " del ", " los ",
+    ];
+    let english = [" the ", " is ", " of ", " and ", " was "];
+    let spanish_hits = spanish.iter().filter(|w| padded.contains(**w)).count();
+    spanish_hits >= 3 && !english.iter().any(|w| padded.contains(*w))
 }

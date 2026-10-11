@@ -16,8 +16,9 @@
 //!   across every generation request - and across every adapter
 //!   built from it (see [`Self::chat_handle`]).
 //! * A `LlamaContext` is not `Send`, so the worker thread creates it and
-//!   serves every request (summary and chat alike) one at a time in
-//!   arrival order. The async side only queues a job and awaits its
+//!   serves every request (summary and chat alike) one at a time; queued
+//!   chat turns go ahead of queued summary calls, a running call is never
+//!   preempted. The async side only queues a job and awaits its
 //!   output, so a long summary doesn't stall the rest of the runtime.
 //!   A caller that drops its stream or future cancels the job: decoding
 //!   stops at the next token and the queue moves on.
@@ -38,7 +39,7 @@ use echo_domain::{DomainError, GenerateOptions, LlmModel};
 use crate::backend::backend_singleton;
 use crate::llama_cpp_chat::LlamaCppChat;
 use crate::shared::{LoadedModel, SharedModel};
-use crate::worker::{Flow, Job, SamplingParams, Sink};
+use crate::worker::{Cancel, Flow, Job, Outlet, PieceSink, Priority, SamplingParams, Sink};
 
 /// Default context window when the caller does not override it. Both
 /// Qwen 3 8B and 14B ship with `n_ctx_train = 32_768`; 8192 holds the
@@ -254,6 +255,7 @@ impl LlmModel for LlamaCppLlm {
         // worker thread runs it so other IPC handlers stay responsive.
         let (done, rx) = oneshot::channel();
         self.inner.submit(Job {
+            priority: Priority::Background,
             prompt: prompt.to_string(),
             params: SamplingParams::from_generate(options),
             sink: Box::new(CollectSink {
@@ -278,14 +280,10 @@ impl LlmModel for LlamaCppLlm {
 
         let (tx, rx) = mpsc::channel::<Result<String, DomainError>>(STREAM_BUFFER);
         self.inner.submit(Job {
+            priority: Priority::Background,
             prompt: prompt.to_string(),
             params: SamplingParams::from_generate(options),
-            sink: Box::new(StreamSink {
-                output: String::new(),
-                stops: options.stop.clone(),
-                in_think: false,
-                tx,
-            }),
+            sink: Box::new(StreamSink::new(options.stop.clone(), Outlet::new(tx))),
         })?;
 
         let stream = stream::unfold(rx, |mut rx| async move {
@@ -305,7 +303,7 @@ struct CollectSink {
     done: oneshot::Sender<Result<String, DomainError>>,
 }
 
-impl Sink for CollectSink {
+impl PieceSink for CollectSink {
     fn on_piece(&mut self, piece: &str) -> Flow {
         self.output.push_str(piece);
         let hit = self
@@ -327,7 +325,9 @@ impl Sink for CollectSink {
     fn is_closed(&self) -> bool {
         self.done.is_closed()
     }
+}
 
+impl Sink for CollectSink {
     fn finish(self: Box<Self>, result: Result<(), DomainError>) {
         let Self { output, done, .. } = *self;
         // Qwen 3 <think>…</think> blocks are never useful to callers
@@ -339,14 +339,27 @@ impl Sink for CollectSink {
 /// [`Sink`] behind [`LlamaCppLlm::generate_stream`]: forwards each piece
 /// outside `<think>` blocks. The consumer aggregates the text; a stop
 /// sequence ends the stream without trimming the piece that completed it.
+/// A consumer that stops draining is cut off after a bounded stall (see
+/// [`Outlet`]).
 struct StreamSink {
     output: String,
     stops: Vec<String>,
     in_think: bool,
-    tx: mpsc::Sender<Result<String, DomainError>>,
+    out: Outlet<String>,
 }
 
-impl Sink for StreamSink {
+impl StreamSink {
+    fn new(stops: Vec<String>, out: Outlet<String>) -> Self {
+        Self {
+            output: String::new(),
+            stops,
+            in_think: false,
+            out,
+        }
+    }
+}
+
+impl PieceSink for StreamSink {
     fn on_piece(&mut self, piece: &str) -> Flow {
         self.output.push_str(piece);
 
@@ -357,7 +370,7 @@ impl Sink for StreamSink {
         if self.in_think && self.output.contains("</think>") {
             // The piece closing the block is part of it: not forwarded.
             self.in_think = false;
-        } else if !self.in_think && self.tx.blocking_send(Ok(piece.to_string())).is_err() {
+        } else if !self.in_think && self.out.push(piece.to_string()) == Flow::Stop {
             return Flow::Stop;
         }
 
@@ -374,12 +387,18 @@ impl Sink for StreamSink {
     }
 
     fn is_closed(&self) -> bool {
-        self.tx.is_closed()
+        self.out.is_closed()
+    }
+}
+
+impl Sink for StreamSink {
+    fn bind_cancel(&mut self, cancel: Cancel) {
+        self.out.bind_cancel(cancel);
     }
 
-    fn finish(self: Box<Self>, result: Result<(), DomainError>) {
+    fn finish(mut self: Box<Self>, result: Result<(), DomainError>) {
         if let Err(e) = result {
-            let _ = self.tx.blocking_send(Err(e));
+            self.out.fail(e);
         }
     }
 }
@@ -406,5 +425,157 @@ mod tests {
         let err =
             LlamaCppLlm::load("/nonexistent/path/to/model.gguf").expect_err("expected load error");
         assert!(matches!(err, DomainError::ModelNotLoaded(_)), "got {err:?}");
+    }
+
+    // ---- production sinks (characterisation: they pass on first run) ----
+
+    use std::time::{Duration, Instant};
+
+    fn collect_sink(
+        stops: &[&str],
+    ) -> (CollectSink, oneshot::Receiver<Result<String, DomainError>>) {
+        let (done, rx) = oneshot::channel();
+        let sink = CollectSink {
+            output: String::new(),
+            stops: stops.iter().map(|s| (*s).to_string()).collect(),
+            done,
+        };
+        (sink, rx)
+    }
+
+    fn stream_sink(
+        stops: &[&str],
+        capacity: usize,
+        stall: Duration,
+    ) -> (StreamSink, mpsc::Receiver<Result<String, DomainError>>) {
+        let (tx, rx) = mpsc::channel(capacity);
+        let sink = StreamSink::new(
+            stops.iter().map(|s| (*s).to_string()).collect(),
+            Outlet::new(tx).with_stall(stall),
+        );
+        (sink, rx)
+    }
+
+    fn drain(rx: &mut mpsc::Receiver<Result<String, DomainError>>) -> Vec<String> {
+        let mut out = Vec::new();
+        while let Ok(item) = rx.try_recv() {
+            out.push(item.expect("piece"));
+        }
+        out
+    }
+
+    #[test]
+    fn collect_sink_truncates_at_the_stop_sequence_and_stops() {
+        let (mut sink, mut rx) = collect_sink(&["###"]);
+        assert_eq!(sink.on_piece("hello "), Flow::Continue);
+        assert_eq!(sink.on_piece("wor#"), Flow::Continue);
+        assert_eq!(sink.on_piece("## tail"), Flow::Stop);
+        Box::new(sink).finish(Ok(()));
+        assert_eq!(rx.try_recv().unwrap().unwrap(), "hello wor");
+    }
+
+    #[test]
+    fn collect_sink_ignores_empty_stop_sequences() {
+        let (mut sink, mut rx) = collect_sink(&[""]);
+        assert_eq!(sink.on_piece("abc"), Flow::Continue);
+        Box::new(sink).finish(Ok(()));
+        assert_eq!(rx.try_recv().unwrap().unwrap(), "abc");
+    }
+
+    #[test]
+    fn collect_sink_strips_think_blocks_on_finish() {
+        let (mut sink, mut rx) = collect_sink(&[]);
+        sink.on_piece("<think>plan</think>");
+        sink.on_piece("answer");
+        Box::new(sink).finish(Ok(()));
+        assert_eq!(rx.try_recv().unwrap().unwrap(), "answer");
+    }
+
+    #[test]
+    fn collect_sink_reports_closed_when_the_future_is_dropped() {
+        let (sink, rx) = collect_sink(&[]);
+        assert!(!sink.is_closed());
+        drop(rx);
+        assert!(sink.is_closed());
+    }
+
+    #[test]
+    fn collect_sink_forwards_an_error_instead_of_the_text() {
+        let (mut sink, mut rx) = collect_sink(&[]);
+        sink.on_piece("partial");
+        Box::new(sink).finish(Err(DomainError::LlmFailed("decode failed".into())));
+        let err = rx.try_recv().unwrap().unwrap_err();
+        assert!(err.to_string().contains("decode failed"), "{err}");
+    }
+
+    #[test]
+    fn stream_sink_suppresses_think_blocks_and_forwards_the_rest() {
+        let (mut sink, mut rx) = stream_sink(&[], 16, Duration::from_secs(1));
+        for piece in ["<think>", "hidden", "</think>", "Hola", " mundo"] {
+            assert_eq!(sink.on_piece(piece), Flow::Continue);
+        }
+        assert_eq!(drain(&mut rx), ["Hola", " mundo"]);
+    }
+
+    #[test]
+    fn stream_sink_stops_after_the_piece_completing_a_stop_sequence() {
+        let (mut sink, mut rx) = stream_sink(&["END"], 16, Duration::from_secs(1));
+        assert_eq!(sink.on_piece("a"), Flow::Continue);
+        // Documented contract: the completing piece is still forwarded.
+        assert_eq!(sink.on_piece("END"), Flow::Stop);
+        assert_eq!(drain(&mut rx), ["a", "END"]);
+    }
+
+    #[test]
+    fn stream_sink_cancels_when_the_receiver_is_dropped() {
+        let (mut sink, rx) = stream_sink(&[], 16, Duration::from_secs(1));
+        assert!(!sink.is_closed());
+        drop(rx);
+        assert!(sink.is_closed());
+        assert_eq!(sink.on_piece("x"), Flow::Stop);
+    }
+
+    #[test]
+    fn stream_sink_forwards_the_error_as_the_final_item() {
+        let (mut sink, mut rx) = stream_sink(&[], 16, Duration::from_secs(1));
+        sink.on_piece("a");
+        Box::new(sink).finish(Err(DomainError::LlmFailed("decode failed".into())));
+        assert_eq!(rx.try_recv().unwrap().unwrap(), "a");
+        let err = rx.try_recv().unwrap().unwrap_err();
+        assert!(err.to_string().contains("decode failed"), "{err}");
+    }
+
+    #[test]
+    fn stream_sink_gives_up_on_a_consumer_that_stalls() {
+        let (mut sink, mut rx) = stream_sink(&[], 1, Duration::from_millis(40));
+        assert_eq!(sink.on_piece("a"), Flow::Continue);
+        let started = Instant::now();
+        // Buffer full and nobody draining: bounded wait, then cancel.
+        assert_eq!(sink.on_piece("b"), Flow::Stop);
+        assert!(started.elapsed() < Duration::from_secs(2));
+        // The final error is dropped rather than waiting a second time.
+        let started = Instant::now();
+        Box::new(sink).finish(Err(DomainError::LlmFailed("late".into())));
+        assert!(started.elapsed() < Duration::from_millis(30));
+        assert_eq!(drain(&mut rx), ["a"]);
+    }
+
+    #[test]
+    fn stream_sink_stops_waiting_when_the_worker_cancels() {
+        let (mut sink, _rx) = stream_sink(&[], 1, Duration::from_secs(60));
+        let cancel = Cancel::default();
+        sink.bind_cancel(cancel.clone());
+        assert_eq!(sink.on_piece("a"), Flow::Continue);
+        let canceller = {
+            let cancel = cancel.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(30));
+                cancel.set();
+            })
+        };
+        let started = Instant::now();
+        assert_eq!(sink.on_piece("b"), Flow::Stop);
+        assert!(started.elapsed() < Duration::from_secs(5));
+        canceller.join().unwrap();
     }
 }

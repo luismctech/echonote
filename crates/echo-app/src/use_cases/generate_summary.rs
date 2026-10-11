@@ -559,7 +559,7 @@ fn render_notes(meeting: &Meeting) -> Option<String> {
 }
 
 fn language_instruction(language: Option<&str>) -> String {
-    match language.unwrap_or("").to_ascii_lowercase().as_str() {
+    match language.unwrap_or("").trim().to_ascii_lowercase().as_str() {
         // Spanish + Latin-American Spanish variants.
         "es" | "es-mx" | "es-es" | "es-419" => "Responde SIEMPRE en español neutro.".to_string(),
         // No language tag: the transcript itself is the only signal, so
@@ -1408,6 +1408,19 @@ mod tests {
         assert!(!language_instruction(None).contains("English"));
         let other = language_instruction(Some("fr"));
         assert!(other.contains("fr"), "{other}");
+    }
+
+    #[test]
+    fn language_instruction_treats_whitespace_only_and_padded_tags_like_the_chat() {
+        for blank in [Some(""), Some("  "), Some("\t\n")] {
+            let instruction = language_instruction(blank);
+            assert!(
+                instruction.contains("language as the meeting transcript")
+                    && !instruction.contains("ISO code"),
+                "{blank:?} must take the no-language branch: {instruction}"
+            );
+        }
+        assert!(language_instruction(Some(" es ")).contains("español"));
     }
 
     #[tokio::test]

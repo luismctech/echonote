@@ -15,10 +15,10 @@
 //!    let llm  = LlamaCppLlm::load("qwen3-14b.gguf")?;
 //!    let chat = llm.chat_handle();
 //!    ```
-//!    Both adapters now point at the same `Arc<LoadedModel>`. No
+//!    Both adapters now point at the same `Arc<SharedModel>`. No
 //!    extra weights are loaded; `generate` and `ask` calls share one
-//!    persistent `LlamaContext` and are served in arrival order (see
-//!    `crate::shared`).
+//!    persistent `LlamaContext`; chat turns are served ahead of queued
+//!    summary calls (see `crate::worker`).
 //!
 //! 2. **Standalone** (e.g. CLI tools that only need the chat surface):
 //!    ```ignore
@@ -32,9 +32,11 @@
 //! over a bounded `tokio::sync::mpsc` channel; the receiver is wrapped
 //! into a `BoxStream` of `Result<ChatToken, DomainError>` and handed
 //! back to the caller. When the channel buffer fills (a slow IPC
-//! consumer), the producer naturally back-pressures the decoder
-//! instead of OOMing on a runaway model. Dropping the stream cancels the
-//! turn.
+//! consumer), the producer back-pressures the decoder instead of OOMing
+//! on a runaway model, but only for a bounded stall (see
+//! [`crate::worker::CONSUMER_STALL_TIMEOUT`]): a consumer that stops
+//! draining is cut off so it cannot block the worker. Dropping the stream
+//! cancels the turn.
 //!
 //! ## Stop-sequence handling
 //!
@@ -63,7 +65,7 @@ use echo_domain::{ChatAssistant, ChatMessage, ChatRequest, ChatRole, ChatToken, 
 
 use crate::llama_cpp::{LlamaCppLlm, LoadOptions};
 use crate::shared::SharedModel;
-use crate::worker::{Flow, Job, SamplingParams, Sink};
+use crate::worker::{Cancel, Flow, Job, Outlet, PieceSink, Priority, SamplingParams, Sink};
 
 /// mpsc buffer between the (blocking) decoder and the (async) IPC
 /// consumer. Large enough that a small Tauri Channel hiccup does not
@@ -74,7 +76,7 @@ const STREAM_BUFFER: usize = 64;
 /// llama.cpp-backed [`ChatAssistant`] adapter.
 ///
 /// Cloning is cheap (`Arc` internally) and never duplicates the model
-/// — it only bumps the refcount on the shared [`LoadedModel`].
+/// — it only bumps the refcount on the shared `SharedModel`.
 #[derive(Clone)]
 pub struct LlamaCppChat {
     inner: Arc<SharedModel>,
@@ -169,11 +171,12 @@ impl ChatAssistant for LlamaCppChat {
         // Decoder failures travel through the channel as the final item.
         let (tx, rx) = mpsc::channel::<Result<ChatToken, DomainError>>(STREAM_BUFFER);
         self.inner.submit(Job {
+            priority: Priority::Interactive,
             prompt,
             params: SamplingParams::from_chat(&request.options),
             sink: Box::new(ChatSink {
                 state: StreamState::new(request.options.stop.clone()),
-                tx,
+                out: Outlet::new(tx),
             }),
         })?;
 
@@ -192,19 +195,14 @@ impl ChatAssistant for LlamaCppChat {
 /// resulting delta to the stream consumer.
 struct ChatSink {
     state: StreamState,
-    tx: mpsc::Sender<Result<ChatToken, DomainError>>,
+    out: Outlet<ChatToken>,
 }
 
-impl Sink for ChatSink {
+impl PieceSink for ChatSink {
     fn on_piece(&mut self, piece: &str) -> Flow {
         let outcome = self.state.push_piece(piece);
-        if !outcome.delta.is_empty()
-            && self
-                .tx
-                .blocking_send(Ok(ChatToken::new(outcome.delta)))
-                .is_err()
-        {
-            info!("chat stream consumer dropped; aborting decode");
+        if !outcome.delta.is_empty() && self.out.push(ChatToken::new(outcome.delta)) == Flow::Stop {
+            info!("chat stream consumer gone or stalled; aborting decode");
             return Flow::Stop;
         }
         if outcome.stop_hit {
@@ -215,14 +213,20 @@ impl Sink for ChatSink {
     }
 
     fn is_closed(&self) -> bool {
-        self.tx.is_closed()
+        self.out.is_closed()
+    }
+}
+
+impl Sink for ChatSink {
+    fn bind_cancel(&mut self, cancel: Cancel) {
+        self.out.bind_cancel(cancel);
     }
 
-    fn finish(self: Box<Self>, result: Result<(), DomainError>) {
+    fn finish(mut self: Box<Self>, result: Result<(), DomainError>) {
         // If the consumer is gone there is nobody to tell; otherwise the
         // error is the stream's final item.
         if let Err(e) = result {
-            let _ = self.tx.blocking_send(Err(e));
+            self.out.fail(e);
         }
     }
 }
@@ -528,7 +532,7 @@ What's 2+2?<|im_end|>
     async fn ask_with_no_messages_rejects_before_spawning() {
         // We can exercise the pre-stream validation path without a
         // real model by going through a hand-rolled `LlamaCppChat`
-        // wired to a fake `LoadedModel`. Setting one up requires real
+        // wired to a fake `SharedModel`. Setting one up requires real
         // llama.cpp internals though, so for now we lean on the
         // `Invariant` check happening synchronously: a missing model
         // file means we never get a `LlamaCppChat` to test against in
@@ -590,5 +594,76 @@ What's 2+2?<|im_end|>
         let o3 = s.push_piece(" momento");
         assert_eq!(o3.delta, " momento");
         assert!(!o3.stop_hit);
+    }
+
+    // ---- production sink (characterisation: passes on first run) ----
+
+    use std::time::{Duration, Instant};
+
+    fn chat_sink(
+        stops: &[&str],
+        capacity: usize,
+        stall: Duration,
+    ) -> (ChatSink, mpsc::Receiver<Result<ChatToken, DomainError>>) {
+        let (tx, rx) = mpsc::channel(capacity);
+        let sink = ChatSink {
+            state: StreamState::new(stops.iter().map(|s| (*s).to_string()).collect()),
+            out: Outlet::new(tx).with_stall(stall),
+        };
+        (sink, rx)
+    }
+
+    fn drain_text(rx: &mut mpsc::Receiver<Result<ChatToken, DomainError>>) -> String {
+        let mut out = String::new();
+        while let Ok(item) = rx.try_recv() {
+            out.push_str(&item.expect("token").delta);
+        }
+        out
+    }
+
+    #[test]
+    fn chat_sink_trims_at_the_stop_sequence_and_stops() {
+        let (mut sink, mut rx) = chat_sink(&["<|im_end|>"], 16, Duration::from_secs(1));
+        assert_eq!(sink.on_piece("Hola "), Flow::Continue);
+        assert_eq!(sink.on_piece("ok<|im_end|>junk"), Flow::Stop);
+        assert_eq!(drain_text(&mut rx), "Hola ok");
+    }
+
+    #[test]
+    fn chat_sink_suppresses_the_think_block() {
+        let (mut sink, mut rx) = chat_sink(&[], 16, Duration::from_secs(1));
+        for piece in ["<think>", "secret", "</think>", "Respuesta"] {
+            assert_eq!(sink.on_piece(piece), Flow::Continue);
+        }
+        assert_eq!(drain_text(&mut rx), "Respuesta");
+    }
+
+    #[test]
+    fn chat_sink_cancels_when_the_receiver_is_dropped() {
+        let (mut sink, rx) = chat_sink(&[], 16, Duration::from_secs(1));
+        assert!(!sink.is_closed());
+        drop(rx);
+        assert!(sink.is_closed());
+        assert_eq!(sink.on_piece("x"), Flow::Stop);
+    }
+
+    #[test]
+    fn chat_sink_forwards_the_error_as_the_final_item() {
+        let (mut sink, mut rx) = chat_sink(&[], 16, Duration::from_secs(1));
+        sink.on_piece("a");
+        Box::new(sink).finish(Err(DomainError::LlmFailed("decode failed".into())));
+        assert_eq!(rx.try_recv().unwrap().unwrap().delta, "a");
+        let err = rx.try_recv().unwrap().unwrap_err();
+        assert!(err.to_string().contains("decode failed"), "{err}");
+    }
+
+    #[test]
+    fn chat_sink_gives_up_on_a_consumer_that_stalls() {
+        let (mut sink, mut rx) = chat_sink(&[], 1, Duration::from_millis(40));
+        assert_eq!(sink.on_piece("a"), Flow::Continue);
+        let started = Instant::now();
+        assert_eq!(sink.on_piece("b"), Flow::Stop);
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert_eq!(drain_text(&mut rx), "a");
     }
 }
