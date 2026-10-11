@@ -96,6 +96,9 @@ jobs:
     - name: pnpm typecheck
       run: pnpm typecheck
 
+    - name: pnpm lint (Biome, lint only)
+      run: pnpm lint
+
     - name: pnpm test (vitest)
       # The frontend now has reducer + hook tests under src/. They
       # run in node (no jsdom) and finish in well under a second, so

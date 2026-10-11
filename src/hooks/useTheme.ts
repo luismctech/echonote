@@ -7,7 +7,9 @@ const STORAGE_KEY = "echonote-theme";
 /* ── Tiny external store so every consumer stays in sync ── */
 
 const listeners = new Set<() => void>();
-function emit() { listeners.forEach((l) => l()); }
+function emit() {
+  for (const l of listeners) l();
+}
 
 function getTheme(): Theme {
   const stored = localStorage.getItem(STORAGE_KEY);

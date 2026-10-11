@@ -55,12 +55,13 @@ type ToastAction =
 
 function reducer(state: Toast[], action: ToastAction): Toast[] {
   switch (action.type) {
-    case "PUSH":
+    case "PUSH": {
       // Cap the stack at 5; drop the oldest non-error first.
       if (state.length < 5) return [...state, action.toast];
       const idx = state.findIndex((t) => t.kind !== "error");
       const next = idx >= 0 ? state.filter((_, i) => i !== idx) : state.slice(1);
       return [...next, action.toast];
+    }
     case "UPDATE":
       return state.map((t) =>
         t.id === action.id ? { ...t, ...action.fields } : t,

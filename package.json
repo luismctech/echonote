@@ -10,6 +10,7 @@
     "build": "tsc -b && vite build",
     "preview": "vite preview",
     "typecheck": "tsc -b",
+    "lint": "biome lint ./src",
     "test": "vitest run",
     "test:watch": "vitest",
     "tauri": "tauri",
@@ -35,6 +36,7 @@
     "remark-gfm": "^4.0.1"
   },
   "devDependencies": {
+    "@biomejs/biome": "^2.5.15",
     "@tailwindcss/typography": "^0.5.20",
     "@tailwindcss/vite": "^4.3.3",
     "@tauri-apps/cli": "^2.12.2",
