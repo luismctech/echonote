@@ -84,10 +84,12 @@ fn synthetic_transcript(llm: &LlamaCppLlm, target: usize) -> String {
     text
 }
 
-fn chatml(system: &str, user: &str) -> String {
-    format!(
-        "<|im_start|>system\n{system}<|im_end|>\n<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n"
-    )
+/// System + user conversation as chat messages: the adapter renders them
+/// with the loaded model's own template (ChatML for Qwen, Gemma's Jinja
+/// template for Gemma), so the bench measures the prompt a real request
+/// sends for either family.
+fn conversation(system: &str, user: &str) -> Vec<ChatMessage> {
+    vec![ChatMessage::system(system), ChatMessage::user(user)]
 }
 
 fn greedy(max_tokens: u32) -> GenerateOptions {
@@ -117,10 +119,16 @@ async fn llama_latency_and_memory_baseline() {
     eprintln!("[bench] context window: {}", llm.context_window());
 
     // (a) context cost: tiny prompt, one token, twice.
-    let tiny = chatml("Answer with one word.", "Say OK. /no_think");
+    eprintln!(
+        "[bench] family {}, rendering {}, {} special-token texts",
+        llm.prompt_format_name(),
+        llm.prompt_rendering_name(),
+        llm.special_token_count()
+    );
+    let tiny = conversation("Answer with one word.", "Say OK.");
     for call in 1..=2 {
         let started = Instant::now();
-        let out = llm.generate(&tiny, &greedy(1)).await.expect("tiny");
+        let out = llm.generate_chat(&tiny, &greedy(1)).await.expect("tiny");
         eprintln!(
             "[bench] tiny request #{call} (1 token, tiny prompt): {} ms (output {out:?})",
             started.elapsed().as_millis()
@@ -131,12 +139,26 @@ async fn llama_latency_and_memory_baseline() {
     // (b) prompt-eval throughput on a ~6k-token prompt.
     let transcript = synthetic_transcript(&llm, TARGET_PROMPT_TOKENS);
     let system = format!("You answer questions about this meeting transcript.\n\n{transcript}");
-    let question = "¿Qué se acordó sobre el informe de costes? Responde en una frase. /no_think";
-    let prompt = chatml(&system, question);
-    let n_prompt = llm.count_tokens(&prompt);
+    // Qwen's chat keeps its default reasoning, so the question switches it
+    // off by hand; the Jinja families already render with thinking off.
+    let no_think = if llm.prompt_format_name() == "Qwen" {
+        " /no_think"
+    } else {
+        ""
+    };
+    let question =
+        format!("¿Qué se acordó sobre el informe de costes? Responde en una frase.{no_think}");
+    let question = question.as_str();
+    let long = conversation(&system, question);
+    let (rendered, _) = llm.rendered_chat_prompt(&long);
+    let n_prompt = llm.count_tokens(&rendered);
+    eprintln!(
+        "[bench] prompt starts {:?}",
+        rendered.chars().take(40).collect::<String>()
+    );
     let started = Instant::now();
     let _ = llm
-        .generate(&prompt, &greedy(1))
+        .generate_chat(&long, &greedy(1))
         .await
         .expect("long prompt");
     let eval = started.elapsed();
@@ -152,7 +174,7 @@ async fn llama_latency_and_memory_baseline() {
     let chat = llm.chat_handle();
     // Step (b) left this very prompt in the KV cache; evict it with an
     // unrelated request so turn 1 below is a true cold start.
-    let _ = llm.generate(&tiny, &greedy(1)).await.expect("evict");
+    let _ = llm.generate_chat(&tiny, &greedy(1)).await.expect("evict");
     let options = ChatOptions {
         max_tokens: 64,
         temperature: 0.0,
@@ -172,7 +194,9 @@ async fn llama_latency_and_memory_baseline() {
                 ChatMessage::system(system.clone()),
                 ChatMessage::user(question),
                 ChatMessage::assistant(first_answer.clone()),
-                ChatMessage::user("¿Quién se encarga de ello? Responde en una frase. /no_think"),
+                ChatMessage::user(format!(
+                    "¿Quién se encarga de ello? Responde en una frase.{no_think}"
+                )),
             ]
         };
         let request = ChatRequest {

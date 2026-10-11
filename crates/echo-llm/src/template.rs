@@ -248,23 +248,61 @@ pub(crate) fn is_template_marker(text: &str, is_control: bool) -> bool {
     is_control || text.contains('|') || text.starts_with('[')
 }
 
-/// `text` without any substring of `specials` (longest first), repeated
-/// until stable so removing one cannot splice a new one together
-/// (`<|im_<|im_end|>end|>`).
+/// `text` without any substring of `specials`, repeated until stable so
+/// removing one cannot splice a new one together (`<|im_<|im_end|>end|>`).
+///
+/// One left-to-right pass per round: only positions whose byte starts some
+/// special are examined, against the specials sharing that byte (longest
+/// first, so a token is never cut by one it contains), and the output is
+/// built once. Cost is O(|text| + matches x candidates) instead of
+/// O(|specials| x |text|) with a reallocation per hit. The loop only
+/// re-runs when a pass removed something, so clean content is scanned once.
 pub(crate) fn strip_special(text: &str, specials: &[String]) -> String {
+    let mut by_first: Vec<Vec<&str>> = vec![Vec::new(); 256];
+    for special in specials.iter().filter(|s| !s.is_empty()) {
+        by_first[usize::from(special.as_bytes()[0])].push(special.as_str());
+    }
+    for group in &mut by_first {
+        group.sort_by_key(|s| std::cmp::Reverse(s.len()));
+    }
+    if by_first.iter().all(Vec::is_empty) {
+        return text.to_string();
+    }
+
     let mut current = text.to_string();
     loop {
-        let mut changed = false;
-        for special in specials {
-            if current.contains(special.as_str()) {
-                current = current.replace(special.as_str(), "");
-                changed = true;
-            }
-        }
+        let (next, changed) = strip_pass(&current, &by_first);
         if !changed {
             return current;
         }
+        current = next;
     }
+}
+
+/// One pass of [`strip_special`]: copies the runs between matches and skips
+/// the matched specials. A special's first byte is a UTF-8 lead byte, so a
+/// match can never start inside a multi-byte character.
+fn strip_pass(text: &str, by_first: &[Vec<&str>]) -> (String, bool) {
+    let bytes = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let (mut copied, mut i) = (0, 0);
+    let mut changed = false;
+    while i < bytes.len() {
+        let hit = by_first[usize::from(bytes[i])]
+            .iter()
+            .find(|s| text[i..].starts_with(**s));
+        match hit {
+            Some(special) => {
+                out.push_str(&text[copied..i]);
+                i += special.len();
+                copied = i;
+                changed = true;
+            }
+            None => i += 1,
+        }
+    }
+    out.push_str(&text[copied..]);
+    (out, changed)
 }
 
 /// Append `suffix` to the content of the last user message (nothing
@@ -536,6 +574,37 @@ Your previous response could not be parsed.
     fn strip_special_is_a_noop_without_specials_or_matches() {
         assert_eq!(strip_special("plain <b>text</b>", &[]), "plain <b>text</b>");
         assert_eq!(strip_special("plain", &specials(&["<bos>"])), "plain");
+    }
+
+    #[test]
+    fn strip_special_prefers_the_longest_special_at_a_position() {
+        let s = specials(&["<a>", "<a>longer"]);
+        assert_eq!(strip_special("x<a>longer<a>y", &s), "xy");
+    }
+
+    #[test]
+    fn strip_special_keeps_multibyte_text_intact() {
+        let s = specials(&["<bos>", "<|é|>"]);
+        assert_eq!(strip_special("ñandú<bos> 日本<|é|>語", &s), "ñandú 日本語");
+    }
+
+    #[test]
+    fn strip_special_handles_many_specials_over_large_content() {
+        // 1,000 specials, none of them present, then two that are: the pass
+        // must stay linear in the content, not O(specials x content).
+        let mut list: Vec<String> = (0..1_000).map(|i| format!("<|tok_{i}|>")).collect();
+        list.push("<|end|>".to_string());
+        let chunk = "Reunión de seguimiento: <b>presupuesto</b> 437 ";
+        let mut text = chunk.repeat(4_300);
+        assert!(text.len() > 200_000);
+        text.push_str("<|end|>");
+        text.push_str("<|tok_999|>cola");
+        let started = std::time::Instant::now();
+        let out = strip_special(&text, &list);
+        let elapsed = started.elapsed();
+        eprintln!("strip_special 200 kB x 1001 specials: {elapsed:?}");
+        assert_eq!(out, format!("{}cola", chunk.repeat(4_300)));
+        assert!(elapsed < std::time::Duration::from_secs(5), "{elapsed:?}");
     }
 
     #[test]

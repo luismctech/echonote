@@ -64,7 +64,7 @@ use tracing::{debug, info, instrument};
 use echo_domain::{ChatAssistant, ChatMessage, ChatRequest, ChatToken, DomainError};
 
 use crate::llama_cpp::{LlamaCppLlm, LoadOptions};
-use crate::shared::SharedModel;
+use crate::shared::{ReasoningFilter, SharedModel};
 use crate::template::merge_stops;
 use crate::worker::{
     drain_stream, Cancel, Flow, Job, Outlet, PieceSink, Priority, SamplingParams, Sink,
@@ -247,8 +247,14 @@ impl Sink for ChatSink {
     fn finish(mut self: Box<Self>, result: Result<(), DomainError>) {
         // If the consumer is gone there is nobody to tell; otherwise the
         // error is the stream's final item.
-        if let Err(e) = result {
-            self.out.fail(e);
+        match result {
+            Err(e) => self.out.fail(e),
+            Ok(()) => {
+                let tail = self.state.finish().delta;
+                if !tail.is_empty() {
+                    let _ = self.out.push(ChatToken::new(tail));
+                }
+            }
         }
     }
 }
@@ -256,10 +262,14 @@ impl Sink for ChatSink {
 /// Tracks the running reply text so we can apply the user-supplied
 /// stop sequences without losing previously-emitted bytes.
 ///
-/// On each new piece we append to `total`, then look for any stop
-/// sequence inside it. The result, [`PieceOutcome`], tells the caller
-/// what part of the piece (if any) is safe to forward to the
-/// consumer and whether the stream should terminate.
+/// Each piece first goes through a [`ReasoningFilter`] (Qwen's
+/// `<think>…</think>`, Gemma's `<|channel>…<channel|>`), so reasoning is
+/// never forwarded and never matches a stop. The visible text is appended
+/// to `total` and searched for any stop sequence. The result,
+/// [`PieceOutcome`], tells the caller what part of the visible text (if
+/// any) is safe to forward and whether the stream should terminate. Call
+/// [`Self::finish`] at the end of the reply to release text the filter was
+/// holding back as a possible marker.
 ///
 /// ### Edge case
 ///
@@ -268,27 +278,23 @@ impl Sink for ChatSink {
 /// first half because we already shipped that piece. Handling this
 /// correctly requires a hold-back buffer of `max_stop_len - 1` bytes;
 /// we judged the extra latency not worth it for the MVP because (a)
-/// `<|im_end|>` is a single special EOG token in Qwen, caught earlier
-/// by [`llama_cpp_2::model::LlamaModel::is_eog_token`], and (b) the
+/// the template terminators (`<|im_end|>`, `<turn|>`) are single special
+/// EOG tokens, caught earlier by
+/// [`llama_cpp_2::model::LlamaModel::is_eog_token`], and (b) the
 /// only stop strings we ship are template terminators that the model
 /// never emits as plain text in practice. Documented here so the next
 /// reader doesn't have to rediscover the trade-off.
 struct StreamState {
+    /// Visible (reasoning-free) text so far.
     total: String,
     stops: Vec<String>,
-    /// `true` while inside a `<think>…</think>` block. Pieces are
-    /// accumulated in `total` (for stop-sequence checking) but NOT
-    /// forwarded to the consumer.
-    in_think: bool,
-    /// `true` once a `</think>` has been consumed. Prevents
-    /// re-matching the old `<think>` tag on subsequent tokens.
-    think_done: bool,
+    filter: ReasoningFilter,
 }
 
 struct PieceOutcome {
-    /// Slice of the just-decoded piece that should be forwarded. Empty
-    /// when the piece consists entirely of (the tail of) a stop
-    /// sequence, or when we are inside a `<think>` block.
+    /// Part of the visible text that should be forwarded. Empty when the
+    /// piece is reasoning, held back, or entirely (the tail of) a stop
+    /// sequence.
     delta: String,
     /// `true` once a stop sequence matched. The decoder loop should
     /// exit immediately after emitting the (possibly empty) delta.
@@ -300,89 +306,26 @@ impl StreamState {
         Self {
             total: String::new(),
             stops: stops.into_iter().filter(|s| !s.is_empty()).collect(),
-            in_think: false,
-            think_done: false,
+            filter: ReasoningFilter::new(),
         }
     }
 
     fn push_piece(&mut self, piece: &str) -> PieceOutcome {
+        let visible = self.filter.push(piece);
+        self.apply_stops(&visible)
+    }
+
+    /// End of the reply: text held back as a possible marker that never
+    /// became one.
+    fn finish(&mut self) -> PieceOutcome {
+        let rest = self.filter.finish();
+        self.apply_stops(&rest)
+    }
+
+    fn apply_stops(&mut self, visible: &str) -> PieceOutcome {
         let prev_len = self.total.len();
-        self.total.push_str(piece);
+        self.total.push_str(visible);
 
-        // ── Think-block suppression ──────────────────────────────
-        // Qwen 3 may emit <think>…</think> at the start of the
-        // reply.  We suppress these blocks entirely so the consumer
-        // never sees chain-of-thought reasoning.
-        if !self.in_think && !self.think_done {
-            if let Some(idx) = self.total.find("<think>") {
-                // Emit whatever was before <think>, then enter
-                // suppression mode.
-                self.in_think = true;
-                let safe = if idx > prev_len {
-                    self.total[prev_len..idx].to_string()
-                } else {
-                    String::new()
-                };
-                // Check if we also got </think> in the same chunk
-                if let Some(end) = self.total.find("</think>") {
-                    let resume = end + "</think>".len();
-                    self.in_think = false;
-                    self.think_done = true;
-                    let after = if resume < self.total.len() {
-                        self.total[resume..].to_string()
-                    } else {
-                        String::new()
-                    };
-                    let delta = format!("{safe}{after}");
-                    return self.check_stops_after_think(prev_len, delta);
-                }
-                return PieceOutcome {
-                    delta: safe,
-                    stop_hit: false,
-                };
-            }
-        } else if self.in_think {
-            // Still inside <think> — check for </think>
-            if let Some(end) = self.total.find("</think>") {
-                let resume = end + "</think>".len();
-                self.in_think = false;
-                self.think_done = true;
-                let delta = if resume < self.total.len() {
-                    self.total[resume..].trim_start().to_string()
-                } else {
-                    String::new()
-                };
-                return self.check_stops_after_think(prev_len, delta);
-            }
-            // Still inside the block — suppress entirely
-            return PieceOutcome {
-                delta: String::new(),
-                stop_hit: false,
-            };
-        }
-
-        // ── Stop-sequence detection (normal path) ────────────────
-        self.check_stops(prev_len, piece)
-    }
-
-    /// After exiting a think-block we may have residual text that
-    /// needs stop-sequence checking.
-    fn check_stops_after_think(&self, _prev_len: usize, delta: String) -> PieceOutcome {
-        for stop in &self.stops {
-            if let Some(idx) = delta.find(stop.as_str()) {
-                return PieceOutcome {
-                    delta: delta[..idx].to_string(),
-                    stop_hit: true,
-                };
-            }
-        }
-        PieceOutcome {
-            delta,
-            stop_hit: false,
-        }
-    }
-
-    fn check_stops(&self, prev_len: usize, piece: &str) -> PieceOutcome {
         // Find the *earliest* stop sequence position in `total`. If
         // multiple stops match we want the one that appears first so
         // we don't accidentally emit content beyond it.
@@ -395,20 +338,17 @@ impl StreamState {
 
         match earliest_cut {
             None => PieceOutcome {
-                delta: piece.to_string(),
+                delta: visible.to_string(),
                 stop_hit: false,
             },
-            Some(cut) => {
-                let delta = if cut > prev_len {
-                    self.total[prev_len..cut].to_string()
-                } else {
-                    String::new()
-                };
-                PieceOutcome {
-                    delta,
-                    stop_hit: true,
-                }
-            }
+            Some(cut) => PieceOutcome {
+                delta: self
+                    .total
+                    .get(prev_len..cut)
+                    .unwrap_or_default()
+                    .to_string(),
+                stop_hit: true,
+            },
         }
     }
 }
@@ -509,6 +449,41 @@ mod tests {
     }
 
     #[test]
+    fn stream_state_suppresses_a_gemma_thought_channel_split_across_pieces() {
+        let mut s = StreamState::new(vec!["<turn|>".into()]);
+        let mut shown = String::new();
+        for piece in [
+            "<|chan",
+            "nel>thought\nplan",
+            "<channel",
+            "|>",
+            "Hola",
+            " mundo",
+        ] {
+            let o = s.push_piece(piece);
+            assert!(!o.stop_hit);
+            shown.push_str(&o.delta);
+        }
+        shown.push_str(&s.finish().delta);
+        assert_eq!(shown, "Hola mundo");
+    }
+
+    #[test]
+    fn stream_state_stop_inside_a_thought_channel_is_ignored() {
+        let mut s = StreamState::new(vec!["<turn|>".into()]);
+        let o = s.push_piece("<|channel>thought\nx<turn|>y<channel|>ok<turn|>junk");
+        assert!(o.stop_hit);
+        assert_eq!(o.delta, "ok");
+    }
+
+    #[test]
+    fn stream_state_releases_a_held_back_marker_prefix_on_finish() {
+        let mut s = StreamState::new(vec![]);
+        assert_eq!(s.push_piece("a <").delta, "a ");
+        assert_eq!(s.finish().delta, "<");
+    }
+
+    #[test]
     fn stream_state_suppresses_think_block_in_single_piece() {
         let mut s = StreamState::new(vec!["<|im_end|>".into()]);
         let o = s.push_piece("<think>inner</think>Answer");
@@ -581,6 +556,16 @@ mod tests {
             assert_eq!(sink.on_piece(piece), Flow::Continue);
         }
         assert_eq!(drain_text(&mut rx), "Respuesta");
+    }
+
+    #[test]
+    fn chat_sink_suppresses_a_gemma_thought_channel_and_flushes_on_finish() {
+        let (mut sink, mut rx) = chat_sink(&[], 16, Duration::from_secs(1));
+        for piece in ["<|channel>", "thought\nx", "<channel|>", "Respuesta ", "<"] {
+            assert_eq!(sink.on_piece(piece), Flow::Continue);
+        }
+        Box::new(sink).finish(Ok(()));
+        assert_eq!(drain_text(&mut rx), "Respuesta <");
     }
 
     #[test]

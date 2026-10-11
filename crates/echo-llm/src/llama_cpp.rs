@@ -45,7 +45,7 @@ use echo_domain::{ChatMessage, DomainError, GenerateOptions, LlmModel};
 
 use crate::backend::backend_singleton;
 use crate::llama_cpp_chat::LlamaCppChat;
-use crate::shared::{LoadedModel, SharedModel};
+use crate::shared::{LoadedModel, ReasoningFilter, SharedModel};
 use crate::template::{merge_stops, PromptFormat, PromptProfile, Rendering};
 use crate::worker::{
     drain_stream, Cancel, Flow, Job, Outlet, PieceSink, Priority, SamplingParams, Sink,
@@ -300,6 +300,15 @@ impl LlamaCppLlm {
         self.inner.profile.specials.len()
     }
 
+    /// The special-token texts stripped from message contents, longest
+    /// first. Test support behind `test-hooks`.
+    #[cfg(any(test, feature = "test-hooks"))]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn special_token_texts(&self) -> Vec<String> {
+        self.inner.profile.specials.clone()
+    }
+
     /// The prompt [`LlmModel::generate_chat`] would send for `messages`
     /// (reasoning off) and the stop sequences it adds. Test support behind
     /// the `test-hooks` feature.
@@ -477,7 +486,7 @@ impl Sink for CollectSink {
 struct StreamSink {
     output: String,
     stops: Vec<String>,
-    in_think: bool,
+    filter: ReasoningFilter,
     out: Outlet<String>,
 }
 
@@ -486,7 +495,7 @@ impl StreamSink {
         Self {
             output: String::new(),
             stops,
-            in_think: false,
+            filter: ReasoningFilter::new(),
             out,
         }
     }
@@ -496,14 +505,10 @@ impl PieceSink for StreamSink {
     fn on_piece(&mut self, piece: &str) -> Flow {
         self.output.push_str(piece);
 
-        // Detect <think> blocks and suppress them from streaming output.
-        if self.output.contains("<think>") && !self.output.contains("</think>") {
-            self.in_think = true;
-        }
-        if self.in_think && self.output.contains("</think>") {
-            // The piece closing the block is part of it: not forwarded.
-            self.in_think = false;
-        } else if !self.in_think && self.out.push(piece.to_string()) == Flow::Stop {
+        // Reasoning blocks (`<think>`, Gemma's `<|channel>`) are suppressed,
+        // markers split across pieces included; stops see the raw text.
+        let visible = self.filter.push(piece);
+        if !visible.is_empty() && self.out.push(visible) == Flow::Stop {
             return Flow::Stop;
         }
 
@@ -530,8 +535,14 @@ impl Sink for StreamSink {
     }
 
     fn finish(mut self: Box<Self>, result: Result<(), DomainError>) {
-        if let Err(e) = result {
-            self.out.fail(e);
+        match result {
+            Err(e) => self.out.fail(e),
+            Ok(()) => {
+                let tail = self.filter.finish();
+                if !tail.is_empty() {
+                    let _ = self.out.push(tail);
+                }
+            }
         }
     }
 }
@@ -648,6 +659,42 @@ mod tests {
             assert_eq!(sink.on_piece(piece), Flow::Continue);
         }
         assert_eq!(drain(&mut rx), ["Hola", " mundo"]);
+    }
+
+    #[test]
+    fn stream_sink_suppresses_a_gemma_thought_channel_split_across_pieces() {
+        let (mut sink, mut rx) = stream_sink(&[], 16, Duration::from_secs(1));
+        let pieces = [
+            "<|chan",
+            "nel>",
+            "thought\nplan",
+            "<chan",
+            "nel|>",
+            "Hola",
+            " mundo",
+        ];
+        for piece in pieces {
+            assert_eq!(sink.on_piece(piece), Flow::Continue);
+        }
+        Box::new(sink).finish(Ok(()));
+        assert_eq!(drain(&mut rx).concat(), "Hola mundo");
+    }
+
+    #[test]
+    fn stream_sink_forwards_text_held_back_as_a_possible_marker_on_finish() {
+        let (mut sink, mut rx) = stream_sink(&[], 16, Duration::from_secs(1));
+        sink.on_piece("a <");
+        Box::new(sink).finish(Ok(()));
+        assert_eq!(drain(&mut rx).concat(), "a <");
+    }
+
+    #[test]
+    fn collect_sink_strips_a_gemma_thought_channel_on_finish() {
+        let (mut sink, mut rx) = collect_sink(&[]);
+        sink.on_piece("<|channel>thought\nplan<channel|>");
+        sink.on_piece("answer");
+        Box::new(sink).finish(Ok(()));
+        assert_eq!(rx.try_recv().unwrap().unwrap(), "answer");
     }
 
     #[test]

@@ -124,6 +124,27 @@ async fn run_summary(utterances: &[String]) -> (String, usize, Vec<String>) {
     let json = serde_json::to_string_pretty(&summary.content).unwrap();
     eprintln!("elapsed: {elapsed:.1}s, LLM calls: {calls}\n{json}");
 
+    // Evidence first: where the planted fact ended up, even when the final
+    // output then fails the structure check below.
+    {
+        let notes = llm.map_notes.lock().unwrap();
+        let holders: Vec<usize> = notes
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| n.contains(PLANTED_NUMBER))
+            .map(|(i, _)| i + 1)
+            .collect();
+        eprintln!(
+            "map notes: {}; planted fact in map note(s) {holders:?}; in final output: {}",
+            notes.len(),
+            json.contains(PLANTED_NUMBER)
+        );
+        for (i, note) in notes.iter().enumerate() {
+            let head: String = note.chars().take(500).collect();
+            eprintln!("map note {} ({} chars): {head:?}", i + 1, note.len());
+        }
+    }
+
     match &summary.content {
         SummaryContent::FreeText { text } => {
             panic!("expected structured General summary, got free text:\n{text}")
