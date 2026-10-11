@@ -71,6 +71,12 @@ async fn long_meeting_chat_answers_from_a_fact_in_the_middle_with_a_valid_citati
     };
     eprintln!("answer: {text}\ncitations: {citations:?}");
     assert!(text.contains(PLANTED_NUMBER), "fact missing from: {text}");
+    // The fixture meeting has no language tag: the answer must follow the
+    // Spanish question instead of defaulting to English.
+    assert!(
+        text.to_lowercase().contains("presupuesto"),
+        "answer is not in the question's language: {text}"
+    );
     assert!(*had_citations, "answer carries no valid citation: {text}");
     assert!(
         citations.contains(&planted),

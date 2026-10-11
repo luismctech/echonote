@@ -562,8 +562,10 @@ fn language_instruction(language: Option<&str>) -> String {
     match language.unwrap_or("").to_ascii_lowercase().as_str() {
         // Spanish + Latin-American Spanish variants.
         "es" | "es-mx" | "es-es" | "es-419" => "Responde SIEMPRE en español neutro.".to_string(),
-        // English. Defaulted to when the meeting has no language tag.
-        "" | "en" | "en-us" | "en-gb" => "Always respond in English.".to_string(),
+        // No language tag: the transcript itself is the only signal, so
+        // mirror it rather than forcing English.
+        "" => "Always respond in the same language as the meeting transcript.".to_string(),
+        "en" | "en-us" | "en-gb" => "Always respond in English.".to_string(),
         // Anything else: instruct the model to mirror the source.
         other => format!(
             "Always respond in the same language as the meeting transcript (ISO code: {other})."
@@ -1401,7 +1403,9 @@ mod tests {
         assert!(language_instruction(Some("es")).contains("español"));
         assert!(language_instruction(Some("ES-MX")).contains("español"));
         assert!(language_instruction(Some("en")).contains("English"));
-        assert!(language_instruction(None).contains("English"));
+        // No language tag: mirror the transcript, do not force English.
+        assert!(language_instruction(None).contains("language as the meeting transcript"));
+        assert!(!language_instruction(None).contains("English"));
         let other = language_instruction(Some("fr"));
         assert!(other.contains("fr"), "{other}");
     }

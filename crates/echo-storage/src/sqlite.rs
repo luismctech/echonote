@@ -857,7 +857,6 @@ impl SegmentRetriever for SqliteMeetingStore {
     }
 }
 
-///
 /// Words too common to discriminate between segments. Matching on them
 /// would (with OR semantics) retrieve nearly every segment of the meeting.
 /// Spanish and English, lower-case, both with and without accents.
@@ -873,11 +872,11 @@ const RETRIEVAL_STOPWORDS: &[&str] = &[
     "allí", "aqui", "aquí", "ver", "dijo", "dice", "dicen", "sido", "tiene", "tienen", "tenia",
     "tenía", "puede", "pueden", "sus", "mis", "tus", "nos", "les", "algo", "alguien", "nada",
     "todo", "todos", "toda", "todas", "reunion", "reunión", // English
-    "the", "and", "for", "are", "was", "were", "has", "have", "had", "not", "but", "you", "your",
-    "with", "that", "this", "these", "those", "from", "what", "when", "where", "which", "who",
-    "whom", "whose", "why", "how", "does", "did", "can", "could", "would", "should", "will",
-    "about", "into", "than", "then", "there", "their", "they", "them", "she", "his", "her", "our",
-    "any", "all", "been", "being", "its", "also", "just", "said", "say", "says", "tell", "meeting",
+    "the", "and", "for", "are", "was", "were", "have", "had", "not", "but", "you", "your", "with",
+    "that", "this", "these", "those", "from", "what", "when", "where", "which", "who", "whom",
+    "whose", "why", "how", "does", "did", "can", "could", "would", "should", "will", "about",
+    "into", "than", "then", "there", "their", "they", "them", "she", "his", "her", "our", "any",
+    "all", "been", "being", "its", "also", "just", "said", "say", "says", "tell", "meeting",
 ];
 
 /// Shortest token worth searching for.

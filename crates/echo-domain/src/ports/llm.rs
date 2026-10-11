@@ -222,8 +222,10 @@ mod tests {
             "日本語のテキスト",
             "Reunión de planificación 🚀🚀 ñandú",
         ] {
-            let previous = text.chars().count().div_ceil(3);
-            assert!(estimate_tokens(text) >= previous, "{text:?}");
+            // The estimator used to be chars/3; it must never undercount
+            // relative to that, which is the floor callers were tuned on.
+            let char_floor = text.chars().count().div_ceil(3);
+            assert!(estimate_tokens(text) >= char_floor, "{text:?}");
         }
     }
 

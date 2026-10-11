@@ -70,8 +70,8 @@ use tracing::{debug, instrument, warn};
 use uuid::Uuid;
 
 use echo_domain::{
-    ChatAssistant, ChatMessage, ChatOptions, ChatRequest, ChatRole, DomainError, Meeting,
-    MeetingId, MeetingStore, Note, SegmentId, SegmentRetriever,
+    ChatAssistant, ChatMessage, ChatOptions, ChatRequest, ChatRole, DomainError, MeetingId,
+    MeetingStore, Note, SegmentId, SegmentRetriever,
 };
 
 use crate::sanitize::strip_chat_tokens;
@@ -135,6 +135,13 @@ pub enum AskAboutMeetingError {
     /// the model.
     #[error("question is empty")]
     EmptyQuestion,
+
+    /// The question plus the fixed prompt (role, notes, citation contract)
+    /// leave too little room in the context window for any transcript
+    /// excerpt, even with the conversation history dropped. Failing fast
+    /// beats asking the model with no evidence at all.
+    #[error("the question and notes leave no room in the context window for the transcript")]
+    PromptTooLarge,
 
     /// The chat adapter failed to even start producing tokens (model
     /// not loaded, invariant violation, …). Once the stream has
@@ -285,6 +292,10 @@ impl AskAboutMeeting {
         let count = |text: &str| chat.count_tokens(text);
 
         let mut history = prepare_history(&history);
+        // The fixed prompt is measured with the worst-case `EXCERPTS_NOTICE`
+        // (the longest scope text) so the budget holds whichever branch runs
+        // below; the stored summary is only known there, so it is charged
+        // there, out of this budget.
         let budget = transcript_budget(
             chat.context_window() as usize,
             count(&build_system_prompt(&Grounding {
@@ -306,8 +317,11 @@ impl AskAboutMeeting {
                 ..Selection::default()
             }
         } else {
+            if budget < MIN_TRANSCRIPT_BUDGET_TOKENS {
+                return Err(AskAboutMeetingError::PromptTooLarge);
+            }
             let query = retrieval_query(&history, &question);
-            self.select_excerpts(&meeting, &indexed, &query, budget, &count)
+            self.select_excerpts(meeting_id, &indexed, &query, budget, &count)
                 .await
         };
 
@@ -340,7 +354,7 @@ impl AskAboutMeeting {
     /// whole of it does not fit `budget` tokens. See the module docs.
     async fn select_excerpts(
         &self,
-        meeting: &Meeting,
+        meeting_id: MeetingId,
         indexed: &[(SegmentId, String)],
         query: &str,
         budget: usize,
@@ -351,7 +365,7 @@ impl AskAboutMeeting {
 
         let hits = match self
             .retriever
-            .search_segments(meeting.summary.id, query, RETRIEVAL_TOP_K)
+            .search_segments(meeting_id, query, RETRIEVAL_TOP_K)
             .await
         {
             Ok(hits) => hits,
@@ -380,10 +394,8 @@ impl AskAboutMeeting {
         }
 
         debug!("no retrieval hits; using the stored summary and sampled segments");
-        let summary = self
-            .stored_summary_block(meeting.summary.id, budget, count)
-            .await;
-        let remaining = budget.saturating_sub(count(&summary));
+        let summary = self.stored_summary_block(meeting_id, budget, count).await;
+        let remaining = budget.saturating_sub(count(&summary_section(&summary)));
         let picked = pick_evenly(&costs, gap_cost, remaining);
         Selection {
             transcript: join_runs(indexed, &picked),
@@ -393,7 +405,8 @@ impl AskAboutMeeting {
     }
 
     /// The persisted summary of the meeting as JSON, or an empty string
-    /// when there is none, it cannot be read, or it would take more than a
+    /// when there is none, it cannot be read, or its rendered
+    /// [`summary_section`] (wrapper text included) would take more than a
     /// third of `budget` (a summary is context, not the evidence).
     async fn stored_summary_block(
         &self,
@@ -410,7 +423,7 @@ impl AskAboutMeeting {
             }
         };
         match serde_json::to_string(&summary.content) {
-            Ok(json) if count(&json) <= budget / 3 => json,
+            Ok(json) if count(&summary_section(&json)) <= budget / 3 => json,
             _ => String::new(),
         }
     }
@@ -429,7 +442,9 @@ struct Selection {
 
 /// Tokens left for the transcript, after the reply, the safety margin,
 /// the fixed prompt, the question and the history. While that is below
-/// [`MIN_TRANSCRIPT_BUDGET_TOKENS`] the oldest history turns are dropped.
+/// [`MIN_TRANSCRIPT_BUDGET_TOKENS`] the oldest history turns are dropped,
+/// a whole user+assistant pair at a time, so what is kept never starts
+/// with an assistant reply.
 fn transcript_budget(
     window: usize,
     fixed_prompt_tokens: usize,
@@ -439,10 +454,10 @@ fn transcript_budget(
 ) -> usize {
     let reserved =
         CHAT_MAX_TOKENS as usize + safety_margin(window) + fixed_prompt_tokens + question_tokens;
-    let mut turn_tokens: Vec<usize> = history.iter().map(|m| count(&m.content)).collect();
     let mut dropped = 0;
     loop {
-        let budget = window.saturating_sub(reserved + turn_tokens.iter().sum::<usize>());
+        let history_tokens: usize = history.iter().map(|m| count(&m.content)).sum();
+        let budget = window.saturating_sub(reserved + history_tokens);
         if budget >= MIN_TRANSCRIPT_BUDGET_TOKENS || history.is_empty() {
             if dropped > 0 {
                 warn!(
@@ -453,8 +468,11 @@ fn transcript_budget(
             return budget;
         }
         history.remove(0);
-        turn_tokens.remove(0);
         dropped += 1;
+        while history.first().is_some_and(|m| m.role != ChatRole::User) {
+            history.remove(0);
+            dropped += 1;
+        }
     }
 }
 
@@ -475,8 +493,12 @@ fn retrieval_query(history: &[ChatMessage], question: &str) -> String {
 /// Greedily choose line indices for `ranked` hits (best first) plus their
 /// two neighbours, while the cost stays within `budget`. Every group is
 /// charged one `gap_cost`, which over-counts runs that end up merged.
-/// Returns the chosen indices in transcript order.
+/// Returns the chosen indices in transcript order (none when `costs` is
+/// empty).
 fn pick_ranked(ranked: &[usize], costs: &[usize], gap_cost: usize, budget: usize) -> Vec<usize> {
+    if costs.is_empty() {
+        return Vec::new();
+    }
     let mut chosen = vec![false; costs.len()];
     let mut used = 0usize;
     for &hit in ranked {
@@ -501,9 +523,13 @@ fn pick_ranked(ranked: &[usize], costs: &[usize], gap_cost: usize, budget: usize
 }
 
 /// Choose evenly spaced line indices, first and last included, as many as
-/// `budget` affords. Returns them in transcript order.
+/// `budget` affords. Returns them in transcript order (none when `costs`
+/// is empty).
 fn pick_evenly(costs: &[usize], gap_cost: usize, budget: usize) -> Vec<usize> {
     let n = costs.len();
+    if n == 0 {
+        return Vec::new();
+    }
     let average = (costs.iter().sum::<usize>() / n).max(1);
     let wanted = (budget / (average + gap_cost)).clamp(1, n);
     let step_count = wanted.saturating_sub(1).max(1);
@@ -571,6 +597,8 @@ fn prepare_history(history: &[ChatMessage]) -> Vec<ChatMessage> {
     trimmed
         .iter()
         .filter(|m| m.role != ChatRole::System)
+        // Whole turns only: a cut by count must not leave an orphan reply first.
+        .skip_while(|m| m.role == ChatRole::Assistant)
         .map(|m| ChatMessage {
             role: m.role,
             content: strip_chat_tokens(&m.content),
@@ -644,14 +672,7 @@ fn build_system_prompt(grounding: &Grounding<'_>) -> String {
     } else {
         format!("{scope_notice}\n\n")
     };
-    let summary_section = if summary.is_empty() {
-        String::new()
-    } else {
-        format!(
-            "Meeting summary (auto-generated overview of the WHOLE meeting, JSON; it has no \
-             segment markers, so do not cite it):\n---\n{summary}\n---\n\n"
-        )
-    };
+    let summary_section = summary_section(summary);
 
     format!(
         "You are EchoNote's meeting assistant. {language_instruction}\n\
@@ -690,6 +711,17 @@ fn build_system_prompt(grounding: &Grounding<'_>) -> String {
     )
 }
 
+/// Summary section of the system prompt; empty for no summary.
+fn summary_section(summary: &str) -> String {
+    if summary.is_empty() {
+        return String::new();
+    }
+    format!(
+        "Meeting summary (auto-generated overview of the WHOLE meeting, JSON; it has no \
+         segment markers, so do not cite it):\n---\n{summary}\n---\n\n"
+    )
+}
+
 /// Render the user's notes as a block of timestamped lines.
 ///
 /// Format per note:
@@ -722,9 +754,12 @@ fn language_instruction(language: Option<&str>) -> String {
     // reused via a shared helper) so the two use cases can drift
     // independently if Spanish chat ever needs a different phrasing
     // than Spanish summary output.
-    match language.unwrap_or("").to_ascii_lowercase().as_str() {
+    // No detected language: the user's question is the only reliable
+    // signal, so mirror it instead of forcing English on a Spanish speaker.
+    match language.unwrap_or("").trim().to_ascii_lowercase().as_str() {
         "es" | "es-mx" | "es-es" | "es-419" => "Responde SIEMPRE en español neutro.".to_string(),
-        "" | "en" | "en-us" | "en-gb" => "Always respond in English.".to_string(),
+        "" => "Always respond in the language of the user's question.".to_string(),
+        "en" | "en-us" | "en-gb" => "Always respond in English.".to_string(),
         other => format!(
             "Always respond in the same language as the meeting transcript (ISO code: {other})."
         ),
@@ -832,9 +867,9 @@ mod tests {
     use time::OffsetDateTime;
 
     use echo_domain::{
-        estimate_tokens, AudioFormat, ChatToken, CreateMeeting, FinalizeMeeting, MeetingSearchHit,
-        MeetingSummary, Segment, SegmentHit, Speaker, SpeakerId, Summary, SummaryContent,
-        SummaryId, DEFAULT_CONTEXT_WINDOW,
+        estimate_tokens, AudioFormat, ChatToken, CreateMeeting, FinalizeMeeting, Meeting,
+        MeetingSearchHit, MeetingSummary, Segment, SegmentHit, Speaker, SpeakerId, Summary,
+        SummaryContent, SummaryId, DEFAULT_CONTEXT_WINDOW,
     };
 
     /// In-memory store with just enough surface for this use case.
@@ -1767,8 +1802,133 @@ mod tests {
             "oldest kept is a turn"
         );
         assert!(messages[1].content != format!("turno 0: {}", "x".repeat(4_000)));
+        assert_eq!(
+            messages[1].role,
+            ChatRole::User,
+            "history must be trimmed by whole turns: it never starts with an assistant reply"
+        );
         assert!(system_prompt(&chat).contains(MIDDLE_FACT));
         assert!(request_footprint(&chat) <= WINDOW as usize);
+    }
+
+    #[tokio::test]
+    async fn a_question_that_leaves_no_room_for_excerpts_fails_before_the_model_runs() {
+        let store = Arc::new(FakeStore::default());
+        let (id, ids) = seed_long_meeting(&store, 400, None);
+        let retriever = Arc::new(FakeRetriever::returning(vec![ids[10]]));
+        let chat = Arc::new(ScriptedChat::replying(&["ok"]));
+        let uc = AskAboutMeeting::new(chat.clone(), store.clone(), retriever);
+        let question = "palabra ".repeat(20_000);
+
+        let err = expect_err(uc.execute(id, vec![], question).await);
+
+        assert!(
+            matches!(err, AskAboutMeetingError::PromptTooLarge),
+            "{err:?}"
+        );
+        assert!(chat.recorded().is_empty(), "the model must not be called");
+    }
+
+    #[tokio::test]
+    async fn the_summary_section_is_charged_in_full_against_the_budget() {
+        // The summary JSON alone fits its third of the budget, but the
+        // wrapper text around it must be paid for too.
+        let budget = 1_500;
+        let count = |text: &str| estimate_tokens(text);
+        for words in (0..35).map(|i| 20 + i * 2) {
+            let store = Arc::new(FakeStore::default());
+            let (id, _) = seed_long_meeting(&store, 400, None);
+            *store.summary.lock().unwrap() = Some(Summary {
+                id: SummaryId::new(),
+                meeting_id: id,
+                model: "m".into(),
+                language: Some("es".into()),
+                created_at: OffsetDateTime::now_utc(),
+                content: SummaryContent::General {
+                    summary: "resumen ".repeat(words),
+                    key_points: vec![],
+                    decisions: vec![],
+                    action_items: vec![],
+                    open_questions: vec![],
+                },
+            });
+            let meeting = store.get(id).await.unwrap().unwrap();
+            let indexed = transcript::render_indexed_lines(&meeting, Flavour::Chat);
+            let uc = AskAboutMeeting::new(
+                Arc::new(ScriptedChat::replying(&["ok"])),
+                store.clone(),
+                Arc::new(FakeRetriever::default()),
+            );
+
+            let selection = uc.select_excerpts(id, &indexed, "q", budget, &count).await;
+
+            assert!(
+                !selection.summary.is_empty(),
+                "{words} words: summary dropped"
+            );
+            let spent = count(&summary_section(&selection.summary)) + count(&selection.transcript);
+            assert!(spent <= budget, "{words} words: {spent} > {budget}");
+        }
+    }
+
+    #[test]
+    fn trimming_history_drops_whole_turns_never_leaving_an_assistant_first() {
+        let count = |text: &str| text.len();
+        let turn = |i: usize| {
+            let body = "x".repeat(1_000);
+            if i.is_multiple_of(2) {
+                ChatMessage::user(body)
+            } else {
+                ChatMessage::assistant(body)
+            }
+        };
+        let mut history: Vec<ChatMessage> = (0..5).map(turn).collect();
+        // 6800 - 1024 (reply) - 340 (margin) leaves 5436: five 1000-token
+        // messages overshoot the 512-token minimum, four do not.
+        let window = 6_800;
+
+        let budget = transcript_budget(window, 0, &mut history, 0, &count);
+
+        assert!(budget >= MIN_TRANSCRIPT_BUDGET_TOKENS);
+        assert_eq!(history.first().map(|m| m.role), Some(ChatRole::User));
+        assert_eq!(history.len(), 3, "the lone orphan assistant reply goes too");
+    }
+
+    #[test]
+    fn without_a_meeting_language_the_answer_follows_the_questions_language() {
+        for language in [None, Some(""), Some("  ")] {
+            let instruction = language_instruction(language);
+            assert!(
+                instruction.contains("language of the user's question"),
+                "{instruction}"
+            );
+            assert!(!instruction.contains("English"), "{instruction}");
+        }
+        assert!(language_instruction(Some("es-MX")).contains("español"));
+        assert!(language_instruction(Some("en")).contains("English"));
+        assert!(language_instruction(Some("fr")).contains("fr"));
+    }
+
+    #[tokio::test]
+    async fn a_meeting_without_language_does_not_force_english_in_the_prompt() {
+        let store = Arc::new(FakeStore::default());
+        let (id, _) = seed_meeting(&store, vec!["Hola"]);
+        store.meetings.lock().unwrap()[0].summary.language = None;
+        let (chat, _) = ask_long(
+            &store,
+            Arc::new(FakeRetriever::default()),
+            id,
+            vec![],
+            "¿Qué se dijo?",
+        )
+        .await;
+
+        let system = system_prompt(&chat);
+        assert!(!system.contains("Always respond in English"), "{system}");
+        assert!(
+            system.contains("language of the user's question"),
+            "{system}"
+        );
     }
 
     #[tokio::test]
