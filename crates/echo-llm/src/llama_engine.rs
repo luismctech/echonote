@@ -11,8 +11,12 @@
 //! remaining prompt tokens, so a follow-up chat turn does not re-evaluate
 //! the system prompt and transcript again (see [`crate::prefix`] for the
 //! policy). At least the last prompt token is always decoded so logits
-//! exist for the first sample. Greedy output is identical with and without
-//! reuse. Any decode error clears the cache and the record, so a later
+//! exist for the first sample. Reuse leaves the model's input unchanged, so
+//! greedy output is expected to match a cold run; it is not guaranteed to
+//! be bitwise identical, because a backend may compute a position with
+//! different kernels depending on the batch it was decoded in (a reused
+//! prefix was evaluated under another batch shape than a cold run would
+//! use), which can flip a near-tie token. Any decode error clears the cache and the record, so a later
 //! request never trusts a half-written state; dropping the engine (idle
 //! release, rebuild after a panic) discards both.
 
@@ -40,11 +44,16 @@ const DEFAULT_SEED: u32 = 1234;
 /// [`EngineSource`] over a loaded model; builds the persistent context.
 pub(crate) struct LlamaSource {
     loaded: Arc<LoadedModel>,
+    /// Where each engine this source builds reports its reuse.
+    reused: Arc<AtomicUsize>,
 }
 
 impl LlamaSource {
-    pub(crate) fn new(loaded: Arc<LoadedModel>) -> Self {
-        Self { loaded }
+    /// `reused` receives, per request, how many prompt tokens were found
+    /// already evaluated in the KV cache. It belongs to one model, so
+    /// engines of other models cannot race it.
+    pub(crate) fn new(loaded: Arc<LoadedModel>, reused: Arc<AtomicUsize>) -> Self {
+        Self { loaded, reused }
     }
 }
 
@@ -71,6 +80,7 @@ impl EngineSource for LlamaSource {
             loaded,
             ctx,
             resident: Vec::new(),
+            reused: Arc::clone(&self.reused),
         }))
     }
 }
@@ -81,19 +91,8 @@ struct LlamaEngine<'a> {
     ctx: LlamaContext<'a>,
     /// Tokens currently in the KV cache, by position (sequence 0).
     resident: Vec<LlamaToken>,
-}
-
-/// Number of prompt tokens the most recent request found already
-/// evaluated in the KV cache. Process-wide; read by the gated tests.
-static LAST_REUSED_TOKENS: AtomicUsize = AtomicUsize::new(0);
-
-/// How many prompt tokens the latest request reused from the KV cache.
-///
-/// Test support for the gated real-model suites; not part of the stable
-/// API.
-#[doc(hidden)]
-pub fn last_reused_tokens() -> usize {
-    LAST_REUSED_TOKENS.load(Ordering::Relaxed)
+    /// Reuse of the latest request, shared with the owning model.
+    reused: Arc<AtomicUsize>,
 }
 
 /// [`KvCache`] over the context's sequence 0.
@@ -193,7 +192,7 @@ impl LlamaEngine<'_> {
         // Keep what the cache already holds of this prompt; the rest of the
         // previous request's tokens must not leak into this one.
         let reused = prepare_cache(&mut self.ctx, &mut self.resident, &prompt_tokens);
-        LAST_REUSED_TOKENS.store(reused, Ordering::Relaxed);
+        self.reused.store(reused, Ordering::Relaxed);
         debug!(
             reused,
             decoded = prompt_tokens.len() - reused,

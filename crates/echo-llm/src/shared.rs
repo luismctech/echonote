@@ -42,6 +42,7 @@
 
 use std::ops::Deref;
 use std::path::PathBuf;
+use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -142,17 +143,31 @@ impl LoadedModel {
 pub(crate) struct SharedModel {
     loaded: Arc<LoadedModel>,
     worker: Worker,
+    /// Prompt tokens the latest request reused from the KV cache; written
+    /// by this model's engine only. Read through
+    /// [`Self::last_reused_tokens`] (tests and the `test-hooks` feature).
+    #[cfg_attr(not(any(test, feature = "test-hooks")), allow(dead_code))]
+    reused: Arc<AtomicUsize>,
 }
 
 impl SharedModel {
     /// Wrap `loaded`; the worker thread starts on the first request.
     pub(crate) fn new(loaded: LoadedModel) -> Self {
         let loaded = Arc::new(loaded);
-        let source = Arc::new(LlamaSource::new(Arc::clone(&loaded)));
+        let reused = Arc::new(AtomicUsize::new(0));
+        let source = Arc::new(LlamaSource::new(Arc::clone(&loaded), Arc::clone(&reused)));
         Self {
             loaded,
             worker: Worker::new(source, CONTEXT_IDLE_TIMEOUT),
+            reused,
         }
+    }
+
+    /// Prompt tokens the latest request on this model reused from the KV
+    /// cache.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub(crate) fn last_reused_tokens(&self) -> usize {
+        self.reused.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Queue a request on the worker thread.

@@ -33,5 +33,3 @@ mod worker;
 
 pub use llama_cpp::{LlamaCppLlm, LoadOptions};
 pub use llama_cpp_chat::LlamaCppChat;
-#[doc(hidden)]
-pub use llama_engine::last_reused_tokens;

@@ -1486,6 +1486,7 @@ version = "0.6.0"
 dependencies = [
  "async-trait",
  "echo-domain",
+ "echo-llm",
  "encoding_rs",
  "futures",
  "llama-cpp-2",

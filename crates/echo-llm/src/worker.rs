@@ -407,15 +407,25 @@ impl Queue {
         self.pending.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    fn push(&self, job: Job) {
+    /// Queue `job` in its priority class. A dead queue (its thread died
+    /// and drained it) refuses the job and hands it back, so the caller can
+    /// start a new thread instead of stranding it. Checking and pushing
+    /// under one lock is what closes the window in which the thread's
+    /// [`DeathGuard`] could drain the queue between a liveness check and
+    /// the push.
+    fn push(&self, job: Job) -> Result<(), Job> {
         {
             let mut pending = self.lock();
+            if pending.dead {
+                return Err(job);
+            }
             match job.priority {
                 Priority::Interactive => pending.interactive.push_back(job),
                 Priority::Background => pending.background.push_back(job),
             }
         }
         self.ready.notify_one();
+        Ok(())
     }
 
     /// Block until a job is available (interactive first), `idle` passes
@@ -465,21 +475,9 @@ impl Queue {
     /// The worker thread is unwinding: mark the queue dead and fail every
     /// queued job, so no caller waits for a thread that is gone.
     fn fail_dead(&self) {
-        let jobs: Vec<Job> = {
-            let mut pending = self.lock();
-            pending.dead = true;
-            let interactive = std::mem::take(&mut pending.interactive);
-            let background = std::mem::take(&mut pending.background);
-            interactive.into_iter().chain(background).collect()
-        };
-        for mut job in jobs {
-            shielded("bind_cancel", || job.sink.bind_cancel(self.cancel.clone()));
-            shielded("finish", move || {
-                job.sink.finish(Err(DomainError::LlmFailed(
-                    "llm worker stopped unexpectedly".into(),
-                )));
-            });
-        }
+        self.drain(true, || {
+            DomainError::LlmFailed("llm worker stopped unexpectedly".into())
+        });
     }
 
     /// Raise the shutdown flag and wake the worker. The flag is set before
@@ -492,15 +490,25 @@ impl Queue {
 
     /// Fail every still-queued job with the shutdown error.
     fn fail_pending(&self) {
+        self.drain(false, shutdown_error);
+    }
+
+    /// Remove every queued job (interactive first), optionally marking the
+    /// queue dead in the same critical section, and finish each with the
+    /// error `error` builds. The sinks run outside the lock.
+    fn drain(&self, mark_dead: bool, error: fn() -> DomainError) {
         let jobs: Vec<Job> = {
             let mut pending = self.lock();
+            if mark_dead {
+                pending.dead = true;
+            }
             let interactive = std::mem::take(&mut pending.interactive);
             let background = std::mem::take(&mut pending.background);
             interactive.into_iter().chain(background).collect()
         };
         for mut job in jobs {
             shielded("bind_cancel", || job.sink.bind_cancel(self.cancel.clone()));
-            shielded("finish", move || job.sink.finish(Err(shutdown_error())));
+            shielded("finish", move || job.sink.finish(Err(error())));
         }
     }
 }
@@ -535,12 +543,20 @@ impl Drop for DeathGuard<'_> {
     }
 }
 
+/// See [`Worker::before_push`].
+#[cfg(test)]
+type BeforePush = Box<dyn FnOnce(&Queue) + Send>;
+
 /// Handle to the worker thread. Dropping it shuts the thread down.
 pub(crate) struct Worker {
     source: Arc<dyn EngineSource>,
     idle: Duration,
     queue: Arc<Queue>,
     thread: Mutex<Option<thread::JoinHandle<()>>>,
+    /// Test seam: runs once between the liveness check and the push, to
+    /// force the interleaving where the thread dies in that window.
+    #[cfg(test)]
+    before_push: Mutex<Option<BeforePush>>,
 }
 
 impl Worker {
@@ -552,6 +568,8 @@ impl Worker {
             idle,
             queue: Arc::new(Queue::new()),
             thread: Mutex::new(None),
+            #[cfg(test)]
+            before_push: Mutex::new(None),
         }
     }
 
@@ -560,26 +578,46 @@ impl Worker {
     ///
     /// The thread only exits on shutdown, so a finished handle (or a queue
     /// its [`DeathGuard`] marked dead) means it died unexpectedly; it is
-    /// replaced once, and a spawn failure is reported instead of retried.
+    /// replaced, and a spawn failure is reported instead of retried. If it
+    /// dies after that check, [`Queue::push`] refuses the job and the
+    /// replacement is attempted once more.
     pub(crate) fn submit(&self, job: Job) -> Result<(), DomainError> {
         let mut thread = self.thread.lock().unwrap_or_else(PoisonError::into_inner);
         if thread.as_ref().is_none_or(thread::JoinHandle::is_finished) || self.queue.is_dead() {
-            // A thread that died is at most a few instructions from done
-            // (its guard has already run), so joining it is brief.
-            if let Some(dead) = thread.take() {
-                let _ = dead.join();
-            }
-            self.queue.revive();
-            let source = Arc::clone(&self.source);
-            let queue = Arc::clone(&self.queue);
-            let idle = self.idle;
-            let handle = thread::Builder::new()
-                .name("echo-llm-worker".into())
-                .spawn(move || run(&*source, &queue, idle))
-                .map_err(|e| DomainError::LlmFailed(format!("spawn llm worker: {e}")))?;
-            *thread = Some(handle);
+            self.respawn(&mut thread)?;
         }
-        self.queue.push(job);
+        #[cfg(test)]
+        if let Some(hook) = self.before_push.lock().unwrap().take() {
+            hook(&self.queue);
+        }
+        // The thread can still die between the check above and this push;
+        // the queue then refuses the job and one more thread is started.
+        if let Err(job) = self.queue.push(job) {
+            self.respawn(&mut thread)?;
+            self.queue
+                .push(job)
+                .map_err(|_| DomainError::LlmFailed("llm worker stopped unexpectedly".into()))?;
+        }
+        Ok(())
+    }
+
+    /// Replace the (dead or missing) worker thread. Called with the thread
+    /// lock held.
+    fn respawn(&self, thread: &mut Option<thread::JoinHandle<()>>) -> Result<(), DomainError> {
+        // A thread that died is at most a few instructions from done (its
+        // guard has already run), so joining it is brief.
+        if let Some(dead) = thread.take() {
+            let _ = dead.join();
+        }
+        self.queue.revive();
+        let source = Arc::clone(&self.source);
+        let queue = Arc::clone(&self.queue);
+        let idle = self.idle;
+        let handle = thread::Builder::new()
+            .name("echo-llm-worker".into())
+            .spawn(move || run(&*source, &queue, idle))
+            .map_err(|e| DomainError::LlmFailed(format!("spawn llm worker: {e}")))?;
+        *thread = Some(handle);
         Ok(())
     }
 }
@@ -1239,19 +1277,22 @@ mod tests {
     }
 
     #[test]
-    fn a_thread_that_dies_fails_its_queued_jobs_and_the_next_submit_respawns() {
+    fn a_thread_that_dies_fails_its_queued_jobs() {
         let queue = Arc::new(Queue::new());
         let (done_tx, done) = channel();
-        queue.push(Job {
-            priority: Priority::Background,
-            prompt: "stranded".into(),
-            params: SamplingParams::from_generate(&GenerateOptions::default()),
-            sink: Box::new(TestSink {
-                pieces: Arc::new(Mutex::new(String::new())),
-                closed: Arc::new(AtomicBool::new(false)),
-                done: done_tx,
-            }),
-        });
+        queue
+            .push(Job {
+                priority: Priority::Background,
+                prompt: "stranded".into(),
+                params: SamplingParams::from_generate(&GenerateOptions::default()),
+                sink: Box::new(TestSink {
+                    pieces: Arc::new(Mutex::new(String::new())),
+                    closed: Arc::new(AtomicBool::new(false)),
+                    done: done_tx,
+                }),
+            })
+            .map_err(|_| "queue refused the job")
+            .unwrap();
 
         let q = Arc::clone(&queue);
         let dying = thread::spawn(move || {
@@ -1319,6 +1360,32 @@ mod tests {
         assert!(eventually(|| w.queue.is_dead()));
 
         assert_eq!(submit(&w, "two").wait(), Ok(()));
+        assert_eq!(probe.created.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn a_job_submitted_while_the_thread_dies_is_still_served() {
+        let probe = Arc::new(Probe::default());
+        let source = Arc::new(BombSource {
+            armed: AtomicBool::new(true),
+            probe: Arc::clone(&probe),
+        });
+        // Long enough that the second `submit` passes its liveness check
+        // long before the idle release kills the thread.
+        let w = Worker::new(
+            Arc::clone(&source) as Arc<dyn EngineSource>,
+            Duration::from_millis(300),
+        );
+        assert_eq!(submit(&w, "one").wait(), Ok(()));
+        // Between the check and the push, wait for the thread to die: the
+        // push then lands in a queue nobody will ever drain.
+        *w.before_push.lock().unwrap() = Some(Box::new(|queue| {
+            assert!(eventually(|| queue.is_dead()));
+        }));
+
+        let raced = submit(&w, "raced");
+
+        assert_eq!(raced.wait(), Ok(()));
         assert_eq!(probe.created.load(Ordering::SeqCst), 2);
     }
 }

@@ -234,6 +234,19 @@ impl LlamaCppLlm {
     pub fn chat_handle(&self) -> LlamaCppChat {
         LlamaCppChat::from_loaded(Arc::clone(&self.inner))
     }
+
+    /// Prompt tokens the latest request on this model reused from the KV
+    /// cache (`0` on a cold cache).
+    ///
+    /// Scoped to this model, so other models or tests cannot disturb it.
+    /// Test support for the gated real-model suites, behind the
+    /// `test-hooks` feature; not part of the stable API.
+    #[cfg(any(test, feature = "test-hooks"))]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn last_reused_tokens(&self) -> usize {
+        self.inner.last_reused_tokens()
+    }
 }
 
 #[async_trait]

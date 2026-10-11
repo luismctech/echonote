@@ -33,6 +33,9 @@ llama-cpp-2 = { workspace = true }
 encoding_rs = { workspace = true }
 
 [dev-dependencies]
+# Self-reference: turns on `test-hooks` for this crate's integration tests
+# (the gated real-model suites) without making it a default feature.
+echo-llm = { path = ".", features = ["test-hooks"] }
 pretty_assertions.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 
@@ -42,3 +45,6 @@ default = []
 # Usage: cargo build -p echo-llm --features cuda
 cuda   = ["llama-cpp-2/cuda"]
 vulkan = ["llama-cpp-2/vulkan"]
+# Exposes `last_reused_tokens()` on the adapters for the gated real-model
+# tests. Not part of the stable API; never enabled by default.
+test-hooks = []

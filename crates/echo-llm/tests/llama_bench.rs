@@ -198,7 +198,7 @@ async fn llama_latency_and_memory_baseline() {
             "[bench] chat {label}: first token {} ms, total {} ms, reused {} tokens, {} chars: {:?}",
             first.map_or(0, |d| d.as_millis()),
             total.as_millis(),
-            echo_llm::last_reused_tokens(),
+            chat.last_reused_tokens(),
             answer.len(),
             answer.chars().take(80).collect::<String>()
         );
