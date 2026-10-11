@@ -732,3 +732,43 @@ async fn gemma4_renders_with_its_own_template_and_exactly_one_bos() {
         "{out:?}"
     );
 }
+
+/// Prompt tokenization adds exactly the BOS the vocabulary wants and never an
+/// EOS, whatever the GGUF's `add_eos_token` says (Qwen: no BOS; Gemma: one BOS).
+#[test]
+#[ignore = "requires ECHO_LLM_MODEL to point at a .gguf file"]
+fn prompt_tokens_carry_the_vocabulary_bos_and_never_an_eos() {
+    let Some(llm) = load_small() else {
+        eprintln!("skipping: ECHO_LLM_MODEL not set");
+        return;
+    };
+    let (bos, eos) = llm.bos_eos_ids();
+    let (add_bos, llama_adds_eos) = llm.bos_policy();
+    eprintln!(
+        "[bos] family {} bos={bos} eos={eos} add_bos={add_bos} llama.cpp add_special would append EOS: {llama_adds_eos}",
+        llm.prompt_format_name()
+    );
+    for text in ["Hola mundo", "<bos>Hola mundo", "Hola <|im_end|>"] {
+        let ids = llm.prompt_token_ids(text);
+        eprintln!("[bos] {text:?} -> {ids:?}");
+        assert!(!ids.is_empty());
+        let boses = ids.iter().filter(|&&i| i == bos).count();
+        // `<bos>` is a control token only where the vocabulary wants a BOS
+        // (Qwen has no such token: the text is plain).
+        let explicit = usize::from(add_bos && text.starts_with("<bos>"));
+        // The automatic BOS is added once and merges with an explicit one.
+        assert_eq!(boses, usize::from(add_bos).max(explicit), "{ids:?}");
+        assert_eq!(ids[0] == bos, add_bos || explicit == 1, "{ids:?}");
+        if !text.contains("<|im_end|>") {
+            assert_ne!(*ids.last().unwrap(), eos, "EOS appended: {ids:?}");
+        }
+    }
+    assert!(llm.prompt_token_ids("").is_empty());
+    // Qwen: no BOS wanted, so the count is the bare tokenization.
+    if llm.prompt_format_name() == "Qwen" {
+        assert!(!add_bos);
+    }
+    if llm.prompt_format_name() == "Gemma4" {
+        assert!(add_bos);
+    }
+}

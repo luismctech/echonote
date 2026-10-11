@@ -49,9 +49,10 @@
 //! piece at the stop position before sending and then end the stream.
 //! The two layers together cover the cases (a) model behaving
 //! correctly (EOG fires), (b) model emitting the marker as text
-//! (post-hoc trim catches it), with the residual edge case of a stop
-//! sequence split across pieces documented in
-//! [`StreamState::push_piece`].
+//! (post-hoc trim catches it). A stop split across pieces is caught too:
+//! [`StreamState`] holds back a visible tail that could still become a stop.
+//! The same state drives every sink of the crate, so `generate`,
+//! `generate_stream` and the chat stream agree on what is visible.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -64,7 +65,7 @@ use tracing::{debug, info, instrument};
 use echo_domain::{ChatAssistant, ChatMessage, ChatRequest, ChatToken, DomainError};
 
 use crate::llama_cpp::{LlamaCppLlm, LoadOptions};
-use crate::shared::{ReasoningFilter, SharedModel};
+use crate::shared::{SharedModel, StreamState};
 use crate::template::merge_stops;
 use crate::worker::{
     drain_stream, Cancel, Flow, Job, Outlet, PieceSink, Priority, SamplingParams, Sink,
@@ -203,10 +204,7 @@ impl ChatAssistant for LlamaCppChat {
             priority: Priority::Interactive,
             prompt,
             params: SamplingParams::from_chat(&request.options),
-            sink: Box::new(ChatSink {
-                state: StreamState::new(stops),
-                out,
-            }),
+            sink: Box::new(ChatSink::new(stops, out)),
         })?;
         Ok(stream)
     }
@@ -215,9 +213,18 @@ impl ChatAssistant for LlamaCppChat {
 /// [`Sink`] behind [`LlamaCppChat::ask`]: runs each piece through
 /// [`StreamState`] (think-block suppression, stop sequences) and ships the
 /// resulting delta to the stream consumer.
-struct ChatSink {
+pub(crate) struct ChatSink {
     state: StreamState,
     out: Outlet<ChatToken>,
+}
+
+impl ChatSink {
+    pub(crate) fn new(stops: Vec<String>, out: Outlet<ChatToken>) -> Self {
+        Self {
+            state: StreamState::new(stops),
+            out,
+        }
+    }
 }
 
 impl PieceSink for ChatSink {
@@ -249,105 +256,12 @@ impl Sink for ChatSink {
         // error is the stream's final item.
         match result {
             Err(e) => self.out.fail(e),
-            Ok(()) => {
-                let tail = self.state.finish().delta;
-                if !tail.is_empty() {
-                    let _ = self.out.push(ChatToken::new(tail));
+            Ok(()) => match self.state.finish() {
+                Ok(tail) if !tail.delta.is_empty() => {
+                    let _ = self.out.push(ChatToken::new(tail.delta));
                 }
-            }
-        }
-    }
-}
-
-/// Tracks the running reply text so we can apply the user-supplied
-/// stop sequences without losing previously-emitted bytes.
-///
-/// Each piece first goes through a [`ReasoningFilter`] (Qwen's
-/// `<think>…</think>`, Gemma's `<|channel>…<channel|>`), so reasoning is
-/// never forwarded and never matches a stop. The visible text is appended
-/// to `total` and searched for any stop sequence. The result,
-/// [`PieceOutcome`], tells the caller what part of the visible text (if
-/// any) is safe to forward and whether the stream should terminate. Call
-/// [`Self::finish`] at the end of the reply to release text the filter was
-/// holding back as a possible marker.
-///
-/// ### Edge case
-///
-/// A stop sequence split exactly across two decoder pieces (e.g. the
-/// model emits `<|` then `im_end|>` as separate tokens) will leak the
-/// first half because we already shipped that piece. Handling this
-/// correctly requires a hold-back buffer of `max_stop_len - 1` bytes;
-/// we judged the extra latency not worth it for the MVP because (a)
-/// the template terminators (`<|im_end|>`, `<turn|>`) are single special
-/// EOG tokens, caught earlier by
-/// [`llama_cpp_2::model::LlamaModel::is_eog_token`], and (b) the
-/// only stop strings we ship are template terminators that the model
-/// never emits as plain text in practice. Documented here so the next
-/// reader doesn't have to rediscover the trade-off.
-struct StreamState {
-    /// Visible (reasoning-free) text so far.
-    total: String,
-    stops: Vec<String>,
-    filter: ReasoningFilter,
-}
-
-struct PieceOutcome {
-    /// Part of the visible text that should be forwarded. Empty when the
-    /// piece is reasoning, held back, or entirely (the tail of) a stop
-    /// sequence.
-    delta: String,
-    /// `true` once a stop sequence matched. The decoder loop should
-    /// exit immediately after emitting the (possibly empty) delta.
-    stop_hit: bool,
-}
-
-impl StreamState {
-    fn new(stops: Vec<String>) -> Self {
-        Self {
-            total: String::new(),
-            stops: stops.into_iter().filter(|s| !s.is_empty()).collect(),
-            filter: ReasoningFilter::new(),
-        }
-    }
-
-    fn push_piece(&mut self, piece: &str) -> PieceOutcome {
-        let visible = self.filter.push(piece);
-        self.apply_stops(&visible)
-    }
-
-    /// End of the reply: text held back as a possible marker that never
-    /// became one.
-    fn finish(&mut self) -> PieceOutcome {
-        let rest = self.filter.finish();
-        self.apply_stops(&rest)
-    }
-
-    fn apply_stops(&mut self, visible: &str) -> PieceOutcome {
-        let prev_len = self.total.len();
-        self.total.push_str(visible);
-
-        // Find the *earliest* stop sequence position in `total`. If
-        // multiple stops match we want the one that appears first so
-        // we don't accidentally emit content beyond it.
-        let mut earliest_cut: Option<usize> = None;
-        for stop in &self.stops {
-            if let Some(idx) = self.total.find(stop.as_str()) {
-                earliest_cut = Some(earliest_cut.map_or(idx, |prev| prev.min(idx)));
-            }
-        }
-
-        match earliest_cut {
-            None => PieceOutcome {
-                delta: visible.to_string(),
-                stop_hit: false,
-            },
-            Some(cut) => PieceOutcome {
-                delta: self
-                    .total
-                    .get(prev_len..cut)
-                    .unwrap_or_default()
-                    .to_string(),
-                stop_hit: true,
+                Ok(_) => {}
+                Err(e) => self.out.fail(e),
             },
         }
     }
@@ -400,6 +314,28 @@ mod tests {
         let outcome = s.push_piece("foo<|im_end|>bar<|eot_id|>baz");
         assert!(outcome.stop_hit);
         assert_eq!(outcome.delta, "foo");
+    }
+
+    #[test]
+    fn stream_state_holds_back_a_stop_split_across_pieces() {
+        let mut s = StreamState::new(vec!["<|im_end|>".into()]);
+        let o1 = s.push_piece("answer<|");
+        assert_eq!(o1.delta, "answer");
+        assert!(!o1.stop_hit);
+        // The first half never reached the consumer.
+        let o2 = s.push_piece("im_end|>junk");
+        assert!(o2.stop_hit);
+        assert_eq!(o2.delta, "");
+        assert_eq!(s.into_text(), "answer");
+    }
+
+    #[test]
+    fn stream_state_releases_a_held_back_stop_prefix_that_was_text() {
+        let mut s = StreamState::new(vec!["<|im_end|>".into()]);
+        assert_eq!(s.push_piece("a <|").delta, "a ");
+        assert_eq!(s.push_piece("x").delta, "<|x");
+        assert_eq!(s.push_piece("b <").delta, "b ");
+        assert_eq!(s.finish().unwrap().delta, "<");
     }
 
     #[test]
@@ -464,7 +400,7 @@ mod tests {
             assert!(!o.stop_hit);
             shown.push_str(&o.delta);
         }
-        shown.push_str(&s.finish().delta);
+        shown.push_str(&s.finish().unwrap().delta);
         assert_eq!(shown, "Hola mundo");
     }
 
@@ -480,7 +416,7 @@ mod tests {
     fn stream_state_releases_a_held_back_marker_prefix_on_finish() {
         let mut s = StreamState::new(vec![]);
         assert_eq!(s.push_piece("a <").delta, "a ");
-        assert_eq!(s.finish().delta, "<");
+        assert_eq!(s.finish().unwrap().delta, "<");
     }
 
     #[test]
@@ -526,10 +462,10 @@ mod tests {
         stall: Duration,
     ) -> (ChatSink, mpsc::Receiver<Result<ChatToken, DomainError>>) {
         let (tx, rx) = mpsc::channel(capacity);
-        let sink = ChatSink {
-            state: StreamState::new(stops.iter().map(|s| (*s).to_string()).collect()),
-            out: Outlet::new(tx).with_stall(stall),
-        };
+        let sink = ChatSink::new(
+            stops.iter().map(|s| (*s).to_string()).collect(),
+            Outlet::new(tx).with_stall(stall),
+        );
         (sink, rx)
     }
 

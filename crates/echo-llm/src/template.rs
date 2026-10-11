@@ -258,6 +258,20 @@ pub(crate) fn is_template_marker(text: &str, is_control: bool) -> bool {
 /// O(|specials| x |text|) with a reallocation per hit. The loop only
 /// re-runs when a pass removed something, so clean content is scanned once.
 pub(crate) fn strip_special(text: &str, specials: &[String]) -> String {
+    strip_special_counting(text, specials, &mut Work::default())
+}
+
+/// Work done by [`strip_special_counting`]: the deterministic cost measure
+/// the scalability test asserts on (wall-clock time is machine-dependent).
+#[derive(Debug, Default, Clone, Copy)]
+struct Work {
+    /// Full passes over the text.
+    passes: usize,
+    /// `starts_with` comparisons against a candidate special.
+    comparisons: usize,
+}
+
+fn strip_special_counting(text: &str, specials: &[String], work: &mut Work) -> String {
     let mut by_first: Vec<Vec<&str>> = vec![Vec::new(); 256];
     for special in specials.iter().filter(|s| !s.is_empty()) {
         by_first[usize::from(special.as_bytes()[0])].push(special.as_str());
@@ -271,7 +285,8 @@ pub(crate) fn strip_special(text: &str, specials: &[String]) -> String {
 
     let mut current = text.to_string();
     loop {
-        let (next, changed) = strip_pass(&current, &by_first);
+        work.passes += 1;
+        let (next, changed) = strip_pass(&current, &by_first, &mut work.comparisons);
         if !changed {
             return current;
         }
@@ -282,15 +297,16 @@ pub(crate) fn strip_special(text: &str, specials: &[String]) -> String {
 /// One pass of [`strip_special`]: copies the runs between matches and skips
 /// the matched specials. A special's first byte is a UTF-8 lead byte, so a
 /// match can never start inside a multi-byte character.
-fn strip_pass(text: &str, by_first: &[Vec<&str>]) -> (String, bool) {
+fn strip_pass(text: &str, by_first: &[Vec<&str>], comparisons: &mut usize) -> (String, bool) {
     let bytes = text.as_bytes();
     let mut out = String::with_capacity(text.len());
     let (mut copied, mut i) = (0, 0);
     let mut changed = false;
     while i < bytes.len() {
-        let hit = by_first[usize::from(bytes[i])]
-            .iter()
-            .find(|s| text[i..].starts_with(**s));
+        let hit = by_first[usize::from(bytes[i])].iter().find(|s| {
+            *comparisons += 1;
+            text[i..].starts_with(**s)
+        });
         match hit {
             Some(special) => {
                 out.push_str(&text[copied..i]);
@@ -590,8 +606,10 @@ Your previous response could not be parsed.
 
     #[test]
     fn strip_special_handles_many_specials_over_large_content() {
-        // 1,000 specials, none of them present, then two that are: the pass
-        // must stay linear in the content, not O(specials x content).
+        // 1,000 specials, none of them present, then two that are. The cost
+        // is asserted on counted work, not wall-clock time (which depends on
+        // the machine and the build profile): the pass must stay linear in
+        // the content, not O(specials x content).
         let mut list: Vec<String> = (0..1_000).map(|i| format!("<|tok_{i}|>")).collect();
         list.push("<|end|>".to_string());
         let chunk = "Reunión de seguimiento: <b>presupuesto</b> 437 ";
@@ -599,12 +617,36 @@ Your previous response could not be parsed.
         assert!(text.len() > 200_000);
         text.push_str("<|end|>");
         text.push_str("<|tok_999|>cola");
-        let started = std::time::Instant::now();
-        let out = strip_special(&text, &list);
-        let elapsed = started.elapsed();
-        eprintln!("strip_special 200 kB x 1001 specials: {elapsed:?}");
+        let mut work = Work::default();
+        let out = strip_special_counting(&text, &list, &mut work);
         assert_eq!(out, format!("{}cola", chunk.repeat(4_300)));
-        assert!(elapsed < std::time::Duration::from_secs(5), "{elapsed:?}");
+        // One pass that removes plus one that confirms nothing is left.
+        assert_eq!(work.passes, 2, "{work:?}");
+        // A scan that tried every special at every byte would do
+        // `specials x bytes` comparisons (> 200 million here). Candidates are
+        // looked up by first byte, so only the `<` positions pay for the
+        // 1,001 specials that start with it.
+        let naive = list.len() * text.len();
+        assert!(work.comparisons * 10 < naive, "{work:?} vs naive {naive}");
+    }
+
+    /// Timing is informational only (`cargo test -- --ignored --nocapture`):
+    /// the pass/fail property lives in the counted-work test above.
+    #[test]
+    #[ignore = "timing report only"]
+    fn bench_strip_special_over_large_content() {
+        let mut list: Vec<String> = (0..1_000).map(|i| format!("<|tok_{i}|>")).collect();
+        list.push("<|end|>".to_string());
+        let chunk = "Reunión de seguimiento: <b>presupuesto</b> 437 ";
+        let text = format!("{}<|end|><|tok_999|>cola", chunk.repeat(4_300));
+        let started = std::time::Instant::now();
+        let _ = strip_special(&text, &list);
+        eprintln!(
+            "strip_special {} kB x {} specials: {:?}",
+            text.len() / 1_000,
+            list.len(),
+            started.elapsed()
+        );
     }
 
     #[test]

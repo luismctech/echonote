@@ -45,7 +45,7 @@ use echo_domain::{ChatMessage, DomainError, GenerateOptions, LlmModel};
 
 use crate::backend::backend_singleton;
 use crate::llama_cpp_chat::LlamaCppChat;
-use crate::shared::{LoadedModel, ReasoningFilter, SharedModel};
+use crate::shared::{probe_bos_policy, LoadedModel, SharedModel, StreamState};
 use crate::template::{merge_stops, PromptFormat, PromptProfile, Rendering};
 use crate::worker::{
     drain_stream, Cancel, Flow, Job, Outlet, PieceSink, Priority, SamplingParams, Sink,
@@ -208,6 +208,7 @@ impl LlamaCppLlm {
             template.as_ref().and_then(|t| t.to_str().ok()),
         );
         let specials = LoadedModel::special_token_texts(&model);
+        let bos_policy = probe_bos_policy(&model);
         let mut loaded = LoadedModel {
             backend,
             model,
@@ -217,6 +218,7 @@ impl LlamaCppLlm {
             n_threads: opts.n_threads,
             profile: PromptProfile::new(format, Rendering::ChatMl, specials),
             template,
+            add_bos: bos_policy.add_bos,
         };
         // Decided once, here: a template that cannot render the probe is
         // never tried again on a request.
@@ -227,6 +229,8 @@ impl LlamaCppLlm {
             ?format,
             rendering = ?loaded.profile.rendering,
             special_tokens = loaded.profile.specials.len(),
+            add_bos = bos_policy.add_bos,
+            add_eos_by_llama_cpp = bos_policy.add_eos,
             "detected prompt format"
         );
 
@@ -292,6 +296,40 @@ impl LlamaCppLlm {
     }
 
     /// How many special-token texts are stripped from message contents.
+    /// Prompt token ids as [`Self::count_tokens`] sees them (BOS policy
+    /// applied). Test support behind `test-hooks`.
+    #[cfg(any(test, feature = "test-hooks"))]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn prompt_token_ids(&self, text: &str) -> Vec<i32> {
+        self.inner
+            .tokenize(text)
+            .map(|t| t.into_iter().map(|t| t.0).collect())
+            .unwrap_or_default()
+    }
+
+    /// `(bos, eos)` token ids of the vocabulary. Test support behind
+    /// `test-hooks`.
+    #[cfg(any(test, feature = "test-hooks"))]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn bos_eos_ids(&self) -> (i32, i32) {
+        (
+            self.inner.model.token_bos().0,
+            self.inner.model.token_eos().0,
+        )
+    }
+
+    /// `(add_bos, llama_cpp_would_add_eos)`: the probed BOS policy.
+    /// Test support behind `test-hooks`.
+    #[cfg(any(test, feature = "test-hooks"))]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn bos_policy(&self) -> (bool, bool) {
+        let p = probe_bos_policy(&self.inner.model);
+        (p.add_bos, p.add_eos)
+    }
+
     /// Test support behind `test-hooks`.
     #[cfg(any(test, feature = "test-hooks"))]
     #[doc(hidden)]
@@ -381,11 +419,7 @@ impl LlmModel for LlamaCppLlm {
             priority: Priority::Background,
             prompt: prompt.to_string(),
             params: SamplingParams::from_generate(options),
-            sink: Box::new(CollectSink {
-                output: String::new(),
-                stops: options.stop.clone(),
-                done,
-            }),
+            sink: Box::new(CollectSink::new(options.stop.clone(), done)),
         })?;
         rx.await
             .map_err(|_| DomainError::LlmFailed("generation worker dropped the request".into()))?
@@ -436,31 +470,31 @@ impl LlmModel for LlamaCppLlm {
     }
 }
 
-/// [`Sink`] behind [`LlamaCppLlm::generate`]: accumulates the reply,
-/// trims it at the first stop sequence and resolves a oneshot with the
-/// think-stripped text.
+/// [`Sink`] behind [`LlamaCppLlm::generate`]: accumulates the visible reply
+/// through the shared [`StreamState`] (reasoning suppressed, cut at the first
+/// stop sequence) and resolves a oneshot with it.
 struct CollectSink {
-    output: String,
-    stops: Vec<String>,
+    state: StreamState,
     done: oneshot::Sender<Result<String, DomainError>>,
+}
+
+impl CollectSink {
+    fn new(stops: Vec<String>, done: oneshot::Sender<Result<String, DomainError>>) -> Self {
+        Self {
+            state: StreamState::new(stops),
+            done,
+        }
+    }
 }
 
 impl PieceSink for CollectSink {
     fn on_piece(&mut self, piece: &str) -> Flow {
-        self.output.push_str(piece);
-        let hit = self
-            .stops
-            .iter()
-            .find(|s| !s.is_empty() && self.output.contains(s.as_str()))
-            .and_then(|stop| self.output.find(stop.as_str()));
-        match hit {
-            Some(idx) => {
-                // Contract: the stop sequence is NOT part of the output
-                // (see `GenerateOptions::stop`).
-                self.output.truncate(idx);
-                Flow::Stop
-            }
-            None => Flow::Continue,
+        if self.state.push_piece(piece).stop_hit {
+            // Contract: the stop sequence is NOT part of the output
+            // (see `GenerateOptions::stop`).
+            Flow::Stop
+        } else {
+            Flow::Continue
         }
     }
 
@@ -471,31 +505,28 @@ impl PieceSink for CollectSink {
 
 impl Sink for CollectSink {
     fn finish(self: Box<Self>, result: Result<(), DomainError>) {
-        let Self { output, done, .. } = *self;
-        // Qwen 3 <think>…</think> blocks are never useful to callers
-        // (summaries, chat one-shots, etc.).
-        let _ = done.send(result.map(|()| crate::shared::strip_think_blocks(&output)));
+        let Self { mut state, done } = *self;
+        let result = result
+            .and_then(|()| state.finish())
+            .map(|_| state.into_text());
+        let _ = done.send(result);
     }
 }
 
-/// [`Sink`] behind [`LlamaCppLlm::generate_stream`]: forwards each piece
-/// outside `<think>` blocks. The consumer aggregates the text; a stop
-/// sequence ends the stream without trimming the piece that completed it.
-/// A consumer that stops draining is cut off after a bounded stall (see
+/// [`Sink`] behind [`LlamaCppLlm::generate_stream`]: forwards the visible
+/// text (reasoning suppressed) of each piece through the shared
+/// [`StreamState`]; the stop sequence is cut off and ends the stream. A
+/// consumer that stops draining is cut off after a bounded stall (see
 /// [`Outlet`]).
 struct StreamSink {
-    output: String,
-    stops: Vec<String>,
-    filter: ReasoningFilter,
+    state: StreamState,
     out: Outlet<String>,
 }
 
 impl StreamSink {
     fn new(stops: Vec<String>, out: Outlet<String>) -> Self {
         Self {
-            output: String::new(),
-            stops,
-            filter: ReasoningFilter::new(),
+            state: StreamState::new(stops),
             out,
         }
     }
@@ -503,20 +534,11 @@ impl StreamSink {
 
 impl PieceSink for StreamSink {
     fn on_piece(&mut self, piece: &str) -> Flow {
-        self.output.push_str(piece);
-
-        // Reasoning blocks (`<think>`, Gemma's `<|channel>`) are suppressed,
-        // markers split across pieces included; stops see the raw text.
-        let visible = self.filter.push(piece);
-        if !visible.is_empty() && self.out.push(visible) == Flow::Stop {
+        let outcome = self.state.push_piece(piece);
+        if !outcome.delta.is_empty() && self.out.push(outcome.delta) == Flow::Stop {
             return Flow::Stop;
         }
-
-        let stopped = self
-            .stops
-            .iter()
-            .any(|s| !s.is_empty() && self.output.contains(s.as_str()));
-        if stopped {
+        if outcome.stop_hit {
             debug!("stream stopped on stop sequence");
             Flow::Stop
         } else {
@@ -535,14 +557,12 @@ impl Sink for StreamSink {
     }
 
     fn finish(mut self: Box<Self>, result: Result<(), DomainError>) {
-        match result {
+        match result.and_then(|()| self.state.finish()) {
             Err(e) => self.out.fail(e),
-            Ok(()) => {
-                let tail = self.filter.finish();
-                if !tail.is_empty() {
-                    let _ = self.out.push(tail);
-                }
+            Ok(tail) if !tail.delta.is_empty() => {
+                let _ = self.out.push(tail.delta);
             }
+            Ok(_) => {}
         }
     }
 }
@@ -579,11 +599,7 @@ mod tests {
         stops: &[&str],
     ) -> (CollectSink, oneshot::Receiver<Result<String, DomainError>>) {
         let (done, rx) = oneshot::channel();
-        let sink = CollectSink {
-            output: String::new(),
-            stops: stops.iter().map(|s| (*s).to_string()).collect(),
-            done,
-        };
+        let sink = CollectSink::new(stops.iter().map(|s| (*s).to_string()).collect(), done);
         (sink, rx)
     }
 
@@ -698,12 +714,170 @@ mod tests {
     }
 
     #[test]
-    fn stream_sink_stops_after_the_piece_completing_a_stop_sequence() {
+    fn stream_sink_stops_at_the_stop_sequence_without_forwarding_it() {
         let (mut sink, mut rx) = stream_sink(&["END"], 16, Duration::from_secs(1));
         assert_eq!(sink.on_piece("a"), Flow::Continue);
-        // Documented contract: the completing piece is still forwarded.
-        assert_eq!(sink.on_piece("END"), Flow::Stop);
-        assert_eq!(drain(&mut rx), ["a", "END"]);
+        // The stop sequence is not part of the output (`GenerateOptions::stop`).
+        assert_eq!(sink.on_piece("bEND tail"), Flow::Stop);
+        assert_eq!(drain(&mut rx), ["a", "b"]);
+    }
+
+    // ---- one stop / reasoning policy for every sink --------------------------
+
+    /// What a sink run produced: the visible text, whether the sink asked to
+    /// stop, and the error (if any) the job ended with.
+    #[derive(Debug, PartialEq, Eq)]
+    struct Run {
+        text: String,
+        stopped: bool,
+        error: Option<String>,
+    }
+
+    fn run_collect(stops: &[&str], pieces: &[&str]) -> Run {
+        let (mut sink, mut rx) = collect_sink(stops);
+        let mut stopped = false;
+        for piece in pieces {
+            if sink.on_piece(piece) == Flow::Stop {
+                stopped = true;
+                break;
+            }
+        }
+        Box::new(sink).finish(Ok(()));
+        match rx.try_recv().unwrap() {
+            Ok(text) => Run {
+                text,
+                stopped,
+                error: None,
+            },
+            Err(e) => Run {
+                text: String::new(),
+                stopped,
+                error: Some(e.to_string()),
+            },
+        }
+    }
+
+    fn run_stream(stops: &[&str], pieces: &[&str]) -> Run {
+        let (mut sink, mut rx) = stream_sink(stops, 64, Duration::from_secs(1));
+        let mut stopped = false;
+        for piece in pieces {
+            if sink.on_piece(piece) == Flow::Stop {
+                stopped = true;
+                break;
+            }
+        }
+        Box::new(sink).finish(Ok(()));
+        collect_stream_run(&mut rx, stopped, |s| s)
+    }
+
+    fn run_chat(stops: &[&str], pieces: &[&str]) -> Run {
+        let (tx, mut rx) = mpsc::channel(64);
+        let mut sink = crate::llama_cpp_chat::ChatSink::new(
+            stops.iter().map(|s| (*s).to_string()).collect(),
+            Outlet::new(tx),
+        );
+        let mut stopped = false;
+        for piece in pieces {
+            if sink.on_piece(piece) == Flow::Stop {
+                stopped = true;
+                break;
+            }
+        }
+        Box::new(sink).finish(Ok(()));
+        collect_stream_run(&mut rx, stopped, |t: echo_domain::ChatToken| t.delta)
+    }
+
+    fn collect_stream_run<T>(
+        rx: &mut mpsc::Receiver<Result<T, DomainError>>,
+        stopped: bool,
+        text_of: impl Fn(T) -> String,
+    ) -> Run {
+        let (mut text, mut error) = (String::new(), None);
+        while let Ok(item) = rx.try_recv() {
+            match item {
+                Ok(t) => text.push_str(&text_of(t)),
+                Err(e) => error = Some(e.to_string()),
+            }
+        }
+        Run {
+            text,
+            stopped,
+            error,
+        }
+    }
+
+    /// Every sink must agree on the same pieces: stops are matched on the
+    /// visible text (reasoning removed) and the stop sequence is never part
+    /// of the output.
+    #[test]
+    fn every_sink_applies_the_same_stop_and_reasoning_policy() {
+        let cases: &[(&[&str], &[&str], &str, bool)] = &[
+            // A stop string inside a think block is reasoning, not a stop.
+            (
+                &["END"],
+                &["<think>a E", "ND b</think>", "ans", "wer"],
+                "answer",
+                false,
+            ),
+            // ... and inside a Gemma thought channel, split across pieces.
+            (
+                &["<turn|>"],
+                &["<|channel>thought\nx<tu", "rn|>y<channel|>ok"],
+                "ok",
+                false,
+            ),
+            // Outside a block it stops, and what follows is dropped.
+            (&["END"], &["He", "llo E", "ND tail"], "Hello ", true),
+            // After a block, in the same piece as the answer.
+            (&["END"], &["<think>END</think>ok END junk"], "ok ", true),
+            // A non-reasoning channel is visible text, and can carry a stop.
+            (
+                &["END"],
+                &["<|channel>final\nA END B<channel|>"],
+                "A ",
+                true,
+            ),
+            // No stop at all: everything visible, nothing stopped.
+            (
+                &[],
+                &["<think>x</think>", "plain ", "text"],
+                "plain text",
+                false,
+            ),
+        ];
+        for (stops, pieces, text, stopped) in cases {
+            let want = Run {
+                text: (*text).to_string(),
+                stopped: *stopped,
+                error: None,
+            };
+            assert_eq!(run_collect(stops, pieces), want, "collect {pieces:?}");
+            assert_eq!(run_stream(stops, pieces), want, "stream {pieces:?}");
+            assert_eq!(run_chat(stops, pieces), want, "chat {pieces:?}");
+        }
+    }
+
+    #[test]
+    fn every_sink_fails_a_reply_that_is_only_an_unclosed_reasoning_block() {
+        let pieces = ["<|channel>thought\n", "planning forever"];
+        for run in [
+            run_collect(&[], &pieces),
+            run_stream(&[], &pieces),
+            run_chat(&[], &pieces),
+        ] {
+            assert_eq!(run.text, "");
+            let err = run.error.expect("an error, not an empty answer");
+            assert!(err.contains("reasoning block"), "{err}");
+        }
+        // With visible text before it the unclosed tail is dropped silently.
+        let pieces = ["Hola ", "<think>cut"];
+        for run in [
+            run_collect(&[], &pieces),
+            run_stream(&[], &pieces),
+            run_chat(&[], &pieces),
+        ] {
+            assert_eq!((run.text.as_str(), run.error), ("Hola ", None));
+        }
     }
 
     #[test]
