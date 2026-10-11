@@ -16,8 +16,8 @@
 //!    let chat = llm.chat_handle();
 //!    ```
 //!    Both adapters now point at the same `Arc<LoadedModel>`. No
-//!    extra weights are loaded; concurrent `generate` and `ask` calls
-//!    each spin up their own short-lived `LlamaContext` (see
+//!    extra weights are loaded; `generate` and `ask` calls share one
+//!    persistent `LlamaContext` and are served in arrival order (see
 //!    `crate::shared`).
 //!
 //! 2. **Standalone** (e.g. CLI tools that only need the chat surface):
@@ -27,13 +27,14 @@
 //!
 //! ## Streaming
 //!
-//! The decoder loop is synchronous, so it runs on
-//! `tokio::task::spawn_blocking`. Each detokenised piece is shipped
+//! The decoder loop is synchronous, so it runs on the model's worker
+//! thread (see [`crate::worker`]). Each detokenised piece is shipped
 //! over a bounded `tokio::sync::mpsc` channel; the receiver is wrapped
 //! into a `BoxStream` of `Result<ChatToken, DomainError>` and handed
 //! back to the caller. When the channel buffer fills (a slow IPC
 //! consumer), the producer naturally back-pressures the decoder
-//! instead of OOMing on a runaway model.
+//! instead of OOMing on a runaway model. Dropping the stream cancels the
+//! turn.
 //!
 //! ## Stop-sequence handling
 //!
@@ -50,27 +51,19 @@
 //! sequence split across pieces documented in
 //! [`StreamState::push_piece`].
 
-use std::num::NonZeroU32;
 use std::path::Path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures::stream::{self, BoxStream, StreamExt};
-use llama_cpp_2::context::params::LlamaContextParams;
-use llama_cpp_2::llama_batch::LlamaBatch;
-use llama_cpp_2::model::AddBos;
-use llama_cpp_2::sampling::LlamaSampler;
 use tokio::sync::mpsc;
-use tracing::{debug, info, instrument, warn};
+use tracing::{debug, info, instrument};
 
 use echo_domain::{ChatAssistant, ChatMessage, ChatRequest, ChatRole, ChatToken, DomainError};
 
 use crate::llama_cpp::{LlamaCppLlm, LoadOptions};
-use crate::shared::LoadedModel;
-
-/// Initial `LlamaBatch` capacity. Same value as the summariser; we
-/// resize on demand if the prompt is larger.
-const INITIAL_BATCH_TOKENS: usize = 512;
+use crate::shared::SharedModel;
+use crate::worker::{Flow, Job, SamplingParams, Sink};
 
 /// mpsc buffer between the (blocking) decoder and the (async) IPC
 /// consumer. Large enough that a small Tauri Channel hiccup does not
@@ -84,7 +77,7 @@ const STREAM_BUFFER: usize = 64;
 /// — it only bumps the refcount on the shared [`LoadedModel`].
 #[derive(Clone)]
 pub struct LlamaCppChat {
-    inner: Arc<LoadedModel>,
+    inner: Arc<SharedModel>,
 }
 
 impl std::fmt::Debug for LlamaCppChat {
@@ -122,9 +115,9 @@ impl LlamaCppChat {
     }
 
     /// Internal constructor. Used by [`LlamaCppLlm::chat_handle`] to
-    /// share the `Arc<LoadedModel>` between the summariser and the
+    /// share the `Arc<SharedModel>` between the summariser and the
     /// chat adapter without exposing the inner type.
-    pub(crate) fn from_loaded(inner: Arc<LoadedModel>) -> Self {
+    pub(crate) fn from_loaded(inner: Arc<SharedModel>) -> Self {
         Self { inner }
     }
 }
@@ -171,20 +164,18 @@ impl ChatAssistant for LlamaCppChat {
         }
 
         let prompt = render_qwen_chat_prompt(&request.messages);
-        let inner = Arc::clone(&self.inner);
-        let options = request.options.clone();
 
-        // ---- spawn the blocking decoder + bridge it to a stream ---------
+        // ---- queue the decode on the worker + bridge it to a stream -----
+        // Decoder failures travel through the channel as the final item.
         let (tx, rx) = mpsc::channel::<Result<ChatToken, DomainError>>(STREAM_BUFFER);
-
-        tokio::task::spawn_blocking(move || {
-            // The decoder communicates failures through the channel, so
-            // a panic in `stream_chat_blocking` is the only path that
-            // gets back here unsignalled — and we consider that
-            // unrecoverable. The closure is short and panic-free; the
-            // helper internally turns errors into channel sends.
-            stream_chat_blocking(&inner, &prompt, &options, &tx);
-        });
+        self.inner.submit(Job {
+            prompt,
+            params: SamplingParams::from_chat(&request.options),
+            sink: Box::new(ChatSink {
+                state: StreamState::new(request.options.stop.clone()),
+                tx,
+            }),
+        })?;
 
         // Wrap the receiver as a `BoxStream`. Using `unfold` instead
         // of pulling in `tokio_stream` keeps the dep tree slim.
@@ -196,154 +187,44 @@ impl ChatAssistant for LlamaCppChat {
     }
 }
 
-/// Synchronous decoder loop. Mirrors `llama_cpp::generate_blocking`
-/// with two differences:
-///
-/// 1. Each detokenised piece is shipped via `tx` instead of being
-///    accumulated into a `String`.
-/// 2. The stop-sequence check trims the *just-sent* piece before
-///    sending and ends the stream — the running reply still passes
-///    through [`StreamState`] so the trim positions are correct.
-///
-/// Errors are forwarded as `Err` items on the channel. If the
-/// receiver has been dropped (the consumer cancelled the stream),
-/// `tx.blocking_send` returns `Err(_)` and we exit early.
-fn stream_chat_blocking(
-    inner: &LoadedModel,
-    prompt: &str,
-    options: &echo_domain::ChatOptions,
-    tx: &mpsc::Sender<Result<ChatToken, DomainError>>,
-) {
-    if let Err(e) = stream_chat_impl(inner, prompt, options, tx) {
-        // Best-effort: if the consumer is gone there's nothing to
-        // tell, so we silently drop the error. If they're still
-        // listening, surface it as the final stream item.
-        let _ = tx.blocking_send(Err(e));
-    }
+/// [`Sink`] behind [`LlamaCppChat::ask`]: runs each piece through
+/// [`StreamState`] (think-block suppression, stop sequences) and ships the
+/// resulting delta to the stream consumer.
+struct ChatSink {
+    state: StreamState,
+    tx: mpsc::Sender<Result<ChatToken, DomainError>>,
 }
 
-fn stream_chat_impl(
-    inner: &LoadedModel,
-    prompt: &str,
-    options: &echo_domain::ChatOptions,
-    tx: &mpsc::Sender<Result<ChatToken, DomainError>>,
-) -> Result<(), DomainError> {
-    let n_ctx = NonZeroU32::new(inner.n_ctx)
-        .ok_or_else(|| DomainError::Invariant("n_ctx must be > 0".into()))?;
-
-    let mut ctx_params = LlamaContextParams::default()
-        .with_n_ctx(Some(n_ctx))
-        .with_n_batch(inner.n_ctx);
-    if let Some(threads) = inner.n_threads {
-        ctx_params = ctx_params.with_n_threads(threads);
-        ctx_params = ctx_params.with_n_threads_batch(threads);
-    }
-
-    let mut ctx = inner
-        .model
-        .new_context(inner.backend, ctx_params)
-        .map_err(|e| DomainError::LlmFailed(format!("create context: {e}")))?;
-
-    let prompt_tokens = inner
-        .model
-        .str_to_token(prompt, AddBos::Never)
-        .map_err(|e| DomainError::LlmFailed(format!("tokenize prompt: {e}")))?;
-
-    let n_prompt = prompt_tokens.len() as i32;
-    let n_max_total = n_prompt.saturating_add(options.max_tokens.min(i32::MAX as u32) as i32);
-    if (n_max_total as u32) > inner.n_ctx {
-        return Err(DomainError::LlmFailed(format!(
-            "prompt ({} tok) + max_tokens ({}) exceeds context window ({})",
-            n_prompt, options.max_tokens, inner.n_ctx
-        )));
-    }
-
-    let batch_capacity = prompt_tokens.len().max(INITIAL_BATCH_TOKENS);
-    let mut batch = LlamaBatch::new(batch_capacity, 1);
-    let last_index = (prompt_tokens.len() as i32) - 1;
-    for (i, token) in (0_i32..).zip(prompt_tokens) {
-        let is_last = i == last_index;
-        batch
-            .add(token, i, &[0], is_last)
-            .map_err(|e| DomainError::LlmFailed(format!("batch.add prompt: {e}")))?;
-    }
-    ctx.decode(&mut batch)
-        .map_err(|e| DomainError::LlmFailed(format!("decode prompt: {e}")))?;
-
-    let seed = options.seed.map_or(1234, |s| s as u32);
-    let temp = options.temperature.clamp(0.0, 2.0);
-    let top_p = options.top_p.clamp(0.0, 1.0);
-    let mut sampler = if temp <= f32::EPSILON {
-        LlamaSampler::chain_simple([LlamaSampler::greedy()])
-    } else {
-        LlamaSampler::chain_simple([
-            // Penalise recently-generated tokens to avoid degenerate
-            // repetition loops (look back 64 tokens, repeat penalty
-            // 1.1, no frequency/presence penalty).
-            LlamaSampler::penalties(64, 1.1, 0.0, 0.0),
-            LlamaSampler::top_p(top_p, 1),
-            LlamaSampler::temp(temp),
-            LlamaSampler::dist(seed),
-        ])
-    };
-
-    let mut decoder = encoding_rs::UTF_8.new_decoder();
-    let mut state = StreamState::new(options.stop.clone());
-    let mut n_cur = batch.n_tokens();
-    let mut n_decoded: u32 = 0;
-    let max_new = options.max_tokens;
-
-    debug!(
-        n_prompt,
-        n_ctx = inner.n_ctx,
-        max_new,
-        temp,
-        top_p,
-        "starting llama chat decode loop"
-    );
-
-    while n_decoded < max_new {
-        let token = sampler.sample(&ctx, batch.n_tokens() - 1);
-        sampler.accept(token);
-
-        if inner.model.is_eog_token(token) {
-            debug!(n_decoded, "stopped on EOG token");
-            return Ok(());
-        }
-
-        let piece = inner
-            .model
-            .token_to_piece(token, &mut decoder, true, None)
-            .map_err(|e| DomainError::LlmFailed(format!("detokenize: {e}")))?;
-        n_decoded += 1;
-
-        let outcome = state.push_piece(&piece);
-        if !outcome.delta.is_empty() && tx.blocking_send(Ok(ChatToken::new(outcome.delta))).is_err()
+impl Sink for ChatSink {
+    fn on_piece(&mut self, piece: &str) -> Flow {
+        let outcome = self.state.push_piece(piece);
+        if !outcome.delta.is_empty()
+            && self
+                .tx
+                .blocking_send(Ok(ChatToken::new(outcome.delta)))
+                .is_err()
         {
-            // Consumer dropped the receiver — nothing left to do.
             info!("chat stream consumer dropped; aborting decode");
-            return Ok(());
+            return Flow::Stop;
         }
-
         if outcome.stop_hit {
-            debug!(n_decoded, "stopped on user-supplied stop sequence");
-            return Ok(());
+            debug!("stopped on user-supplied stop sequence");
+            return Flow::Stop;
         }
-
-        batch.clear();
-        batch
-            .add(token, n_cur, &[0], true)
-            .map_err(|e| DomainError::LlmFailed(format!("batch.add gen: {e}")))?;
-        n_cur += 1;
-
-        ctx.decode(&mut batch)
-            .map_err(|e| DomainError::LlmFailed(format!("decode step: {e}")))?;
+        Flow::Continue
     }
 
-    if n_decoded == max_new {
-        warn!(max_new, "hit max_tokens without an EOG/stop token");
+    fn is_closed(&self) -> bool {
+        self.tx.is_closed()
     }
-    Ok(())
+
+    fn finish(self: Box<Self>, result: Result<(), DomainError>) {
+        // If the consumer is gone there is nobody to tell; otherwise the
+        // error is the stream's final item.
+        if let Err(e) = result {
+            let _ = self.tx.blocking_send(Err(e));
+        }
+    }
 }
 
 /// Render a chat message list into the Qwen chat-template wire format.

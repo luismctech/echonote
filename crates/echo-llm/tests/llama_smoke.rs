@@ -24,6 +24,7 @@ use std::time::Instant;
 
 use echo_domain::{ChatAssistant, GenerateOptions, LlmModel};
 use echo_llm::{LlamaCppLlm, LoadOptions};
+use futures::StreamExt;
 
 fn model_from_env() -> Option<PathBuf> {
     let raw = std::env::var("ECHO_LLM_MODEL").ok()?;
@@ -169,4 +170,100 @@ fn fallback_estimate_is_never_below_the_real_token_count() {
         );
         assert!(real <= estimate, "estimate undercounts {text:?}");
     }
+}
+
+fn short_prompt(question: &str) -> String {
+    format!(
+        "<|im_start|>system\nAnswer with a single short sentence.<|im_end|>\n\
+         <|im_start|>user\n{question} /no_think<|im_end|>\n\
+         <|im_start|>assistant\n"
+    )
+}
+
+fn greedy_options(max_tokens: u32) -> GenerateOptions {
+    GenerateOptions {
+        max_tokens,
+        temperature: 0.0,
+        top_p: 1.0,
+        seed: Some(7),
+        stop: vec!["<|im_end|>".into()],
+    }
+}
+
+/// The persistent context must serve consecutive requests, and clearing
+/// the KV cache between them must make a repeated greedy prompt reproduce
+/// the same answer.
+#[tokio::test]
+#[ignore = "requires ECHO_LLM_MODEL to point at a .gguf file"]
+async fn serves_back_to_back_requests_on_one_context() {
+    let Some(model_path) = model_from_env() else {
+        eprintln!("skipping: ECHO_LLM_MODEL not set");
+        return;
+    };
+    let llm = LlamaCppLlm::load_with(
+        &model_path,
+        LoadOptions::default().with_n_ctx(2_048).with_n_threads(4),
+    )
+    .expect("load gguf");
+
+    let capital = short_prompt("What is the capital of France?");
+    let first = llm
+        .generate(&capital, &greedy_options(24))
+        .await
+        .expect("first request");
+    let other = llm
+        .generate(&short_prompt("What is 2 + 2?"), &greedy_options(24))
+        .await
+        .expect("second request");
+    let again = llm
+        .generate(&capital, &greedy_options(24))
+        .await
+        .expect("third request");
+    eprintln!("back-to-back: {first:?} / {other:?} / {again:?}");
+
+    assert!(!first.trim().is_empty());
+    assert!(!other.trim().is_empty());
+    assert_eq!(first, again, "a reused context must not leak earlier state");
+}
+
+/// Dropping a stream mid-answer must stop its decoding so the next
+/// request is served instead of waiting behind a long generation.
+#[tokio::test]
+#[ignore = "requires ECHO_LLM_MODEL to point at a .gguf file"]
+async fn dropping_a_stream_early_does_not_block_the_next_request() {
+    let Some(model_path) = model_from_env() else {
+        eprintln!("skipping: ECHO_LLM_MODEL not set");
+        return;
+    };
+    let llm = LlamaCppLlm::load_with(
+        &model_path,
+        LoadOptions::default().with_n_ctx(2_048).with_n_threads(4),
+    )
+    .expect("load gguf");
+
+    // A long answer requested, abandoned after the first piece.
+    let long = short_prompt("Count from 1 to 500 separated by commas.");
+    let mut stream = llm
+        .generate_stream(&long, &greedy_options(512))
+        .await
+        .expect("open stream");
+    let piece = stream.next().await.expect("first piece").expect("ok piece");
+    assert!(!piece.is_empty());
+    drop(stream);
+
+    let started = Instant::now();
+    let out = llm
+        .generate(
+            &short_prompt("Reply with the word OK."),
+            &greedy_options(16),
+        )
+        .await
+        .expect("request after the dropped stream");
+    let elapsed = started.elapsed();
+    eprintln!("after drop: {out:?} in {} ms", elapsed.as_millis());
+
+    assert!(!out.trim().is_empty());
+    // Finishing the abandoned 512-token answer first would take far longer
+    // than this short request does on any supported machine.
+    assert!(elapsed.as_secs() < 20, "next request waited {elapsed:?}");
 }
