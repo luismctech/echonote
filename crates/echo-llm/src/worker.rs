@@ -43,7 +43,16 @@
 //!   decoding stops at the next token instead of blocking the queue.
 //! * A consumer that is alive but stops draining its channel cannot block
 //!   the queue either: sinks send through [`send_bounded`], which gives up
-//!   after a stall timeout.
+//!   after a stall timeout. The channel is full at that point, so the stream
+//!   is marked ([`StallMark`]) and [`drain_stream`] ends it with an error
+//!   once the consumer resumes: truncated output is never a clean end.
+//! * Consumer-side code (the sinks) cannot kill the thread: every call into
+//!   a sink is contained, and a [`DeathGuard`] covers any other panic by
+//!   marking the queue dead and failing the queued jobs; the next
+//!   [`Worker::submit`] starts a fresh thread.
+//! * Prefix reuse across jobs is the engine's business (it owns the KV
+//!   cache); the worker only guarantees jobs reach the engine one at a
+//!   time, in order, and that a rebuilt engine starts with an empty cache.
 //!
 //! The worker is generic over [`EngineSource`]/[`Engine`] so the queueing,
 //! idle-release, shutdown and cancellation policy is tested with a fake
@@ -56,8 +65,9 @@ use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use futures::stream::{BoxStream, StreamExt};
 use tokio::sync::mpsc::error::TrySendError;
-use tokio::sync::mpsc::Sender;
+use tokio::sync::mpsc::{Receiver, Sender};
 use tracing::{debug, error};
 
 use echo_domain::{ChatOptions, DomainError, GenerateOptions};
@@ -152,6 +162,7 @@ pub(crate) struct Outlet<T> {
     cancel: Cancel,
     stall: Duration,
     stalled: bool,
+    mark: StallMark,
 }
 
 impl<T> Outlet<T> {
@@ -162,6 +173,7 @@ impl<T> Outlet<T> {
             cancel: Cancel::default(),
             stall: CONSUMER_STALL_TIMEOUT,
             stalled: false,
+            mark: StallMark::default(),
         }
     }
 
@@ -186,6 +198,9 @@ impl<T> Outlet<T> {
             SendOutcome::Closed | SendOutcome::Cancelled => Flow::Stop,
             SendOutcome::Stalled => {
                 self.stalled = true;
+                // The channel is still full, so the failure cannot travel
+                // through it; the stream reads this flag once it drains.
+                self.mark.store(true, Ordering::SeqCst);
                 tracing::warn!(
                     stall_secs = self.stall.as_secs_f32(),
                     "stream consumer stopped draining; cancelling the llm job"
@@ -200,6 +215,11 @@ impl<T> Outlet<T> {
         self.tx.is_closed()
     }
 
+    /// Handle for [`drain_stream`] to learn that the stream was cut off.
+    pub(crate) fn stall_mark(&self) -> StallMark {
+        Arc::clone(&self.mark)
+    }
+
     /// Deliver `error` as the stream's final item. Skipped after a stall:
     /// the buffer is still full and waiting again would only delay the
     /// queue a second time.
@@ -210,6 +230,40 @@ impl<T> Outlet<T> {
         }
         let _ = send_bounded(&self.tx, Err(error), &self.cancel, self.stall);
     }
+}
+
+/// Shared flag raised when an [`Outlet`] cuts a stalled consumer off.
+pub(crate) type StallMark = Arc<AtomicBool>;
+
+/// Turn the receiving half of an [`Outlet`] channel into the stream handed
+/// to the caller.
+///
+/// A consumer that stalled past the timeout was cut off while the channel
+/// was full, so nothing could tell it the output is incomplete. Once it
+/// drains the buffered items, the stream ends with an explicit error
+/// instead of a clean end, so truncated output is never mistaken for a
+/// complete answer.
+pub(crate) fn drain_stream<T: Send + 'static>(
+    rx: Receiver<Result<T, DomainError>>,
+    mark: StallMark,
+) -> BoxStream<'static, Result<T, DomainError>> {
+    futures::stream::unfold(Some(rx), move |state| {
+        let mark = Arc::clone(&mark);
+        async move {
+            let mut rx = state?;
+            match rx.recv().await {
+                Some(item) => Some((item, Some(rx))),
+                None if mark.load(Ordering::SeqCst) => Some((
+                    Err(DomainError::LlmFailed(
+                        "consumer stalled; output truncated".into(),
+                    )),
+                    None,
+                )),
+                None => None,
+            }
+        }
+    })
+    .boxed()
 }
 
 /// Sampling knobs for one request, shared by every entry point.
@@ -320,6 +374,9 @@ pub(crate) trait EngineSource: Send + Sync + 'static {
 struct Pending {
     interactive: VecDeque<Job>,
     background: VecDeque<Job>,
+    /// The worker thread died unexpectedly; cleared when a new one is
+    /// spawned.
+    dead: bool,
 }
 
 /// What the worker should do next.
@@ -396,6 +453,35 @@ impl Queue {
         }
     }
 
+    fn is_dead(&self) -> bool {
+        self.lock().dead
+    }
+
+    /// Clear the dead mark before a replacement thread starts.
+    fn revive(&self) {
+        self.lock().dead = false;
+    }
+
+    /// The worker thread is unwinding: mark the queue dead and fail every
+    /// queued job, so no caller waits for a thread that is gone.
+    fn fail_dead(&self) {
+        let jobs: Vec<Job> = {
+            let mut pending = self.lock();
+            pending.dead = true;
+            let interactive = std::mem::take(&mut pending.interactive);
+            let background = std::mem::take(&mut pending.background);
+            interactive.into_iter().chain(background).collect()
+        };
+        for mut job in jobs {
+            shielded("bind_cancel", || job.sink.bind_cancel(self.cancel.clone()));
+            shielded("finish", move || {
+                job.sink.finish(Err(DomainError::LlmFailed(
+                    "llm worker stopped unexpectedly".into(),
+                )));
+            });
+        }
+    }
+
     /// Raise the shutdown flag and wake the worker. The flag is set before
     /// taking the lock so a worker about to wait still sees it.
     fn shutdown(&self) {
@@ -413,8 +499,38 @@ impl Queue {
             interactive.into_iter().chain(background).collect()
         };
         for mut job in jobs {
-            job.sink.bind_cancel(self.cancel.clone());
-            job.sink.finish(Err(shutdown_error()));
+            shielded("bind_cancel", || job.sink.bind_cancel(self.cancel.clone()));
+            shielded("finish", move || job.sink.finish(Err(shutdown_error())));
+        }
+    }
+}
+
+/// Run a call into a sink, containing a panic: sinks are consumer-side
+/// code and must not be able to take the worker thread down. `None` when
+/// it panicked.
+fn shielded<R>(what: &str, call: impl FnOnce() -> R) -> Option<R> {
+    panic::catch_unwind(AssertUnwindSafe(call))
+        .map_err(|_| error!(call = what, "llm sink panicked"))
+        .ok()
+}
+
+/// Backstop for a panic that escapes every [`shielded`]/`catch_unwind`
+/// site of the thread body: while unwinding it marks the queue dead and
+/// fails the queued jobs, which would otherwise wait for a thread that is
+/// gone. The next [`Worker::submit`] then starts a clean thread.
+struct DeathGuard<'a>(&'a Queue);
+
+impl<'a> DeathGuard<'a> {
+    fn new(queue: &'a Queue) -> Self {
+        Self(queue)
+    }
+}
+
+impl Drop for DeathGuard<'_> {
+    fn drop(&mut self) {
+        if thread::panicking() {
+            error!("llm worker thread panicked; failing the queued jobs");
+            self.0.fail_dead();
         }
     }
 }
@@ -442,12 +558,18 @@ impl Worker {
     /// Queue `job` in its priority class, starting the thread if it is not
     /// running (first use, or it died).
     ///
-    /// The thread only exits on shutdown, so a finished handle means it
-    /// died unexpectedly; it is replaced once, and a spawn failure is
-    /// reported instead of retried.
+    /// The thread only exits on shutdown, so a finished handle (or a queue
+    /// its [`DeathGuard`] marked dead) means it died unexpectedly; it is
+    /// replaced once, and a spawn failure is reported instead of retried.
     pub(crate) fn submit(&self, job: Job) -> Result<(), DomainError> {
         let mut thread = self.thread.lock().unwrap_or_else(PoisonError::into_inner);
-        if thread.as_ref().is_none_or(thread::JoinHandle::is_finished) {
+        if thread.as_ref().is_none_or(thread::JoinHandle::is_finished) || self.queue.is_dead() {
+            // A thread that died is at most a few instructions from done
+            // (its guard has already run), so joining it is brief.
+            if let Some(dead) = thread.take() {
+                let _ = dead.join();
+            }
+            self.queue.revive();
             let source = Arc::clone(&self.source);
             let queue = Arc::clone(&self.queue);
             let idle = self.idle;
@@ -501,6 +623,8 @@ impl PieceSink for Guarded<'_> {
 /// Worker thread body: serve jobs (interactive first) until shutdown, then
 /// fail whatever is still queued.
 fn run(source: &dyn EngineSource, queue: &Queue, idle: Duration) {
+    // Declared first so it drops last, once the engine is already gone.
+    let _guard = DeathGuard::new(queue);
     // Declared after `source` is borrowed so the engine drops first.
     let mut engine: Option<Box<dyn Engine + '_>> = None;
     loop {
@@ -513,8 +637,11 @@ fn run(source: &dyn EngineSource, queue: &Queue, idle: Duration) {
             }
             Next::Shutdown => break,
         };
-        job.sink.bind_cancel(queue.cancel.clone());
-        if job.sink.is_closed() {
+        let bound = shielded("bind_cancel", || {
+            job.sink.bind_cancel(queue.cancel.clone());
+        });
+        // A sink that panics while being inspected is treated as gone.
+        if bound.is_none() || shielded("is_closed", || job.sink.is_closed()).unwrap_or(true) {
             debug!("skipping a queued llm job whose consumer is gone");
             continue;
         }
@@ -522,7 +649,7 @@ fn run(source: &dyn EngineSource, queue: &Queue, idle: Duration) {
             match source.create() {
                 Ok(created) => engine = Some(created),
                 Err(err) => {
-                    job.sink.finish(Err(err));
+                    shielded("finish", move || job.sink.finish(Err(err)));
                     continue;
                 }
             }
@@ -545,20 +672,19 @@ fn run(source: &dyn EngineSource, queue: &Queue, idle: Duration) {
         let outcome = panic::catch_unwind(AssertUnwindSafe(|| {
             eng.serve(&prompt, &params, &mut guarded)
         }));
-        match outcome {
+        let result = match outcome {
             // An abort by shutdown ends the engine loop "successfully";
             // the consumer must not mistake the truncated output for a
             // complete one.
-            Ok(Ok(())) if queue.cancel.is_set() => sink.finish(Err(shutdown_error())),
-            Ok(result) => sink.finish(result),
+            Ok(Ok(())) if queue.cancel.is_set() => Err(shutdown_error()),
+            Ok(result) => result,
             Err(_) => {
                 error!("llm engine panicked; discarding the context");
                 engine = None;
-                sink.finish(Err(DomainError::LlmFailed(
-                    "inference worker panicked".into(),
-                )));
+                Err(DomainError::LlmFailed("inference worker panicked".into()))
             }
-        }
+        };
+        shielded("finish", move || sink.finish(result));
     }
     drop(engine);
     queue.fail_pending();
@@ -983,8 +1109,8 @@ mod tests {
         let (stuck_done, _rx_kept_open) = submit_stuck(&w, Duration::from_millis(50));
         let next = submit(&w, "next");
 
-        // The stuck job ends (without an error: nobody is listening) and
-        // the following job is served instead of waiting forever.
+        // The stuck job ends (its consumer, if it resumed, learns of the
+        // truncation through the stream mark) and the following job is served instead of waiting forever.
         assert_eq!(
             stuck_done
                 .recv_timeout(Duration::from_secs(5))
@@ -1031,5 +1157,168 @@ mod tests {
         );
         drop(rx);
         assert_eq!(send_bounded(&tx, 4, &cancel, short), SendOutcome::Closed);
+    }
+
+    #[tokio::test]
+    async fn a_consumer_that_resumes_after_a_stall_sees_an_error_not_a_clean_end() {
+        use futures::StreamExt;
+
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        let mut out = Outlet::new(tx).with_stall(Duration::from_millis(20));
+        let mut stream = drain_stream(rx, out.stall_mark());
+        assert_eq!(out.push("a".to_string()), Flow::Continue);
+        // The buffer is full and nobody reads: the job is cut off.
+        assert_eq!(out.push("b".to_string()), Flow::Stop);
+        drop(out);
+
+        // The consumer wakes up: it gets what was buffered, then the error.
+        assert_eq!(stream.next().await.unwrap().unwrap(), "a");
+        let err = stream.next().await.unwrap().unwrap_err();
+        assert!(err.to_string().contains("stalled"), "{err}");
+        assert!(stream.next().await.is_none(), "error is the last item");
+    }
+
+    #[tokio::test]
+    async fn a_stream_that_ends_normally_has_no_trailing_error() {
+        use futures::StreamExt;
+
+        let (tx, rx) = tokio::sync::mpsc::channel(4);
+        let mut out = Outlet::new(tx);
+        let stream = drain_stream(rx, out.stall_mark());
+        assert_eq!(out.push(1_u8), Flow::Continue);
+        drop(out);
+        let items: Vec<_> = stream.collect().await;
+        assert_eq!(items.len(), 1);
+        assert_eq!(*items[0].as_ref().unwrap(), 1);
+    }
+
+    /// Sink whose `finish` panics, like a buggy consumer bridge would.
+    struct PanickingFinishSink;
+
+    impl PieceSink for PanickingFinishSink {
+        fn on_piece(&mut self, _piece: &str) -> Flow {
+            Flow::Continue
+        }
+        fn is_closed(&self) -> bool {
+            false
+        }
+    }
+
+    impl Sink for PanickingFinishSink {
+        fn finish(self: Box<Self>, _result: Result<(), DomainError>) {
+            panic!("finish blew up");
+        }
+    }
+
+    fn submit_panicking_finish(worker: &Worker) {
+        worker
+            .submit(Job {
+                priority: Priority::Background,
+                prompt: "bad-sink".into(),
+                params: SamplingParams::from_generate(&GenerateOptions::default()),
+                sink: Box::new(PanickingFinishSink),
+            })
+            .expect("submit");
+    }
+
+    #[test]
+    fn a_panic_in_a_sink_does_not_strand_the_queued_jobs() {
+        let probe = Arc::new(Probe::default());
+        let source = FakeSource::new(&probe);
+        let (release, gate) = channel();
+        *source.gate.lock().unwrap() = Some(gate);
+        let w = worker(source, Duration::from_secs(60));
+
+        submit_panicking_finish(&w);
+        let queued = submit(&w, "queued");
+        release.send(()).unwrap();
+
+        // Served by the same thread: the panic was contained.
+        assert_eq!(queued.wait(), Ok(()));
+        assert_eq!(*probe.served.lock().unwrap(), ["bad-sink", "queued"]);
+    }
+
+    #[test]
+    fn a_thread_that_dies_fails_its_queued_jobs_and_the_next_submit_respawns() {
+        let queue = Arc::new(Queue::new());
+        let (done_tx, done) = channel();
+        queue.push(Job {
+            priority: Priority::Background,
+            prompt: "stranded".into(),
+            params: SamplingParams::from_generate(&GenerateOptions::default()),
+            sink: Box::new(TestSink {
+                pieces: Arc::new(Mutex::new(String::new())),
+                closed: Arc::new(AtomicBool::new(false)),
+                done: done_tx,
+            }),
+        });
+
+        let q = Arc::clone(&queue);
+        let dying = thread::spawn(move || {
+            let _guard = DeathGuard::new(&q);
+            panic!("thread body blew up");
+        });
+        assert!(dying.join().is_err());
+
+        let err = done
+            .recv_timeout(Duration::from_secs(2))
+            .expect("stranded job was failed")
+            .unwrap_err();
+        assert!(err.contains("worker stopped"), "{err}");
+    }
+
+    /// Engine whose drop panics once armed: kills the thread outside every
+    /// `catch_unwind`, after the idle release.
+    struct BombSource {
+        armed: AtomicBool,
+        probe: Arc<Probe>,
+    }
+
+    struct BombEngine<'a>(&'a BombSource);
+
+    impl EngineSource for BombSource {
+        fn create(&self) -> Result<Box<dyn Engine + '_>, DomainError> {
+            self.probe.created.fetch_add(1, Ordering::SeqCst);
+            Ok(Box::new(BombEngine(self)))
+        }
+    }
+
+    impl Drop for BombEngine<'_> {
+        fn drop(&mut self) {
+            if self.0.armed.swap(false, Ordering::SeqCst) {
+                panic!("engine drop blew up");
+            }
+        }
+    }
+
+    impl Engine for BombEngine<'_> {
+        fn serve(
+            &mut self,
+            _prompt: &str,
+            _params: &SamplingParams,
+            sink: &mut dyn PieceSink,
+        ) -> Result<(), DomainError> {
+            let _ = sink.on_piece("ok");
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_worker_whose_thread_died_serves_the_next_submit_on_a_new_thread() {
+        let probe = Arc::new(Probe::default());
+        let source = Arc::new(BombSource {
+            armed: AtomicBool::new(true),
+            probe: Arc::clone(&probe),
+        });
+        let w = Worker::new(
+            Arc::clone(&source) as Arc<dyn EngineSource>,
+            Duration::from_millis(30),
+        );
+        assert_eq!(submit(&w, "one").wait(), Ok(()));
+        // Idle release drops the engine, which panics and kills the thread.
+        assert!(eventually(|| w.queue.is_dead()));
+
+        assert_eq!(submit(&w, "two").wait(), Ok(()));
+        assert_eq!(probe.created.load(Ordering::SeqCst), 2);
     }
 }

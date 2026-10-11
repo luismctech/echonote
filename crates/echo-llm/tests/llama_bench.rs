@@ -17,8 +17,10 @@
 //!   costs once any reusable state exists.
 //! * **prompt-eval throughput** - a ~6,000-token ChatML prompt with
 //!   `max_tokens = 1`, so the time is dominated by evaluating the prompt.
-//! * **chat turn** - the same long prompt with a 64-token greedy answer,
-//!   twice in a row: time to first token and total time.
+//! * **chat turns** - the same long prompt with a 64-token greedy answer
+//!   (cold, then again with the whole prompt reusable), then a follow-up
+//!   turn carrying the first turn as history: time to first token, total
+//!   time and how many prompt tokens were reused from the KV cache.
 //! * **RSS** - resident set size of this process (via `ps`) before load,
 //!   after load, and after the first and later requests.
 
@@ -145,21 +147,37 @@ async fn llama_latency_and_memory_baseline() {
     );
     report_rss("after long-prompt request");
 
-    // (c) chat turn: time to first token and total, twice on the same prompt.
+    // (c) chat: turn 1, the same request again (maximum reuse) and a real
+    // follow-up turn that carries turn 1 and its answer as history.
     let chat = llm.chat_handle();
-    for turn in 1..=2 {
-        let request = ChatRequest {
-            messages: vec![
+    // Step (b) left this very prompt in the KV cache; evict it with an
+    // unrelated request so turn 1 below is a true cold start.
+    let _ = llm.generate(&tiny, &greedy(1)).await.expect("evict");
+    let options = ChatOptions {
+        max_tokens: 64,
+        temperature: 0.0,
+        top_p: 1.0,
+        seed: Some(7),
+        stop: vec!["<|im_end|>".into()],
+    };
+    let mut first_answer = String::new();
+    for turn in 1..=3 {
+        let messages = if turn < 3 {
+            vec![
                 ChatMessage::system(system.clone()),
                 ChatMessage::user(question),
-            ],
-            options: ChatOptions {
-                max_tokens: 64,
-                temperature: 0.0,
-                top_p: 1.0,
-                seed: Some(7),
-                stop: vec!["<|im_end|>".into()],
-            },
+            ]
+        } else {
+            vec![
+                ChatMessage::system(system.clone()),
+                ChatMessage::user(question),
+                ChatMessage::assistant(first_answer.clone()),
+                ChatMessage::user("¿Quién se encarga de ello? Responde en una frase. /no_think"),
+            ]
+        };
+        let request = ChatRequest {
+            messages,
+            options: options.clone(),
         };
         let started = Instant::now();
         let mut stream = chat.ask(&request).await.expect("ask");
@@ -171,14 +189,23 @@ async fn llama_latency_and_memory_baseline() {
             answer.push_str(&token.delta);
         }
         let total = started.elapsed();
+        let label = match turn {
+            1 => "turn 1 (cold)",
+            2 => "turn 2 (same prompt again)",
+            _ => "turn 3 (follow-up with history)",
+        };
         eprintln!(
-            "[bench] chat turn #{turn}: first token {} ms, total {} ms, {} chars: {:?}",
+            "[bench] chat {label}: first token {} ms, total {} ms, reused {} tokens, {} chars: {:?}",
             first.map_or(0, |d| d.as_millis()),
             total.as_millis(),
+            echo_llm::last_reused_tokens(),
             answer.len(),
             answer.chars().take(80).collect::<String>()
         );
         assert!(!answer.trim().is_empty(), "chat turn #{turn} was empty");
+        if turn == 1 {
+            first_answer = answer;
+        }
     }
     report_rss("after chat turns");
 }

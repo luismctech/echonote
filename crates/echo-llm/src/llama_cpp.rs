@@ -21,14 +21,21 @@
 //!   preempted. The async side only queues a job and awaits its
 //!   output, so a long summary doesn't stall the rest of the runtime.
 //!   A caller that drops its stream or future cancels the job: decoding
-//!   stops at the next token and the queue moves on.
+//!   stops at the next token and the queue moves on. A caller that stops
+//!   draining its stream is cut off after a bounded stall and, once it
+//!   resumes, sees an error item rather than a clean end.
+//! * The worker keeps the tokens resident in the KV cache and, for each
+//!   request, only evaluates the part of the prompt after the first
+//!   difference with the previous one (see [`crate::llama_engine`]): a
+//!   follow-up chat turn skips the system prompt and transcript it shares
+//!   with the turn before.
 
 use std::path::Path;
 use std::pin::pin;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use futures::stream::{self, BoxStream, StreamExt};
+use futures::stream::{self, BoxStream};
 use llama_cpp_2::model::params::LlamaModelParams;
 use llama_cpp_2::model::LlamaModel;
 use tokio::sync::{mpsc, oneshot};
@@ -39,7 +46,9 @@ use echo_domain::{DomainError, GenerateOptions, LlmModel};
 use crate::backend::backend_singleton;
 use crate::llama_cpp_chat::LlamaCppChat;
 use crate::shared::{LoadedModel, SharedModel};
-use crate::worker::{Cancel, Flow, Job, Outlet, PieceSink, Priority, SamplingParams, Sink};
+use crate::worker::{
+    drain_stream, Cancel, Flow, Job, Outlet, PieceSink, Priority, SamplingParams, Sink,
+};
 
 /// Default context window when the caller does not override it. Both
 /// Qwen 3 8B and 14B ship with `n_ctx_train = 32_768`; 8192 holds the
@@ -279,17 +288,14 @@ impl LlmModel for LlamaCppLlm {
         }
 
         let (tx, rx) = mpsc::channel::<Result<String, DomainError>>(STREAM_BUFFER);
+        let out = Outlet::new(tx);
+        let stream = drain_stream(rx, out.stall_mark());
         self.inner.submit(Job {
             priority: Priority::Background,
             prompt: prompt.to_string(),
             params: SamplingParams::from_generate(options),
-            sink: Box::new(StreamSink::new(options.stop.clone(), Outlet::new(tx))),
+            sink: Box::new(StreamSink::new(options.stop.clone(), out)),
         })?;
-
-        let stream = stream::unfold(rx, |mut rx| async move {
-            rx.recv().await.map(|item| (item, rx))
-        })
-        .boxed();
         Ok(stream)
     }
 }

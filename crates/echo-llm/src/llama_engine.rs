@@ -1,8 +1,23 @@
 //! llama.cpp implementation of the worker's [`Engine`]: one persistent
 //! `LlamaContext` plus the single decode loop shared by every entry point
 //! (one-shot generation, raw streaming and chat).
+//!
+//! ## Prefix reuse
+//!
+//! The engine records the exact tokens resident in the KV cache (the
+//! evaluated prompt plus every generated token that was decoded into it).
+//! A new request keeps the longest common prefix with that record, drops
+//! the rest of the cache with a partial removal and decodes only the
+//! remaining prompt tokens, so a follow-up chat turn does not re-evaluate
+//! the system prompt and transcript again (see [`crate::prefix`] for the
+//! policy). At least the last prompt token is always decoded so logits
+//! exist for the first sample. Greedy output is identical with and without
+//! reuse. Any decode error clears the cache and the record, so a later
+//! request never trusts a half-written state; dropping the engine (idle
+//! release, rebuild after a panic) discards both.
 
 use std::num::NonZeroU32;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use llama_cpp_2::context::params::LlamaContextParams;
@@ -10,16 +25,14 @@ use llama_cpp_2::context::LlamaContext;
 use llama_cpp_2::llama_batch::LlamaBatch;
 use llama_cpp_2::model::AddBos;
 use llama_cpp_2::sampling::LlamaSampler;
+use llama_cpp_2::token::LlamaToken;
 use tracing::{debug, warn};
 
 use echo_domain::DomainError;
 
+use crate::prefix::{prepare_cache, KvCache};
 use crate::shared::LoadedModel;
 use crate::worker::{Engine, EngineSource, Flow, PieceSink, SamplingParams};
-
-/// Initial size of the decoding batch. Resized on demand when the prompt
-/// is larger.
-const INITIAL_BATCH_TOKENS: usize = 512;
 
 /// Seed used when the caller does not pin one.
 const DEFAULT_SEED: u32 = 1234;
@@ -54,7 +67,11 @@ impl EngineSource for LlamaSource {
             .new_context(loaded.backend, ctx_params)
             .map_err(|e| DomainError::LlmFailed(format!("create context: {e}")))?;
         debug!(n_ctx = loaded.n_ctx, "created llama.cpp context");
-        Ok(Box::new(LlamaEngine { loaded, ctx }))
+        Ok(Box::new(LlamaEngine {
+            loaded,
+            ctx,
+            resident: Vec::new(),
+        }))
     }
 }
 
@@ -62,10 +79,90 @@ impl EngineSource for LlamaSource {
 struct LlamaEngine<'a> {
     loaded: &'a LoadedModel,
     ctx: LlamaContext<'a>,
+    /// Tokens currently in the KV cache, by position (sequence 0).
+    resident: Vec<LlamaToken>,
+}
+
+/// Number of prompt tokens the most recent request found already
+/// evaluated in the KV cache. Process-wide; read by the gated tests.
+static LAST_REUSED_TOKENS: AtomicUsize = AtomicUsize::new(0);
+
+/// How many prompt tokens the latest request reused from the KV cache.
+///
+/// Test support for the gated real-model suites; not part of the stable
+/// API.
+#[doc(hidden)]
+pub fn last_reused_tokens() -> usize {
+    LAST_REUSED_TOKENS.load(Ordering::Relaxed)
+}
+
+/// [`KvCache`] over the context's sequence 0.
+impl KvCache for LlamaContext<'_> {
+    fn remove_from(&mut self, from: usize) -> bool {
+        let Ok(from) = u32::try_from(from) else {
+            return false;
+        };
+        matches!(self.clear_kv_cache_seq(Some(0), Some(from), None), Ok(true))
+    }
+
+    fn clear(&mut self) {
+        self.clear_kv_cache();
+    }
+}
+
+impl LlamaEngine<'_> {
+    /// Empty the cache and the record of what it holds.
+    fn reset_cache(&mut self) {
+        self.ctx.clear_kv_cache();
+        self.resident.clear();
+    }
+
+    /// Decode `tokens` at absolute positions `start..`, in `n_batch`-sized
+    /// chunks, asking for logits only on the very last one, and record each
+    /// chunk as resident once the context accepted it. Returns the size of
+    /// the last chunk (where the logits of the final token live).
+    fn decode_prompt(&mut self, tokens: &[LlamaToken], start: usize) -> Result<i32, DomainError> {
+        let chunk = (self.ctx.n_batch() as usize).max(1);
+        let mut batch = LlamaBatch::new(chunk.min(tokens.len()).max(1), 1);
+        let mut position = start;
+        let mut last_chunk = 0;
+        for part in tokens.chunks(chunk) {
+            batch.clear();
+            for (i, token) in part.iter().enumerate() {
+                let is_last = position + i + 1 == start + tokens.len();
+                batch
+                    .add(*token, (position + i) as i32, &[0], is_last)
+                    .map_err(|e| DomainError::LlmFailed(format!("batch.add prompt: {e}")))?;
+            }
+            self.ctx
+                .decode(&mut batch)
+                .map_err(|e| DomainError::LlmFailed(format!("decode prompt: {e}")))?;
+            self.resident.extend_from_slice(part);
+            position += part.len();
+            last_chunk = part.len() as i32;
+        }
+        Ok(last_chunk)
+    }
 }
 
 impl Engine for LlamaEngine<'_> {
     fn serve(
+        &mut self,
+        prompt: &str,
+        params: &SamplingParams,
+        sink: &mut dyn PieceSink,
+    ) -> Result<(), DomainError> {
+        let result = self.serve_inner(prompt, params, sink);
+        if result.is_err() {
+            // A failed decode may have left positions half written.
+            self.reset_cache();
+        }
+        result
+    }
+}
+
+impl LlamaEngine<'_> {
+    fn serve_inner(
         &mut self,
         prompt: &str,
         params: &SamplingParams,
@@ -81,6 +178,9 @@ impl Engine for LlamaEngine<'_> {
             .str_to_token(prompt, AddBos::Never)
             .map_err(|e| DomainError::LlmFailed(format!("tokenize prompt: {e}")))?;
 
+        if prompt_tokens.is_empty() {
+            return Err(DomainError::LlmFailed("prompt has no tokens".into()));
+        }
         let n_prompt = prompt_tokens.len() as i32;
         let n_max_total = n_prompt.saturating_add(params.max_tokens.min(i32::MAX as u32) as i32);
         if (n_max_total as u32) > loaded.n_ctx {
@@ -90,26 +190,25 @@ impl Engine for LlamaEngine<'_> {
             )));
         }
 
-        // Every request starts from an empty cache: the previous request's
-        // tokens must not leak into this one.
-        self.ctx.clear_kv_cache();
+        // Keep what the cache already holds of this prompt; the rest of the
+        // previous request's tokens must not leak into this one.
+        let reused = prepare_cache(&mut self.ctx, &mut self.resident, &prompt_tokens);
+        LAST_REUSED_TOKENS.store(reused, Ordering::Relaxed);
+        debug!(
+            reused,
+            decoded = prompt_tokens.len() - reused,
+            "prompt prefix reuse"
+        );
+        let last_chunk = self.decode_prompt(&prompt_tokens[reused..], reused)?;
 
-        let batch_capacity = prompt_tokens.len().max(INITIAL_BATCH_TOKENS);
-        let mut batch = LlamaBatch::new(batch_capacity, 1);
-        let last_index = (prompt_tokens.len() as i32) - 1;
-        for (i, token) in (0_i32..).zip(prompt_tokens) {
-            let is_last = i == last_index;
-            batch
-                .add(token, i, &[0], is_last)
-                .map_err(|e| DomainError::LlmFailed(format!("batch.add prompt: {e}")))?;
-        }
-        self.ctx
-            .decode(&mut batch)
-            .map_err(|e| DomainError::LlmFailed(format!("decode prompt: {e}")))?;
-
+        // Sampler state (penalty window, RNG) is per request.
         let mut sampler = build_sampler(params);
         let mut decoder = encoding_rs::UTF_8.new_decoder();
-        let mut n_cur = batch.n_tokens();
+        let mut batch = LlamaBatch::new(1, 1);
+        let mut n_cur = n_prompt;
+        // Logits live at the last index of the batch decoded most recently:
+        // the final prompt chunk first, then one-token generation batches.
+        let mut logits_index = last_chunk - 1;
         let mut n_decoded: u32 = 0;
         let max_new = params.max_tokens;
 
@@ -130,7 +229,7 @@ impl Engine for LlamaEngine<'_> {
                 return Ok(());
             }
 
-            let token = sampler.sample(&self.ctx, batch.n_tokens() - 1);
+            let token = sampler.sample(&self.ctx, logits_index);
             sampler.accept(token);
 
             if loaded.model.is_eog_token(token) {
@@ -161,6 +260,8 @@ impl Engine for LlamaEngine<'_> {
             self.ctx
                 .decode(&mut batch)
                 .map_err(|e| DomainError::LlmFailed(format!("decode step: {e}")))?;
+            self.resident.push(token);
+            logits_index = 0;
         }
 
         warn!(max_new, "hit max_tokens without an EOG/stop token");

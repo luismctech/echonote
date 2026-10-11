@@ -338,3 +338,130 @@ async fn chat_is_served_between_background_generate_calls() {
     assert!(!background.is_finished(), "background finished before chat");
     background.await.expect("background task");
 }
+
+/// Long shared system prompt so prompts built on it share a real prefix.
+fn shared_system() -> String {
+    let mut text = String::from("You are a careful meeting assistant. Meeting notes follow.\n");
+    for i in 0..40 {
+        text.push_str(&format!(
+            "Note {i}: the team reviewed milestone {i}, assigned an owner and set a date.\n"
+        ));
+    }
+    text
+}
+
+fn chatml_turns(system: &str, turns: &[(&str, Option<&str>)]) -> String {
+    let mut prompt = format!("<|im_start|>system\n{system}<|im_end|>\n");
+    for (user, answer) in turns {
+        prompt.push_str(&format!("<|im_start|>user\n{user} /no_think<|im_end|>\n"));
+        prompt.push_str("<|im_start|>assistant\n");
+        if let Some(answer) = answer {
+            prompt.push_str(&format!("{answer}<|im_end|>\n"));
+        }
+    }
+    prompt
+}
+
+fn load_small() -> Option<LlamaCppLlm> {
+    let model_path = model_from_env()?;
+    Some(
+        LlamaCppLlm::load_with(
+            &model_path,
+            LoadOptions::default().with_n_ctx(4_096).with_n_threads(4),
+        )
+        .expect("load gguf"),
+    )
+}
+
+/// A prompt that partially overlaps the one left in the KV cache must
+/// produce byte-identical greedy output to the same prompt on a fresh
+/// worker with an empty cache.
+#[tokio::test]
+#[ignore = "requires ECHO_LLM_MODEL to point at a .gguf file"]
+async fn prefix_reuse_matches_a_cold_cache() {
+    let Some(warm) = load_small() else {
+        eprintln!("skipping: ECHO_LLM_MODEL not set");
+        return;
+    };
+    let system = shared_system();
+    let target = chatml_turns(&system, &[("Which milestone has the latest date?", None)]);
+    let other = chatml_turns(&system, &[("Summarise note 3 in one sentence.", None)]);
+
+    // (a) cold: a fresh worker, empty cache.
+    let cold_llm = load_small().expect("model");
+    let cold = cold_llm
+        .generate(&target, &greedy_options(48))
+        .await
+        .expect("cold");
+    assert_eq!(echo_llm::last_reused_tokens(), 0, "cold run reuses nothing");
+
+    // (b) warm: a different prompt first, so the cache holds an
+    // overlapping prefix (the shared system prompt).
+    warm.generate(&other, &greedy_options(48))
+        .await
+        .expect("other");
+    let reused_other = echo_llm::last_reused_tokens();
+    let hot = warm
+        .generate(&target, &greedy_options(48))
+        .await
+        .expect("warm");
+    let reused = echo_llm::last_reused_tokens();
+    eprintln!(
+        "[prefix] reused {reused} of {} tokens",
+        warm.count_tokens(&target)
+    );
+    eprintln!("[prefix] cold {cold:?}\n[prefix] warm {hot:?}");
+    assert_eq!(reused_other, 0, "first request on a fresh worker");
+    assert!(
+        reused > 100,
+        "shared system prompt should be reused: {reused}"
+    );
+    assert!(!cold.trim().is_empty());
+    assert_eq!(cold, hot, "prefix reuse changed the greedy output");
+
+    // An identical repeat reuses everything but the last token.
+    let again = warm
+        .generate(&target, &greedy_options(48))
+        .await
+        .expect("repeat");
+    assert_eq!(
+        echo_llm::last_reused_tokens(),
+        warm.count_tokens(&target) - 1
+    );
+    assert_eq!(again, cold);
+}
+
+/// Chat turn 2 (turn 1 prompt + its answer + a new user message) reuses at
+/// least the whole turn 1 prompt and answers exactly like a cold run.
+#[tokio::test]
+#[ignore = "requires ECHO_LLM_MODEL to point at a .gguf file"]
+async fn chat_turn_two_reuses_turn_one_and_matches_a_cold_run() {
+    let Some(llm) = load_small() else {
+        eprintln!("skipping: ECHO_LLM_MODEL not set");
+        return;
+    };
+    let system = shared_system();
+    let q1 = "Which milestone has the latest date?";
+    let p1 = chatml_turns(&system, &[(q1, None)]);
+    let a1 = llm
+        .generate(&p1, &greedy_options(48))
+        .await
+        .expect("turn 1");
+    let p2 = chatml_turns(&system, &[(q1, Some(&a1)), ("Who owns it?", None)]);
+    let n1 = llm.count_tokens(&p1);
+
+    let warm = llm
+        .generate(&p2, &greedy_options(48))
+        .await
+        .expect("turn 2");
+    let reused = echo_llm::last_reused_tokens();
+    eprintln!("[chat] turn 1 prompt {n1} tokens, turn 2 reused {reused}");
+    assert!(reused >= n1, "turn 2 reused {reused} < turn 1 prompt {n1}");
+
+    let cold_llm = load_small().expect("model");
+    let cold = cold_llm
+        .generate(&p2, &greedy_options(48))
+        .await
+        .expect("cold turn 2");
+    assert_eq!(warm, cold, "prefix reuse changed the turn 2 output");
+}

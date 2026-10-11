@@ -57,7 +57,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use futures::stream::{self, BoxStream, StreamExt};
+use futures::stream::BoxStream;
 use tokio::sync::mpsc;
 use tracing::{debug, info, instrument};
 
@@ -65,7 +65,9 @@ use echo_domain::{ChatAssistant, ChatMessage, ChatRequest, ChatRole, ChatToken, 
 
 use crate::llama_cpp::{LlamaCppLlm, LoadOptions};
 use crate::shared::SharedModel;
-use crate::worker::{Cancel, Flow, Job, Outlet, PieceSink, Priority, SamplingParams, Sink};
+use crate::worker::{
+    drain_stream, Cancel, Flow, Job, Outlet, PieceSink, Priority, SamplingParams, Sink,
+};
 
 /// mpsc buffer between the (blocking) decoder and the (async) IPC
 /// consumer. Large enough that a small Tauri Channel hiccup does not
@@ -170,22 +172,20 @@ impl ChatAssistant for LlamaCppChat {
         // ---- queue the decode on the worker + bridge it to a stream -----
         // Decoder failures travel through the channel as the final item.
         let (tx, rx) = mpsc::channel::<Result<ChatToken, DomainError>>(STREAM_BUFFER);
+        let out = Outlet::new(tx);
+        // Wrap the receiver as a `BoxStream` (no `tokio_stream` needed); a
+        // consumer that stalled and was cut off gets an error item at the
+        // end instead of a clean completion.
+        let stream = drain_stream(rx, out.stall_mark());
         self.inner.submit(Job {
             priority: Priority::Interactive,
             prompt,
             params: SamplingParams::from_chat(&request.options),
             sink: Box::new(ChatSink {
                 state: StreamState::new(request.options.stop.clone()),
-                out: Outlet::new(tx),
+                out,
             }),
         })?;
-
-        // Wrap the receiver as a `BoxStream`. Using `unfold` instead
-        // of pulling in `tokio_stream` keeps the dep tree slim.
-        let stream = stream::unfold(rx, |mut rx| async move {
-            rx.recv().await.map(|item| (item, rx))
-        })
-        .boxed();
         Ok(stream)
     }
 }
