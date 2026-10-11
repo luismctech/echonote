@@ -146,6 +146,34 @@ fn model_catalog(root: &std::path::Path) -> Vec<(ModelInfo, &'static str, Option
             "https://huggingface.co/Qwen/Qwen3-4B-GGUF/resolve/main/Qwen3-4B-Q4_K_M.gguf",
             Some("7485fe6f11af29433bc51cab58009521f205840f5b4ae3a32fa7f92e8534fdf5"),
         ),
+        // Gemma 4 (Google, Apache 2.0) QAT q4_0 builds. Offered next to Qwen;
+        // never the default, only used once the user selects one. RAM figures
+        // are estimates (weights + ~8K-token KV cache), not measurements.
+        (
+            ModelInfo {
+                id: "llm-gemma4-e4b".into(),
+                label: "Gemma 4 E4B".into(),
+                description: "Compact Google model · about 7 GB RAM in use".into(),
+                kind: "llm".into(),
+                present: present("models/llm/gemma-4-E4B-it-qat-q4_0.gguf"),
+                size_bytes: 5_154_941_280,
+            },
+            "https://huggingface.co/google/gemma-4-E4B-it-qat-q4_0-gguf/resolve/main/gemma-4-E4B_q4_0-it.gguf",
+            Some("676c35070db6dbe52f93e9c864ee0fba4eddea94b9c875d9cb10daff453fbaee"),
+        ),
+        (
+            ModelInfo {
+                id: "llm-gemma4-12b".into(),
+                label: "Gemma 4 12B".into(),
+                description: "Large Google model · about 10 GB RAM in use, 24 GB or more recommended"
+                    .into(),
+                kind: "llm".into(),
+                present: present("models/llm/gemma-4-12B-it-qat-q4_0.gguf"),
+                size_bytes: 6_975_879_296,
+            },
+            "https://huggingface.co/google/gemma-4-12B-it-qat-q4_0-gguf/resolve/main/gemma-4-12b-it-qat-q4_0.gguf",
+            Some("93567e57a8fe10b23569b9d9ec38cd005deedf71e29477c421a4b83f418a538b"),
+        ),
         (
             ModelInfo {
                 id: "vad-silero".into(),
@@ -223,6 +251,8 @@ fn model_dest_path(id: &str) -> Option<&'static str> {
         "llm-qwen3-14b" => Some("models/llm/Qwen3-14B-Q4_K_M.gguf"),
         "llm-qwen3-8b" => Some("models/llm/Qwen3-8B-Q4_K_M.gguf"),
         "llm-qwen3-4b" => Some("models/llm/Qwen3-4B-Q4_K_M.gguf"),
+        "llm-gemma4-e4b" => Some("models/llm/gemma-4-E4B-it-qat-q4_0.gguf"),
+        "llm-gemma4-12b" => Some("models/llm/gemma-4-12B-it-qat-q4_0.gguf"),
         "vad-silero" => Some("models/vad/silero_vad.onnx"),
         "embedder-eres2net" => Some("models/embedder/eres2net_en_voxceleb.onnx"),
         "embedder-camplusplus" => Some("models/embedder/campplus_en_voxceleb.onnx"),
@@ -690,4 +720,147 @@ pub fn get_active_asr(state: State<'_, AppState>) -> Option<String> {
         return None;
     }
     super::path_to_catalog_id(&path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::path::PathBuf;
+
+    /// Fresh empty directory under the system temp dir, removed on drop.
+    struct TempRoot(PathBuf);
+
+    impl TempRoot {
+        fn new(name: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "echonote-models-{name}-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_nanos())
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+    }
+
+    impl Drop for TempRoot {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn entry(id: &str) -> (ModelInfo, &'static str, Option<&'static str>) {
+        model_catalog(std::path::Path::new("/nonexistent"))
+            .into_iter()
+            .find(|(info, _, _)| info.id == id)
+            .unwrap_or_else(|| panic!("catalog has no {id}"))
+    }
+
+    #[test]
+    fn gemma4_e4b_points_at_the_pinned_qat_file() {
+        let (info, url, sha) = entry("llm-gemma4-e4b");
+        assert_eq!(info.kind, "llm");
+        assert_eq!(info.size_bytes, 5_154_941_280);
+        assert_eq!(
+            url,
+            "https://huggingface.co/google/gemma-4-E4B-it-qat-q4_0-gguf/resolve/main/gemma-4-E4B_q4_0-it.gguf"
+        );
+        assert_eq!(
+            sha,
+            Some("676c35070db6dbe52f93e9c864ee0fba4eddea94b9c875d9cb10daff453fbaee")
+        );
+        assert_eq!(
+            model_dest_path("llm-gemma4-e4b"),
+            Some("models/llm/gemma-4-E4B-it-qat-q4_0.gguf")
+        );
+    }
+
+    #[test]
+    fn gemma4_12b_points_at_the_pinned_qat_file() {
+        let (info, url, sha) = entry("llm-gemma4-12b");
+        assert_eq!(info.kind, "llm");
+        assert_eq!(info.size_bytes, 6_975_879_296);
+        assert_eq!(
+            url,
+            "https://huggingface.co/google/gemma-4-12B-it-qat-q4_0-gguf/resolve/main/gemma-4-12b-it-qat-q4_0.gguf"
+        );
+        assert_eq!(
+            sha,
+            Some("93567e57a8fe10b23569b9d9ec38cd005deedf71e29477c421a4b83f418a538b")
+        );
+        assert_eq!(
+            model_dest_path("llm-gemma4-12b"),
+            Some("models/llm/gemma-4-12B-it-qat-q4_0.gguf")
+        );
+    }
+
+    #[test]
+    fn every_llm_entry_can_be_selected_with_set_active_llm() {
+        // `set_active_llm` needs a destination path and an `llm-` id.
+        let llms: Vec<_> = model_catalog(std::path::Path::new("/nonexistent"))
+            .into_iter()
+            .map(|(info, _, _)| info)
+            .filter(|info| info.kind == "llm")
+            .collect();
+        let ids: Vec<&str> = llms.iter().map(|i| i.id.as_str()).collect();
+        for id in [
+            "llm-qwen3-14b",
+            "llm-qwen3-8b",
+            "llm-qwen3-4b",
+            "llm-gemma4-e4b",
+            "llm-gemma4-12b",
+        ] {
+            assert!(ids.contains(&id), "{id} missing from {ids:?}");
+        }
+        for info in &llms {
+            assert!(info.id.starts_with("llm-"), "{}", info.id);
+            assert!(model_dest_path(&info.id).is_some(), "{}", info.id);
+        }
+    }
+
+    #[test]
+    fn catalog_destinations_agree_with_presence_and_the_reverse_lookup() {
+        let root = TempRoot::new("dest");
+        let ids: Vec<String> = model_catalog(&root.0)
+            .into_iter()
+            .map(|(info, _, _)| info.id)
+            .collect();
+        for id in &ids {
+            let rel = model_dest_path(id).unwrap_or_else(|| panic!("no dest for {id}"));
+            let path = root.0.join(rel);
+            // Not downloaded yet.
+            let before = model_catalog(&root.0)
+                .into_iter()
+                .find(|(info, _, _)| &info.id == id)
+                .unwrap();
+            assert!(!before.0.present, "{id}");
+            // Dropping the file at its destination marks it present...
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, b"x").unwrap();
+            let after = model_catalog(&root.0)
+                .into_iter()
+                .find(|(info, _, _)| &info.id == id)
+                .unwrap();
+            assert!(after.0.present, "{id}");
+            // ...and the active-model getters can name it again.
+            assert_eq!(
+                super::super::path_to_catalog_id(&path).as_deref(),
+                Some(id.as_str())
+            );
+        }
+    }
+
+    #[test]
+    fn catalog_ids_are_unique() {
+        let ids: Vec<String> = model_catalog(std::path::Path::new("/nonexistent"))
+            .into_iter()
+            .map(|(info, _, _)| info.id)
+            .collect();
+        let mut sorted = ids.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(sorted.len(), ids.len(), "{ids:?}");
+    }
 }

@@ -682,6 +682,11 @@ fn preferred_llm_model(root: &Path) -> &'static str {
         "models/llm/Qwen3-4B-Q4_K_M.gguf",
         "models/llm/qwen2.5-7b-instruct-q4_k_m.gguf",
         "models/llm/qwen2.5-3b-instruct-q4_k_m.gguf",
+        // Gemma 4 comes last on purpose: it is only ever used when the user
+        // selected it (a persisted preference) or nothing else is installed,
+        // so installing it never changes the Qwen default.
+        "models/llm/gemma-4-12B-it-qat-q4_0.gguf",
+        "models/llm/gemma-4-E4B-it-qat-q4_0.gguf",
     ];
     // Honour persisted preference if present and still downloaded.
     if let Some(pref_path) = load_preference(root, "llm") {
@@ -814,6 +819,8 @@ pub(crate) fn path_to_catalog_id(path: &Path) -> Option<String> {
         "Qwen3-14B-Q4_K_M.gguf" => "llm-qwen3-14b",
         "Qwen3-8B-Q4_K_M.gguf" => "llm-qwen3-8b",
         "Qwen3-4B-Q4_K_M.gguf" => "llm-qwen3-4b",
+        "gemma-4-E4B-it-qat-q4_0.gguf" => "llm-gemma4-e4b",
+        "gemma-4-12B-it-qat-q4_0.gguf" => "llm-gemma4-12b",
         "silero_vad.onnx" => "vad-silero",
         "eres2net_en_voxceleb.onnx" => "embedder-eres2net",
         "campplus_en_voxceleb.onnx" => "embedder-camplusplus",
@@ -870,4 +877,92 @@ pub(crate) async fn save_preference(root: &Path, key: &str, value: &str) -> Resu
         .await
         .map_err(|e| IpcError::storage(format!("failed to write preferences: {e}")))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod llm_selection_tests {
+    use super::*;
+
+    const QWEN_4B: &str = "models/llm/Qwen3-4B-Q4_K_M.gguf";
+    const QWEN_14B: &str = "models/llm/Qwen3-14B-Q4_K_M.gguf";
+    const GEMMA_E4B: &str = "models/llm/gemma-4-E4B-it-qat-q4_0.gguf";
+    const GEMMA_12B: &str = "models/llm/gemma-4-12B-it-qat-q4_0.gguf";
+
+    /// Fresh empty data root under the system temp dir, removed on drop.
+    struct Root(PathBuf);
+
+    impl Root {
+        fn new(name: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "echonote-llm-{name}-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_nanos())
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+
+        fn install(&self, rel: &str) {
+            let path = self.0.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"x").unwrap();
+        }
+
+        fn prefer(&self, rel: &str) {
+            std::fs::write(
+                self.0.join("model_preferences.json"),
+                format!("{{\"llm\":\"{rel}\"}}"),
+            )
+            .unwrap();
+        }
+    }
+
+    impl Drop for Root {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn nothing_installed_keeps_the_qwen_14b_default() {
+        let root = Root::new("none");
+        assert_eq!(preferred_llm_model(&root.0), QWEN_14B);
+    }
+
+    #[test]
+    fn qwen_wins_over_gemma_when_the_user_has_not_chosen() {
+        let root = Root::new("default");
+        root.install(GEMMA_12B);
+        root.install(GEMMA_E4B);
+        root.install(QWEN_4B);
+        assert_eq!(preferred_llm_model(&root.0), QWEN_4B);
+    }
+
+    #[test]
+    fn gemma_is_used_when_selected_and_still_downloaded() {
+        for gemma in [GEMMA_E4B, GEMMA_12B] {
+            let root = Root::new("chosen");
+            root.install(QWEN_4B);
+            root.install(gemma);
+            root.prefer(gemma);
+            assert_eq!(preferred_llm_model(&root.0), gemma);
+        }
+    }
+
+    #[test]
+    fn a_selected_gemma_that_was_deleted_falls_back_to_what_is_installed() {
+        let root = Root::new("deleted");
+        root.install(QWEN_4B);
+        root.prefer(GEMMA_12B);
+        assert_eq!(preferred_llm_model(&root.0), QWEN_4B);
+    }
+
+    #[test]
+    fn gemma_alone_is_better_than_no_model() {
+        let root = Root::new("only-gemma");
+        root.install(GEMMA_E4B);
+        assert_eq!(preferred_llm_model(&root.0), GEMMA_E4B);
+    }
 }

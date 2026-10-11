@@ -24,6 +24,15 @@
 //! | llm-qwen3-4b Q4_K_M   |  3.0 GB           |
 //! | llm-qwen3-8b Q4_K_M   |  5.5 GB           |
 //! | llm-qwen3-14b Q4_K_M  |  9.5 GB           |
+//! | llm-gemma4-e4b QAT q4_0 |  ~7 GB (estimate) |
+//! | llm-gemma4-12b QAT q4_0 | ~10 GB (estimate) |
+//!
+//! The Gemma 4 figures are estimates, not measurements: weights (5.2 GB and
+//! 7.0 GB on disk) plus an 8K-token f16 KV cache (the 12B keeps the full
+//! sliding-window cache, ~2.8 GB, so cached prompt prefixes stay valid).
+//! Gemma models are opt-in alternatives the user picks in the Models panel;
+//! the recommendation below only ever suggests Qwen. Measured RSS belongs
+//! here once the real-model validation has been run.
 
 use serde::Serialize;
 
@@ -310,5 +319,44 @@ fn recommend(ram_gb: u64, hw: &HardwareProfile) -> (ModelPick, Option<ModelPick>
                 )
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn profile(ram_gb: u64, apple: bool) -> HardwareProfile {
+        HardwareProfile {
+            total_ram_bytes: ram_gb * GB,
+            available_ram_bytes: ram_gb * GB / 2,
+            cpu_cores: 8,
+            cpu_brand: if apple { "Apple M1 Pro" } else { "Intel Core" }.into(),
+            gpu_name: "GPU".into(),
+            gpu_max_working_set: if apple { ram_gb * GB * 2 / 3 } else { 0 },
+            unified_memory: apple,
+        }
+    }
+
+    #[test]
+    fn the_recommended_llm_stays_a_qwen_model_at_every_ram_size() {
+        for ram_gb in [4, 8, 12, 16, 24, 32, 64] {
+            for apple in [true, false] {
+                let (_, llm, _) = recommend(ram_gb, &profile(ram_gb, apple));
+                if let Some(pick) = llm {
+                    assert!(
+                        pick.model_id.starts_with("llm-qwen3-"),
+                        "{ram_gb} GB apple={apple}: {}",
+                        pick.model_id
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_16_gb_apple_silicon_default_is_still_qwen_8b() {
+        let (_, llm, _) = recommend(16, &profile(16, true));
+        assert_eq!(llm.unwrap().model_id, "llm-qwen3-8b");
     }
 }

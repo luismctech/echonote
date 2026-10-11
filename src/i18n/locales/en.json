@@ -177,6 +177,8 @@
       "llm-qwen3-14b": "Detailed summaries · requires 16 GB RAM",
       "llm-qwen3-8b": "Good quality/speed balance",
       "llm-qwen3-4b": "For devices with less than 8 GB RAM",
+      "llm-gemma4-e4b": "Compact Google model · about 7 GB RAM in use",
+      "llm-gemma4-12b": "Large Google model · about 10 GB RAM in use, 24 GB or more recommended",
       "vad-silero": "Detects when someone is speaking",
       "embedder-eres2net": "Speaker identification · general purpose",
       "embedder-camplusplus": "Speaker identification · ideal for Spanish",
