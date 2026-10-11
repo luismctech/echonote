@@ -69,15 +69,18 @@ pub(crate) const CONTEXT_IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 /// Qwen 3's reasoning block.
 const THINK_OPEN: &str = "<think>";
 const THINK_CLOSE: &str = "</think>";
-/// Gemma 4's channel: `<|channel>NAME\n…<channel|>`. The `thought` channel
-/// is reasoning; any other named channel carries user-facing text.
+/// Gemma 4's channel: `<|channel>NAME\n…<channel|>`. Reasoning channels are
+/// hidden; any other named channel (including `final`, the visible answer)
+/// carries user-facing text.
 const CHANNEL_OPEN: &str = "<|channel>";
 const CHANNEL_CLOSE: &str = "<channel|>";
-/// Channel names (lowercase) whose content is reasoning and never shown.
-const REASONING_CHANNELS: &[&str] = &["thought", "thinking", "reasoning"];
-/// A channel header (`NAME` up to a newline) longer than this is not waited
-/// for: the stream is treated as a plain channel so text is never held back
-/// indefinitely.
+/// Channel names (lowercase) whose content is reasoning and never shown:
+/// Gemma's `thought`, gpt-oss/harmony's `analysis`, and generic spellings.
+const REASONING_CHANNELS: &[&str] = &["thought", "thinking", "reasoning", "analysis"];
+/// A channel header (`NAME` up to a newline or closing marker) longer than
+/// this is not a name: the channel is treated as plain text so nothing is
+/// held back indefinitely. Applied to the name's length alone, never to how
+/// much has arrived, so the outcome is the same for any chunking.
 const MAX_CHANNEL_NAME: usize = 32;
 
 /// Message of the error for a reply that ended inside a reasoning block
@@ -222,14 +225,21 @@ impl ReasoningFilter {
             (Some(n), _) => (n, 1, false),
             (None, Some(c)) => (c, CHANNEL_CLOSE.len(), true),
             (None, None) => {
-                if self.pending.len() > MAX_CHANNEL_NAME {
-                    // No name line: keep what follows as channel text.
+                // A closing marker starting within the budget is complete once
+                // this many bytes have arrived, so deciding earlier would
+                // depend on where the pieces split.
+                if self.pending.len() > MAX_CHANNEL_NAME + CHANNEL_CLOSE.len() {
                     self.mode = Mode::Channel;
                     return true;
                 }
                 return false;
             }
         };
+        if end > MAX_CHANNEL_NAME {
+            // Not a name: keep everything after `<|channel>` as channel text.
+            self.mode = Mode::Channel;
+            return true;
+        }
         let name = self.pending[..end].trim().to_lowercase();
         self.pending.drain(..end + skip);
         let reasoning = REASONING_CHANNELS.contains(&name.as_str());
@@ -937,6 +947,69 @@ mod tests {
         let long = "x".repeat(200);
         let text = filter_text(&[&format!("<|channel>{long}"), " tail"]);
         assert!(text.ends_with(" tail"), "{text:?}");
+    }
+
+    /// A reply through a fresh filter in the given pieces: the visible text
+    /// or the error message.
+    fn run_pieces(pieces: &[&str]) -> Result<String, String> {
+        let mut f = ReasoningFilter::new();
+        let mut out = String::new();
+        for p in pieces {
+            out.push_str(&f.push(p));
+        }
+        f.finish().map(|t| out + &t).map_err(|e| e.to_string())
+    }
+
+    #[test]
+    fn filter_output_does_not_depend_on_how_the_reply_is_chunked() {
+        let long = "x".repeat(40);
+        let mut replies: Vec<String> = vec![
+            "<|channel>thought\nplan<channel|>Answer".into(),
+            "<|channel>analysis\nplan<channel|>Answer".into(),
+            "<|channel>final\nAnswer<channel|> tail".into(),
+            "Hi <|channel>thought\nplan<channel|>A <think>b</think>C".into(),
+            format!("<|channel>{long}\nbody<channel|> tail"),
+            format!("<|channel>{long} no newline here at all"),
+            "<|channel>thought\ncut".into(),
+        ];
+        // Names around the budget, ended by a newline or directly by a close.
+        for len in 28..=45 {
+            let name = "y".repeat(len);
+            replies.push(format!("<|channel>{name}\nbody<channel|> t"));
+            replies.push(format!("<|channel>{name}<channel|>t"));
+        }
+        for reply in &replies {
+            let whole = run_pieces(&[reply]);
+            let chars: Vec<String> = reply.chars().map(String::from).collect();
+            let chars: Vec<&str> = chars.iter().map(String::as_str).collect();
+            assert_eq!(run_pieces(&chars), whole, "per-char: {reply:?}");
+            for at in (0..=reply.len()).filter(|&i| reply.is_char_boundary(i)) {
+                let (a, b) = reply.split_at(at);
+                assert_eq!(run_pieces(&[a, b]), whole, "split {at}: {reply:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn filter_treats_an_over_long_channel_name_as_a_plain_channel_even_with_a_newline() {
+        let long = "x".repeat(40);
+        let text = run_pieces(&[&format!("<|channel>{long}\nbody<channel|>!")]).unwrap();
+        assert_eq!(text, format!("{long}\nbody!"));
+    }
+
+    #[test]
+    fn filter_suppresses_a_harmony_analysis_channel_and_keeps_final_and_commentary() {
+        // `thought` is Gemma's reasoning channel, `analysis` gpt-oss/harmony's.
+        assert_eq!(
+            filter_text(&["<|channel>analysis\nplan<channel|>Hola"]),
+            "Hola"
+        );
+        // `final` is the visible answer channel; `commentary` is not reasoning.
+        assert_eq!(filter_text(&["<|channel>final\nHola<channel|>"]), "Hola");
+        assert_eq!(
+            filter_text(&["<|channel>commentary\nHola<channel|>"]),
+            "Hola"
+        );
     }
 
     #[test]
