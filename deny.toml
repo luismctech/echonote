@@ -1,0 +1,55 @@
+# cargo-deny configuration — supply-chain policy for the Cargo workspace.
+# Run locally: `cargo deny check advisories bans licenses sources`.
+# CI runs the same four checks (see .github/workflows/ci.yml, job `cargo-deny`).
+# Complements .cargo/audit.toml (cargo audit), which keeps its own ignore list.
+
+[advisories]
+# Fail on vulnerabilities and unmaintained crates; yanked releases (spin 0.9.8) only warn.
+yanked = "warn"
+ignore = [
+    # Only advisories that cargo-deny actually matches in this graph are listed (it warns on
+    # stale entries). Advisories ignored in .cargo/audit.toml but not matched here (rsa via
+    # sqlx-mysql, GTK3 bindings, fxhash, glib, rand 0.7) are not triggered by cargo-deny.
+    "RUSTSEC-2024-0370", # proc-macro-error — unmaintained, transitive via Tauri/GTK macros
+    "RUSTSEC-2024-0436", # paste — unmaintained, transitive via Tauri and tract
+    "RUSTSEC-2026-0319", # anymap2 — unmaintained, transitive; no safe upgrade available
+]
+
+[licenses]
+# Allow-list derived from the actual dependency graph (cargo deny list, 2026-10-11).
+allow = [
+    "0BSD",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "BlueOak-1.0.0",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MIT",
+    "MIT-0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+    # Weak (file-level) copyleft: cssparser, cssparser-macros, selectors, dtoa-short,
+    # option-ext. Linked unmodified; MPL-2.0 only obliges sharing changes to those files.
+    "MPL-2.0",
+    # The workspace's own crates (see LICENSE).
+    "LicenseRef-PolyForm-Noncommercial-1.0.0",
+]
+# Note: r-efi is `MIT OR Apache-2.0 OR LGPL-2.1-or-later`; cargo-deny satisfies the
+# expression through MIT, so LGPL is intentionally NOT in the allow-list.
+
+[bans]
+# Duplicate versions are common in the Tauri/windows-sys ecosystem; report, don't fail.
+multiple-versions = "warn"
+wildcards = "allow"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# No git dependencies are used (Cargo.lock has none).
+allow-git = []

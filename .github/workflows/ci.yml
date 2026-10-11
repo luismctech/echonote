@@ -1,11 +1,13 @@
 # -----------------------------------------------------------------------------
 # EchoNote — Continuous Integration
 # -----------------------------------------------------------------------------
-# Runs on every push and PR. Three parallel jobs:
+# Runs on every push and PR. Parallel jobs:
 #
 #   1. fmt       — rustfmt --check (fast, fails early)
 #   2. macos     — full pipeline: clippy + tests + build on Apple Silicon
 #   3. linux     — `cargo check` only, to catch platform-specific drift early
+#   4. audit     — cargo audit + pnpm audit
+#   5. cargo-deny — supply-chain policy (deny.toml): advisories, bans, licenses, sources
 #
 # Phase 0 runs macOS-only as the primary dev target. Linux and Windows get
 # full pipelines in Phase 1 (weeks 12-15).
@@ -227,3 +229,20 @@ jobs:
 
     - name: pnpm audit
       run: pnpm audit --prod || true
+
+  # ---------------------------------------------------------------------------
+  # cargo-deny — supply-chain policy from deny.toml (advisories, bans,
+  # licenses, sources). Runs on its own; does not need a build.
+  # ---------------------------------------------------------------------------
+  cargo-deny:
+    name: cargo-deny
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+    - name: Checkout
+      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+    - name: cargo deny check
+      uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+      with:
+        command: check advisories bans licenses sources
