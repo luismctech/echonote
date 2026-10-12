@@ -38,6 +38,9 @@ pub struct OnlineDiarizer {
     /// before embedding, improving accuracy when multiple speakers
     /// alternate within a single VAD chunk.
     segmenter: Option<Box<dyn Segmenter>>,
+    /// Configuration [`Diarizer::refine_offline`] runs the offline pass
+    /// with. Set by [`Self::with_offline_refinement_config`].
+    refine_config: OfflineRefineConfig,
 }
 
 impl OnlineDiarizer {
@@ -52,6 +55,7 @@ impl OnlineDiarizer {
             cluster: OnlineCluster::new(cluster_config),
             embedding_log: None,
             segmenter: None,
+            refine_config: OfflineRefineConfig::default(),
         }
     }
 
@@ -88,6 +92,16 @@ impl OnlineDiarizer {
     pub fn with_offline_refinement(mut self) -> Self {
         self.embedding_log = Some(Vec::new());
         self
+    }
+
+    /// Like [`Self::with_offline_refinement`], but the end-of-session
+    /// pass behind [`Diarizer::refine_offline`] uses `config` instead of
+    /// [`OfflineRefineConfig::default`]. Per-embedder values live in
+    /// [`crate::EmbedderFamily::refine_config`].
+    #[must_use]
+    pub fn with_offline_refinement_config(mut self, config: OfflineRefineConfig) -> Self {
+        self.refine_config = config;
+        self.with_offline_refinement()
     }
 
     /// Run the offline AHC refinement pass over all accumulated
@@ -233,7 +247,7 @@ impl Diarizer for OnlineDiarizer {
         // Forward to the inherent helper, which checks whether
         // [`with_offline_refinement`] was opted into. When it wasn't
         // (embedding_log is None) the helper returns an empty vec.
-        self.refine_offline_default()
+        self.refine_offline(self.refine_config)
     }
 }
 
@@ -358,5 +372,31 @@ mod tests {
     async fn sample_rate_is_derived_from_embedder() {
         let d = OnlineDiarizer::with_defaults(Box::new(StubEmbedder::new()));
         assert_eq!(d.sample_rate_hz(), 16_000);
+    }
+
+    /// Two orthogonal speakers, two chunks each, logged for refinement.
+    async fn two_logged_speakers(d: &mut OnlineDiarizer) {
+        for s in [0.001_f32, 0.002, 0.001, 0.002] {
+            d.assign(&chunk(s)).await.unwrap();
+        }
+        assert_eq!(d.speakers().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn port_refinement_uses_the_configured_threshold() {
+        // Orthogonal speakers have average-linkage cosine 0: the default
+        // threshold keeps them apart, a negative one merges them.
+        let mut lenient = OnlineDiarizer::with_defaults(Box::new(StubEmbedder::new()))
+            .with_offline_refinement_config(OfflineRefineConfig {
+                merge_threshold: -0.5,
+                ..OfflineRefineConfig::default()
+            });
+        two_logged_speakers(&mut lenient).await;
+        assert_eq!(Diarizer::refine_offline(&lenient).len(), 1);
+
+        let mut default =
+            OnlineDiarizer::with_defaults(Box::new(StubEmbedder::new())).with_offline_refinement();
+        two_logged_speakers(&mut default).await;
+        assert!(Diarizer::refine_offline(&default).is_empty());
     }
 }

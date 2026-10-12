@@ -2,13 +2,10 @@
 //! offline benchmarks.
 //!
 //! The embedder family is chosen from the model file name and decides
-//! both the adapter to load and the online clustering thresholds, so a
-//! benchmark run scores exactly the configuration the app would build.
-//!
-//! The values mirror `build_diarizer` in `src-tauri/src/commands/mod.rs`
-//! (CAM++ 0.85 with online merging disabled, ERes2Net 0.65). That
-//! function still inlines them; switching it to
-//! [`EmbedderFamily::cluster_config`] removes the duplication.
+//! the adapter to load, the online clustering thresholds and the offline
+//! refinement threshold. `build_diarizer` in `src-tauri` and
+//! `echo-proto bench der` both build their diarizer from here, so a
+//! benchmark run scores exactly the configuration the app builds.
 
 use std::path::Path;
 
@@ -18,22 +15,31 @@ use crate::cam_plus_plus::CamPlusPlusEmbedder;
 use crate::cluster::OnlineClusterConfig;
 use crate::embedding::SpeakerEmbedder;
 use crate::eres2net::Eres2NetEmbedder;
+use crate::offline_refine::OfflineRefineConfig;
 
 /// Speaker embedder families the app knows how to load.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EmbedderFamily {
-    /// 3D-Speaker CAM++ (EN VoxCeleb 512-dim or multilingual 192-dim).
+    /// 3D-Speaker CAM++ trained on zh + en ("common advanced", 192-dim).
+    /// The app's recommended embedder.
+    CamPlusPlusMultilingual,
+    /// 3D-Speaker CAM++ trained on EN VoxCeleb (512-dim).
     CamPlusPlus,
     /// 3D-Speaker ERes2Net (EN VoxCeleb, 192-dim). Fallback family.
     Eres2Net,
 }
 
 impl EmbedderFamily {
-    /// Family implied by a model file name: names containing
-    /// `camplusplus` or `campplus` are CAM++, everything else ERes2Net.
+    /// Family implied by a model file name: CAM++ names (`camplusplus`
+    /// or `campplus`) that also contain `zh_en` or `multi` are the
+    /// multilingual CAM++, other CAM++ names the EN CAM++, everything
+    /// else ERes2Net.
     #[must_use]
     pub fn from_file_name(file_name: &str) -> Self {
-        if file_name.contains("camplusplus") || file_name.contains("campplus") {
+        let cam = file_name.contains("camplusplus") || file_name.contains("campplus");
+        if cam && (file_name.contains("zh_en") || file_name.contains("multi")) {
+            Self::CamPlusPlusMultilingual
+        } else if cam {
             Self::CamPlusPlus
         } else {
             Self::Eres2Net
@@ -53,7 +59,7 @@ impl EmbedderFamily {
     #[must_use]
     pub fn default_similarity_threshold(self) -> f32 {
         match self {
-            Self::CamPlusPlus => 0.85,
+            Self::CamPlusPlusMultilingual | Self::CamPlusPlus => 0.85,
             Self::Eres2Net => 0.65,
         }
     }
@@ -69,7 +75,7 @@ impl EmbedderFamily {
         let similarity_threshold =
             similarity_threshold.unwrap_or_else(|| self.default_similarity_threshold());
         match self {
-            Self::CamPlusPlus => OnlineClusterConfig {
+            Self::CamPlusPlusMultilingual | Self::CamPlusPlus => OnlineClusterConfig {
                 similarity_threshold,
                 merge_threshold: 1.0,
                 ..OnlineClusterConfig::default()
@@ -81,6 +87,12 @@ impl EmbedderFamily {
         }
     }
 
+    /// End-of-session offline refinement configuration for this family.
+    #[must_use]
+    pub fn refine_config(self) -> OfflineRefineConfig {
+        OfflineRefineConfig::default()
+    }
+
     /// Load the embedder adapter for this family from `path`.
     ///
     /// # Errors
@@ -88,7 +100,9 @@ impl EmbedderFamily {
     /// Propagates the adapter's load error (missing file, bad graph).
     pub fn load(self, path: &Path) -> Result<Box<dyn SpeakerEmbedder>, DomainError> {
         Ok(match self {
-            Self::CamPlusPlus => Box::new(CamPlusPlusEmbedder::new(path)?),
+            Self::CamPlusPlusMultilingual | Self::CamPlusPlus => {
+                Box::new(CamPlusPlusEmbedder::new(path)?)
+            }
             Self::Eres2Net => Box::new(Eres2NetEmbedder::new(path)?),
         })
     }
@@ -100,11 +114,11 @@ mod tests {
 
     #[test]
     fn family_follows_the_file_name() {
-        for name in [
-            "campplus_zh_en_common_advanced.onnx",
-            "campplus_en_voxceleb.onnx",
-            "my_camplusplus.onnx",
-        ] {
+        assert_eq!(
+            EmbedderFamily::from_file_name("campplus_zh_en_common_advanced.onnx"),
+            EmbedderFamily::CamPlusPlusMultilingual
+        );
+        for name in ["campplus_en_voxceleb.onnx", "my_camplusplus.onnx"] {
             assert_eq!(
                 EmbedderFamily::from_file_name(name),
                 EmbedderFamily::CamPlusPlus
@@ -139,6 +153,22 @@ mod tests {
             cfg.merge_threshold,
             OnlineClusterConfig::default().merge_threshold
         );
+    }
+
+    #[test]
+    fn refine_config_is_part_of_the_preset() {
+        for family in [
+            EmbedderFamily::CamPlusPlusMultilingual,
+            EmbedderFamily::CamPlusPlus,
+            EmbedderFamily::Eres2Net,
+        ] {
+            let refine = family.refine_config();
+            assert!((-1.0..=1.0).contains(&refine.merge_threshold));
+            assert_eq!(
+                refine.min_embeddings,
+                OfflineRefineConfig::default().min_embeddings
+            );
+        }
     }
 
     #[test]
