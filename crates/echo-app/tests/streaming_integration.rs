@@ -20,10 +20,11 @@ use async_trait::async_trait;
 use pretty_assertions::assert_eq;
 
 use echo_audio::RubatoResamplerAdapter;
+use echo_domain::ports::vad::VadFrame;
 use echo_domain::{
     AudioCapture, AudioFormat, AudioFrame, AudioSource, AudioStream, CaptureSpec, CreateMeeting,
     DeviceInfo, DomainError, MeetingId, MeetingStore, Resampler, Sample, Segment, SegmentId,
-    StreamingOptions, TranscribeOptions, Transcriber, Transcript, TranscriptEvent,
+    StreamingOptions, TranscribeOptions, Transcriber, Transcript, TranscriptEvent, Vad, VoiceState,
 };
 use echo_storage::SqliteMeetingStore;
 
@@ -187,6 +188,7 @@ async fn pipeline_with_real_resampler_48khz() {
             chunk_ms: 1_000,
             silence_rms_threshold: 0.005,
             language: None,
+            ..StreamingOptions::default()
         })
         .await
         .unwrap();
@@ -203,6 +205,101 @@ async fn pipeline_with_real_resampler_48khz() {
     assert!(matches!(
         events.last().unwrap(),
         TranscriptEvent::Stopped { .. }
+    ));
+}
+
+/// VAD that reports one frame per push from a script of states.
+struct ScriptedVad(std::vec::IntoIter<VoiceState>);
+
+#[async_trait]
+impl Vad for ScriptedVad {
+    fn sample_rate_hz(&self) -> u32 {
+        16_000
+    }
+    async fn push(&mut self, _samples: &[Sample]) -> Result<VoiceState, DomainError> {
+        unreachable!("speech-aligned chunking uses push_frames")
+    }
+    async fn push_frames(&mut self, samples: &[Sample]) -> Result<Vec<VadFrame>, DomainError> {
+        let state = self.0.next().expect("VAD script exhausted");
+        let probability = if state == VoiceState::Voiced {
+            0.9
+        } else {
+            0.1
+        };
+        Ok(vec![VadFrame {
+            end_sample: samples.len(),
+            probability,
+            state,
+        }])
+    }
+    fn reset(&mut self) {}
+}
+
+/// Speech-aligned cuts found on the 16 kHz VAD stream must land on the
+/// matching 48 kHz stereo device frames: chunk offsets and durations
+/// follow real sample counts through the production resampler.
+#[tokio::test]
+async fn speech_aligned_cuts_map_back_to_48khz_stereo_frames() {
+    let format = AudioFormat {
+        sample_rate_hz: 48_000,
+        channels: 2,
+    };
+    // 6 s in 100 ms stereo frames; the pipeline analyses 200 ms blocks,
+    // so the script has one verdict per 200 ms: 4 s speech, 2 s silence.
+    let frames = (0..60)
+        .map(|_| {
+            sine_at(48_000, 4_800, 0.5)
+                .into_iter()
+                .flat_map(|s| [s, s])
+                .collect()
+        })
+        .collect();
+    let mut script = vec![VoiceState::Voiced; 20];
+    script.extend([VoiceState::Silence; 10]);
+
+    let capture = FakeCapture::new(format, frames);
+    let resampler = Arc::new(RubatoResamplerAdapter::new()) as Arc<dyn Resampler>;
+    let transcriber = FakeTranscriber::new();
+    let pipeline = StreamingPipeline::new(capture, resampler, transcriber.clone())
+        .with_vad(Box::new(ScriptedVad(script.into_iter())));
+    let mut handle = pipeline
+        .start(StreamingOptions {
+            min_chunk_ms: 3_000,
+            max_chunk_ms: 15_000,
+            ..StreamingOptions::default()
+        })
+        .await
+        .unwrap();
+
+    let events = drain_until_stopped(&mut handle).await;
+    let timeline: Vec<(&str, u32, u32)> = events
+        .iter()
+        .filter_map(|e| match e {
+            TranscriptEvent::Chunk {
+                offset_ms,
+                segments,
+                ..
+            } => Some((
+                "chunk",
+                *offset_ms,
+                segments[0].end_ms - segments[0].start_ms,
+            )),
+            TranscriptEvent::Skipped {
+                offset_ms,
+                duration_ms,
+                ..
+            } => Some(("skip", *offset_ms, *duration_ms)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(timeline, vec![("chunk", 0, 4_000), ("skip", 4_000, 2_000)]);
+    assert_eq!(transcriber.call_count(), 1);
+    assert!(matches!(
+        events.last().unwrap(),
+        TranscriptEvent::Stopped {
+            total_audio_ms: 6_000,
+            ..
+        }
     ));
 }
 
@@ -223,6 +320,7 @@ async fn events_persist_to_sqlite_and_round_trip() {
             chunk_ms: 1_000,
             silence_rms_threshold: 0.005,
             language: None,
+            ..StreamingOptions::default()
         })
         .await
         .unwrap();
@@ -288,6 +386,7 @@ async fn two_concurrent_sessions_do_not_interfere() {
         chunk_ms: 1_000,
         silence_rms_threshold: 0.005,
         language: None,
+        ..StreamingOptions::default()
     };
 
     let mut handle_a = pipeline_a.start(opts.clone()).await.unwrap();

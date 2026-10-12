@@ -17,6 +17,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use pretty_assertions::assert_eq;
 
+use echo_domain::ports::vad::VadFrame;
 use echo_domain::{
     AudioCapture, AudioFormat, AudioFrame, AudioSource, AudioStream, CaptureSpec, DeviceInfo,
     Diarizer, DomainError, Resampler, Sample, Segment, SegmentId, Speaker, SpeakerId,
@@ -256,6 +257,7 @@ async fn pipeline_emits_started_chunks_and_stopped() {
             chunk_ms: 1_000,
             silence_rms_threshold: 0.005,
             language: None,
+            ..StreamingOptions::default()
         })
         .await
         .unwrap();
@@ -296,6 +298,7 @@ async fn silence_gate_emits_skipped_and_does_not_call_asr() {
             chunk_ms: 1_000,
             silence_rms_threshold: 0.01,
             language: None,
+            ..StreamingOptions::default()
         })
         .await
         .unwrap();
@@ -330,6 +333,7 @@ async fn final_partial_chunk_is_flushed_on_eof() {
             chunk_ms: 1_000,
             silence_rms_threshold: 0.005,
             language: None,
+            ..StreamingOptions::default()
         })
         .await
         .unwrap();
@@ -367,6 +371,7 @@ async fn diarizer_attaches_stable_speaker_ids_across_chunks() {
             chunk_ms: 1_000,
             silence_rms_threshold: 0.005,
             language: None,
+            ..StreamingOptions::default()
         })
         .await
         .unwrap();
@@ -432,6 +437,7 @@ async fn pipeline_without_diarizer_emits_chunks_without_speaker_fields() {
             chunk_ms: 1_000,
             silence_rms_threshold: 0.005,
             language: None,
+            ..StreamingOptions::default()
         })
         .await
         .unwrap();
@@ -503,6 +509,7 @@ async fn stop_drains_cleanly_even_with_pending_frames() {
             chunk_ms: 1_000,
             silence_rms_threshold: 0.005,
             language: None,
+            ..StreamingOptions::default()
         })
         .await
         .unwrap();
@@ -587,6 +594,9 @@ async fn vad_silence_skips_chunks_even_when_rms_is_loud() {
             chunk_ms: 1_000,
             silence_rms_threshold: 0.005,
             language: None,
+            // Per-chunk VAD gate under test, not speech-aligned cuts.
+            speech_aligned_chunks: false,
+            ..StreamingOptions::default()
         })
         .await
         .unwrap();
@@ -625,6 +635,9 @@ async fn vad_voiced_forwards_chunks_to_transcriber() {
             chunk_ms: 1_000,
             silence_rms_threshold: 0.005,
             language: None,
+            // Per-chunk VAD gate under test, not speech-aligned cuts.
+            speech_aligned_chunks: false,
+            ..StreamingOptions::default()
         })
         .await
         .unwrap();
@@ -659,6 +672,9 @@ async fn vad_bypasses_rms_gate_for_silent_chunks() {
             chunk_ms: 1_000,
             silence_rms_threshold: 0.005,
             language: None,
+            // Per-chunk VAD gate under test, not speech-aligned cuts.
+            speech_aligned_chunks: false,
+            ..StreamingOptions::default()
         })
         .await
         .unwrap();
@@ -711,6 +727,9 @@ async fn vad_is_reset_on_session_start() {
             chunk_ms: 1_000,
             silence_rms_threshold: 0.005,
             language: None,
+            // Per-chunk VAD gate under test, not speech-aligned cuts.
+            speech_aligned_chunks: false,
+            ..StreamingOptions::default()
         })
         .await
         .unwrap();
@@ -718,6 +737,301 @@ async fn vad_is_reset_on_session_start() {
     let _ = drain_until_stopped(&mut handle).await;
     assert_eq!(inner.reset_count(), 1, "VAD must be reset on session start");
     assert_eq!(inner.push_count(), 1, "VAD must see the loud chunk");
+}
+
+// ---------------------------------------------------------------------------
+// Speech-aligned chunking
+// ---------------------------------------------------------------------------
+
+/// One second at the test format (16 kHz mono).
+const SEC: usize = 16_000;
+
+/// VAD whose k-th push reports a single frame spanning the push with
+/// the k-th scripted `(state, probability)`. The fake capture delivers
+/// one-second frames, each analysed in one push, so the script reads
+/// as one verdict per second.
+struct ScriptedVad {
+    script: std::vec::IntoIter<(VoiceState, f32)>,
+    resets: Arc<AtomicU32>,
+}
+
+impl ScriptedVad {
+    fn new(script: Vec<(VoiceState, f32)>) -> (Self, Arc<AtomicU32>) {
+        let resets = Arc::new(AtomicU32::new(0));
+        let vad = Self {
+            script: script.into_iter(),
+            resets: Arc::clone(&resets),
+        };
+        (vad, resets)
+    }
+}
+
+#[async_trait]
+impl Vad for ScriptedVad {
+    fn sample_rate_hz(&self) -> u32 {
+        16_000
+    }
+    async fn push(&mut self, samples: &[Sample]) -> Result<VoiceState, DomainError> {
+        let frames = self.push_frames(samples).await?;
+        Ok(frames.last().map_or(VoiceState::Silence, |f| f.state))
+    }
+    async fn push_frames(&mut self, samples: &[Sample]) -> Result<Vec<VadFrame>, DomainError> {
+        let (state, probability) = self.script.next().expect("VAD script exhausted");
+        Ok(vec![VadFrame {
+            end_sample: samples.len(),
+            probability,
+            state,
+        }])
+    }
+    fn reset(&mut self) {
+        self.resets.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+const V: (VoiceState, f32) = (VoiceState::Voiced, 0.9);
+const S: (VoiceState, f32) = (VoiceState::Silence, 0.1);
+
+fn aligned_options(min_chunk_ms: u32, max_chunk_ms: u32) -> StreamingOptions {
+    StreamingOptions {
+        chunk_ms: 1_000,
+        silence_rms_threshold: 0.005,
+        min_chunk_ms,
+        max_chunk_ms,
+        ..StreamingOptions::default()
+    }
+}
+
+/// Chunk / skip timeline reduced to `(offset_ms, duration_ms)`.
+#[derive(Debug, PartialEq)]
+enum Span {
+    Chunk(u32, u32),
+    Skip(u32, u32),
+}
+
+/// Reduce events to spans. For chunks the duration comes from the
+/// fake transcriber's single segment, which covers the whole chunk,
+/// and its start must equal the chunk offset (session time).
+fn spans(events: &[TranscriptEvent]) -> Vec<Span> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            TranscriptEvent::Chunk {
+                offset_ms,
+                segments,
+                ..
+            } => {
+                assert_eq!(segments.len(), 1);
+                assert_eq!(segments[0].start_ms, *offset_ms, "segment in session time");
+                Some(Span::Chunk(
+                    *offset_ms,
+                    segments[0].end_ms - segments[0].start_ms,
+                ))
+            }
+            TranscriptEvent::Skipped {
+                offset_ms,
+                duration_ms,
+                ..
+            } => Some(Span::Skip(*offset_ms, *duration_ms)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Stream one second of loud audio per script entry through a
+/// speech-aligned session and return every event.
+async fn run_aligned(
+    script: Vec<(VoiceState, f32)>,
+    options: StreamingOptions,
+) -> (Vec<TranscriptEvent>, Arc<FakeTranscriber>) {
+    let frames = script.iter().map(|_| sine(SEC, 0.5)).collect();
+    let capture = FakeCapture::new(AudioFormat::WHISPER, frames);
+    let resampler = Arc::new(PassThroughResampler) as Arc<dyn Resampler>;
+    let transcriber = FakeTranscriber::new();
+    let (vad, _) = ScriptedVad::new(script);
+    let pipeline =
+        StreamingPipeline::new(capture, resampler, transcriber.clone()).with_vad(Box::new(vad));
+    let mut handle = pipeline.start(options).await.unwrap();
+    (drain_until_stopped(&mut handle).await, transcriber)
+}
+
+fn stopped_totals(events: &[TranscriptEvent]) -> (u32, u32) {
+    match events.last() {
+        Some(TranscriptEvent::Stopped {
+            total_segments,
+            total_audio_ms,
+            ..
+        }) => (*total_segments, *total_audio_ms),
+        other => panic!("expected Stopped, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn speech_aligned_chunks_end_at_scripted_pauses() {
+    let script = vec![V, V, V, V, S, S, V, V, S, S];
+    let (events, transcriber) = run_aligned(script, aligned_options(3_000, 15_000)).await;
+
+    assert_eq!(
+        spans(&events),
+        vec![
+            // First pause at 4 s, past the 3 s minimum.
+            Span::Chunk(0, 4_000),
+            // Leading silence of the next utterance, minus the pre-roll.
+            Span::Skip(4_000, 1_000),
+            Span::Chunk(5_000, 3_000),
+            // Trailing silence flushed at EOF, never transcribed.
+            Span::Skip(8_000, 2_000),
+        ]
+    );
+    assert_eq!(transcriber.call_count(), 2);
+    assert_eq!(stopped_totals(&events), (2, 10_000));
+}
+
+#[tokio::test]
+async fn speech_without_pause_is_force_cut_at_the_quietest_point_before_max() {
+    let mut script = vec![V, V, V, V, (VoiceState::Voiced, 0.4), V];
+    script.extend(std::iter::repeat_n(V, 7));
+    let (events, _) = run_aligned(script, aligned_options(3_000, 6_000)).await;
+
+    assert_eq!(
+        spans(&events),
+        vec![
+            // The 0.4 dip ending at 5 s lies in the lookback before 6 s.
+            Span::Chunk(0, 5_000),
+            // No dip: the cut lands right at the 6 s maximum.
+            Span::Chunk(5_000, 6_000),
+            Span::Chunk(11_000, 2_000),
+        ]
+    );
+    assert_eq!(stopped_totals(&events), (3, 13_000));
+}
+
+#[tokio::test]
+async fn speech_aligned_all_silence_is_skipped() {
+    let (events, transcriber) = run_aligned(vec![S, S, S, S], aligned_options(3_000, 15_000)).await;
+
+    assert_eq!(
+        spans(&events),
+        vec![Span::Skip(0, 2_000), Span::Skip(2_000, 2_000)]
+    );
+    assert_eq!(transcriber.call_count(), 0);
+    assert_eq!(stopped_totals(&events), (0, 4_000));
+}
+
+#[tokio::test]
+async fn speech_shorter_than_min_is_flushed_when_the_stream_ends() {
+    let (events, transcriber) = run_aligned(vec![V, V], aligned_options(3_000, 15_000)).await;
+
+    assert_eq!(spans(&events), vec![Span::Chunk(0, 2_000)]);
+    assert_eq!(transcriber.call_count(), 1);
+}
+
+#[tokio::test]
+async fn speech_aligned_bounds_are_validated_at_start() {
+    for (min, max) in [(0, 15_000), (6_000, 3_000)] {
+        let (vad, _) = ScriptedVad::new(vec![]);
+        let capture = FakeCapture::new(AudioFormat::WHISPER, vec![]);
+        let resampler = Arc::new(PassThroughResampler) as Arc<dyn Resampler>;
+        let pipeline = StreamingPipeline::new(capture, resampler, FakeTranscriber::new())
+            .with_vad(Box::new(vad));
+        let result = pipeline.start(aligned_options(min, max)).await;
+        assert!(result.is_err(), "min={min} max={max} must be rejected");
+    }
+}
+
+/// Item of a [`SteppedStream`]: a frame, or a pause-flag flip applied
+/// before the next frame is delivered.
+enum Step {
+    Frame(Vec<f32>),
+    Pause,
+    Resume,
+}
+
+/// Stream that drives the pipeline's pause flag between frames, so
+/// pause/resume lands at deterministic points of the audio.
+struct SteppedStream {
+    steps: std::vec::IntoIter<Step>,
+    paused: Arc<std::sync::OnceLock<Arc<std::sync::atomic::AtomicBool>>>,
+}
+
+#[async_trait]
+impl AudioStream for SteppedStream {
+    fn format(&self) -> AudioFormat {
+        AudioFormat::WHISPER
+    }
+    async fn next_frame(&mut self) -> Option<AudioFrame> {
+        // The flag only exists once the pipeline has started.
+        while self.paused.get().is_none() {
+            tokio::task::yield_now().await;
+        }
+        let flag = self.paused.get().unwrap();
+        loop {
+            tokio::task::yield_now().await;
+            match self.steps.next()? {
+                Step::Frame(samples) => {
+                    return Some(AudioFrame {
+                        samples,
+                        format: AudioFormat::WHISPER,
+                        captured_at_ns: 0,
+                    })
+                }
+                Step::Pause => flag.store(true, Ordering::Release),
+                Step::Resume => flag.store(false, Ordering::Release),
+            }
+        }
+    }
+    async fn stop(&mut self) -> Result<(), DomainError> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn pause_flushes_buffered_speech_and_resume_resets_the_vad() {
+    let loud = || Step::Frame(sine(SEC, 0.5));
+    let steps = vec![
+        loud(),
+        loud(),
+        Step::Pause,
+        loud(), // discarded while paused
+        loud(), // discarded while paused
+        Step::Resume,
+        loud(),
+        loud(),
+    ];
+    let paused_slot = Arc::new(std::sync::OnceLock::new());
+    let stream = SteppedStream {
+        steps: steps.into_iter(),
+        paused: Arc::clone(&paused_slot),
+    };
+    let (vad, resets) = ScriptedVad::new(vec![V, V, V, V]);
+    let capture = FakeCapture::new(AudioFormat::WHISPER, vec![]);
+    let resampler = Arc::new(PassThroughResampler) as Arc<dyn Resampler>;
+    let transcriber = FakeTranscriber::new();
+    let pipeline =
+        StreamingPipeline::new(capture, resampler, transcriber.clone()).with_vad(Box::new(vad));
+    let mut handle = pipeline
+        .start_with_stream(Box::new(stream), aligned_options(3_000, 15_000))
+        .await
+        .unwrap();
+    paused_slot.set(handle.paused_flag()).unwrap();
+
+    let events = drain_until_stopped(&mut handle).await;
+    let lifecycle: Vec<&str> = events
+        .iter()
+        .filter_map(|e| match e {
+            TranscriptEvent::Chunk { .. } => Some("chunk"),
+            TranscriptEvent::Paused { .. } => Some("paused"),
+            TranscriptEvent::Resumed { .. } => Some("resumed"),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(lifecycle, vec!["chunk", "paused", "resumed", "chunk"]);
+    // Paused audio is not part of session time.
+    assert_eq!(
+        spans(&events),
+        vec![Span::Chunk(0, 2_000), Span::Chunk(2_000, 2_000)]
+    );
+    assert_eq!(resets.load(Ordering::SeqCst), 2, "session start + resume");
+    assert_eq!(transcriber.call_count(), 2);
 }
 
 #[test]

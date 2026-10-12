@@ -113,7 +113,8 @@ pub struct StartStreamingOptions {
     /// Capture device id. `None` ⇒ system default microphone. Ignored
     /// when `source = systemOutput`.
     pub device_id: Option<String>,
-    /// Audio chunk size in milliseconds. `None` ⇒ 5000.
+    /// Fixed audio chunk size in milliseconds, used when the neural VAD
+    /// is off (with it, chunks are cut at speech pauses). `None` ⇒ 5000.
     pub chunk_ms: Option<u32>,
     /// RMS threshold below which a chunk is reported as `Skipped`
     /// instead of being sent to the ASR. `None` ⇒ 0.02.
@@ -170,10 +171,13 @@ pub async fn start_streaming(
     }
 
     let opts = options.unwrap_or_default();
+    // Speech-aligned chunk bounds keep their domain defaults; `chunk_ms`
+    // only applies when the session runs without the neural VAD.
     let streaming_options = StreamingOptions {
         language: opts.language,
         chunk_ms: opts.chunk_ms.unwrap_or(5_000),
         silence_rms_threshold: opts.silence_rms_threshold.unwrap_or(0.02),
+        ..StreamingOptions::default()
     };
     let source: AudioSource = opts
         .source

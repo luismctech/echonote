@@ -44,8 +44,8 @@ impl std::fmt::Display for StreamingSessionId {
 pub struct StreamingOptions {
     /// ISO-639-1 language hint for the ASR backend. `None` ⇒ auto.
     pub language: Option<String>,
-    /// Maximum audio buffered before forcing a transcribe pass, in
-    /// milliseconds. Default 5000 (5 s) — Whisper's sweet spot.
+    /// Fixed chunk length in milliseconds, used when no VAD is attached
+    /// or `speech_aligned_chunks` is `false`. Default 5000 (5 s).
     pub chunk_ms: u32,
     /// Skip transcription of chunks whose RMS is below this threshold.
     /// `0.0` disables the gate. Default 0.02 (~ -34 dBFS), aligned
@@ -60,6 +60,43 @@ pub struct StreamingOptions {
     /// your mic environment is louder, raise it; if you have a soft
     /// speaker or a noise-cancelling headset, lower it.
     pub silence_rms_threshold: f32,
+    /// Cut chunks at speech pauses instead of every `chunk_ms`. Only
+    /// takes effect when a VAD is attached to the pipeline; without one
+    /// the pipeline always uses fixed `chunk_ms` chunks and the RMS
+    /// gate. Default `true`: Whisper is far more accurate on whole
+    /// utterances than on fixed chunks that cut words.
+    #[serde(default = "default_speech_aligned_chunks")]
+    pub speech_aligned_chunks: bool,
+    /// Speech-aligned mode: shortest chunk cut at a speech pause, in
+    /// milliseconds, unless the utterance is followed by silence.
+    /// Default 3000.
+    #[serde(default = "default_min_chunk_ms")]
+    pub min_chunk_ms: u32,
+    /// Speech-aligned mode: longest chunk, in milliseconds. Without a
+    /// pause by then the chunk is cut at the quietest point shortly
+    /// before it. Must be `>= min_chunk_ms`. Default 15000 (Whisper
+    /// decodes up to 30 s windows).
+    #[serde(default = "default_max_chunk_ms")]
+    pub max_chunk_ms: u32,
+}
+
+/// Default for [`StreamingOptions::speech_aligned_chunks`].
+const DEFAULT_SPEECH_ALIGNED_CHUNKS: bool = true;
+/// Default for [`StreamingOptions::min_chunk_ms`].
+const DEFAULT_MIN_CHUNK_MS: u32 = 3_000;
+/// Default for [`StreamingOptions::max_chunk_ms`].
+const DEFAULT_MAX_CHUNK_MS: u32 = 15_000;
+
+fn default_speech_aligned_chunks() -> bool {
+    DEFAULT_SPEECH_ALIGNED_CHUNKS
+}
+
+fn default_min_chunk_ms() -> u32 {
+    DEFAULT_MIN_CHUNK_MS
+}
+
+fn default_max_chunk_ms() -> u32 {
+    DEFAULT_MAX_CHUNK_MS
 }
 
 impl Default for StreamingOptions {
@@ -68,6 +105,9 @@ impl Default for StreamingOptions {
             language: None,
             chunk_ms: 5_000,
             silence_rms_threshold: 0.02,
+            speech_aligned_chunks: DEFAULT_SPEECH_ALIGNED_CHUNKS,
+            min_chunk_ms: DEFAULT_MIN_CHUNK_MS,
+            max_chunk_ms: DEFAULT_MAX_CHUNK_MS,
         }
     }
 }
@@ -245,6 +285,15 @@ mod tests {
         assert_eq!(opts.chunk_ms, 5_000);
         assert!(opts.silence_rms_threshold > 0.0);
         assert!(opts.language.is_none());
+        assert!(opts.speech_aligned_chunks);
+        assert_eq!((opts.min_chunk_ms, opts.max_chunk_ms), (3_000, 15_000));
+    }
+
+    #[test]
+    fn options_without_chunk_bounds_deserialize_with_defaults() {
+        let json = r#"{"language":null,"chunk_ms":5000,"silence_rms_threshold":0.02}"#;
+        let opts: StreamingOptions = serde_json::from_str(json).unwrap();
+        assert_eq!(opts, StreamingOptions::default());
     }
 
     #[test]

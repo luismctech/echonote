@@ -27,7 +27,10 @@ export const commands = {
 	 *  when `source = systemOutput`.
 	 */
 	deviceId: string | null,
-	/**  Audio chunk size in milliseconds. `None` ⇒ 5000. */
+	/**
+	 *  Fixed audio chunk size in milliseconds, used when the neural VAD
+	 *  is off (with it, chunks are cut at speech pauses). `None` ⇒ 5000.
+	 */
 	chunkMs: number | null,
 	/**
 	 *  RMS threshold below which a chunk is reported as `Skipped`
@@ -1147,7 +1150,10 @@ export type StartStreamingOptions = {
 	 *  when `source = systemOutput`.
 	 */
 	deviceId: string | null,
-	/**  Audio chunk size in milliseconds. `None` ⇒ 5000. */
+	/**
+	 *  Fixed audio chunk size in milliseconds, used when the neural VAD
+	 *  is off (with it, chunks are cut at speech pauses). `None` ⇒ 5000.
+	 */
 	chunkMs: number | null,
 	/**
 	 *  RMS threshold below which a chunk is reported as `Skipped`

@@ -146,6 +146,17 @@ enum Command {
         /// spot for streaming.
         #[arg(long, default_value_t = 5_000)]
         chunk_ms: u32,
+        /// Speech-aligned chunking (default with the Silero VAD):
+        /// shortest chunk cut at a speech pause, in milliseconds.
+        #[arg(long, default_value_t = StreamingOptions::default().min_chunk_ms)]
+        min_chunk_ms: u32,
+        /// Speech-aligned chunking: longest chunk, in milliseconds.
+        #[arg(long, default_value_t = StreamingOptions::default().max_chunk_ms)]
+        max_chunk_ms: u32,
+        /// Cut fixed `--chunk-ms` chunks even with the Silero VAD (the
+        /// pre-speech-aligned behaviour, e.g. for A/B benchmarks).
+        #[arg(long, default_value_t = false)]
+        fixed_chunks: bool,
         /// Skip transcription of chunks below this RMS. `0.0` disables
         /// the gate. Default 0.02 (~ -34 dBFS); raise it if room noise
         /// is sneaking past, lower it for very quiet speakers.
@@ -364,6 +375,9 @@ async fn main() -> Result<()> {
             device,
             language,
             chunk_ms,
+            min_chunk_ms,
+            max_chunk_ms,
+            fixed_chunks,
             silence_threshold,
             diarize,
             embed_model,
@@ -376,7 +390,12 @@ async fn main() -> Result<()> {
                 source,
                 device,
                 language,
-                chunk_ms,
+                ChunkArgs {
+                    chunk_ms,
+                    min_chunk_ms,
+                    max_chunk_ms,
+                    fixed_chunks,
+                },
                 silence_threshold,
                 diarize,
                 embed_model,
@@ -582,6 +601,14 @@ async fn run_transcribe(
 // `stream` subcommand
 // ---------------------------------------------------------------------------
 
+/// Chunking flags of the `stream` subcommand.
+struct ChunkArgs {
+    chunk_ms: u32,
+    min_chunk_ms: u32,
+    max_chunk_ms: u32,
+    fixed_chunks: bool,
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_stream(
     duration_secs: u64,
@@ -589,7 +616,7 @@ async fn run_stream(
     source_arg: SourceArg,
     device: Option<String>,
     language: Option<String>,
-    chunk_ms: u32,
+    chunks: ChunkArgs,
     silence_threshold: f32,
     diarize: bool,
     embed_model: Option<PathBuf>,
@@ -633,10 +660,14 @@ async fn run_stream(
         device_id,
         preferred_format: AudioFormat::WHISPER,
     };
+    let chunk_ms = chunks.chunk_ms;
     let options = StreamingOptions {
         language,
         chunk_ms,
         silence_rms_threshold: silence_threshold,
+        speech_aligned_chunks: !chunks.fixed_chunks,
+        min_chunk_ms: chunks.min_chunk_ms,
+        max_chunk_ms: chunks.max_chunk_ms,
     };
 
     let store: Arc<dyn MeetingStore> = Arc::new(open_cli_store().await?);
@@ -702,17 +733,25 @@ async fn run_stream(
         }
     };
 
+    let chunking = if vad_active && options.speech_aligned_chunks {
+        format!(
+            "{}-{} ms speech-aligned chunks",
+            options.min_chunk_ms, options.max_chunk_ms
+        )
+    } else {
+        format!("{chunk_ms} ms chunks")
+    };
     let mut handle = pipeline
         .start_with_spec(spec, options)
         .await
         .context("failed to start streaming pipeline")?;
 
     println!(
-        "▶ streaming session {} — source={:?} — {}s window {}ms — diarize={} — vad={} — Ctrl-C or wait to stop",
+        "▶ streaming session {} — source={:?} — {}s window {} — diarize={} — vad={} — Ctrl-C or wait to stop",
         handle.session_id(),
         source,
         duration_secs,
-        chunk_ms,
+        chunking,
         diarize,
         if vad_active { "silero" } else { "rms" },
     );

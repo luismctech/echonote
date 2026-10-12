@@ -39,11 +39,13 @@
 //!
 //! ## Chunk size constraint
 //!
-//! The model was exported with a fixed input width (`CHUNK_SAMPLES`).
-//! Shorter inputs are zero-padded on the right; longer inputs are
-//! centre-cropped. Callers should feed chunks close to `CHUNK_SAMPLES`
-//! for best accuracy. The streaming pipeline typically calls this with
-//! its configured `chunk_ms` audio — 5 s chunks work well.
+//! The model was exported with a fixed input width (`CHUNK_SAMPLES`,
+//! 5 s). Shorter inputs are zero-padded on the right; longer inputs
+//! (the streaming pipeline cuts variable-length chunks at speech
+//! pauses, up to its `max_chunk_ms`) are split into consecutive 5 s
+//! windows, the last one padded, and the segments are shifted back
+//! into the caller's sample coordinates. `local_speaker` indices are
+//! window-local.
 //!
 //! ## Verification note
 //!
@@ -301,16 +303,23 @@ impl Segmenter for PyannoteSegmenter {
         if samples.is_empty() {
             return Ok(Vec::new());
         }
+        // Variable-length chunks (speech-aligned streaming) are split
+        // into consecutive model windows instead of centre-cropped, so
+        // no audio goes unsegmented.
+        segment_in_windows(samples, PYANNOTE_CHUNK_SAMPLES, |window| {
+            self.segment_window(window)
+        })
+    }
+}
 
-        // Pad or centre-crop to PYANNOTE_CHUNK_SAMPLES.
+impl PyannoteSegmenter {
+    /// Segment at most one model window; shorter input is zero-padded
+    /// on the right.
+    fn segment_window(&mut self, samples: &[Sample]) -> Result<Vec<SpeakerSegment>, DomainError> {
         let n = PYANNOTE_CHUNK_SAMPLES;
         let mut padded = vec![0.0_f32; n];
-        if samples.len() >= n {
-            let start = (samples.len() - n) / 2;
-            padded.copy_from_slice(&samples[start..start + n]);
-        } else {
-            padded[..samples.len()].copy_from_slice(samples);
-        }
+        let len = samples.len().min(n);
+        padded[..len].copy_from_slice(&samples[..len]);
 
         // Build input tensor: [1, 1, N].
         let input = Tensor::from_shape(&[1_usize, 1, n], &padded)
@@ -329,16 +338,39 @@ impl Segmenter for PyannoteSegmenter {
         let num_frames = validate_output_shape(view.shape())?;
         let flat: Vec<f32> = view.iter().copied().collect();
         let activity = decode_powerset(&flat);
-        let (samples_per_frame, offset) = frame_geometry(samples.len(), n, num_frames);
+        let (samples_per_frame, offset) = frame_geometry(len, n, num_frames);
 
         Ok(activity_to_segments(
             &activity,
             samples_per_frame,
             offset,
-            samples.len(),
+            len,
             self.config.min_segment_samples,
         ))
     }
+}
+
+/// Run `infer` over consecutive `window`-sample slices of `samples`
+/// (the last one may be shorter) and shift each slice's segments into
+/// `samples` coordinates, sorted chronologically. `local_speaker`
+/// indices stay window-local: the same voice may get different indices
+/// in different windows, and a turn crossing a window edge is split.
+fn segment_in_windows(
+    samples: &[Sample],
+    window: usize,
+    mut infer: impl FnMut(&[Sample]) -> Result<Vec<SpeakerSegment>, DomainError>,
+) -> Result<Vec<SpeakerSegment>, DomainError> {
+    let mut segments = Vec::new();
+    for (k, slice) in samples.chunks(window).enumerate() {
+        let base = k * window;
+        segments.extend(infer(slice)?.into_iter().map(|s| SpeakerSegment {
+            start_sample: s.start_sample + base,
+            end_sample: s.end_sample + base,
+            ..s
+        }));
+    }
+    segments.sort_by_key(|s| (s.start_sample, s.local_speaker));
+    Ok(segments)
 }
 
 #[cfg(test)]
@@ -405,6 +437,34 @@ mod tests {
             segs[0].end_sample, 1_050,
             "end must be clamped to input length"
         );
+    }
+
+    #[test]
+    fn long_inputs_are_segmented_window_by_window_in_input_coordinates() {
+        let mut seen = Vec::new();
+        let segs = segment_in_windows(&[0.0; 250], 100, |w| {
+            seen.push(w.len());
+            Ok(vec![SpeakerSegment {
+                start_sample: 10,
+                end_sample: 20,
+                local_speaker: 0,
+            }])
+        })
+        .unwrap();
+        assert_eq!(seen, vec![100, 100, 50], "last window is the remainder");
+        let ranges: Vec<(usize, usize)> = segs
+            .iter()
+            .map(|s| (s.start_sample, s.end_sample))
+            .collect();
+        assert_eq!(ranges, vec![(10, 20), (110, 120), (210, 220)]);
+    }
+
+    #[test]
+    fn window_errors_abort_the_whole_input() {
+        let result = segment_in_windows(&[0.0; 250], 100, |_| {
+            Err(DomainError::DiarizationFailed("boom".into()))
+        });
+        assert!(result.is_err());
     }
 
     fn model_path() -> PathBuf {

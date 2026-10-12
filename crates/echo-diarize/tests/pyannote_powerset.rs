@@ -77,3 +77,46 @@ fn segmenter_returns_spans_on_two_speaker_fixture() {
         "two-speaker fixture should yield at least two local speakers, got {speakers:?}"
     );
 }
+
+/// Speech-aligned streaming hands the segmenter chunks longer than its
+/// fixed 5 s input. A long chunk must be segmented end to end, with
+/// spans in the chunk's own sample coordinates: exactly what segmenting
+/// each 5 s window separately and shifting by the window start gives.
+#[test]
+fn long_chunk_is_segmented_window_by_window_in_chunk_coordinates() {
+    const WINDOW: usize = 80_000;
+    let root = workspace_root();
+    let model = root.join("models/segmenter/pyannote_segmentation_3_tract.onnx");
+    let fixture = root.join("crates/echo-diarize/tests/fixtures/two_speakers_en.wav");
+    if !model.exists() || !fixture.exists() {
+        eprintln!("skipping: missing segmenter model or fixture");
+        return;
+    }
+    let mut seg = PyannoteSegmenter::new(&model).expect("patched segmenter must load");
+    let audio = load_mono_16k(&fixture);
+    // Not a multiple of the window, so the last window is padded.
+    let chunk = &audio[..audio.len().min(2 * WINDOW + 30_000)];
+    assert!(chunk.len() > WINDOW, "fixture too short for this test");
+
+    let whole = seg.segment(chunk).expect("long chunk must segment");
+
+    let mut expected = Vec::new();
+    for (k, window) in chunk.chunks(WINDOW).enumerate() {
+        for s in seg.segment(window).expect("window must segment") {
+            expected.push((s.start_sample + k * WINDOW, s.end_sample + k * WINDOW));
+        }
+    }
+    expected.sort_unstable();
+    let mut got: Vec<(usize, usize)> = whole
+        .iter()
+        .map(|s| (s.start_sample, s.end_sample))
+        .collect();
+    got.sort_unstable();
+
+    assert_eq!(got, expected);
+    assert!(whole.iter().all(|s| s.end_sample <= chunk.len()));
+    assert!(
+        whole.iter().any(|s| s.start_sample >= WINDOW),
+        "speech after the first window must be segmented: {whole:?}"
+    );
+}
