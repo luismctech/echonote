@@ -54,12 +54,16 @@ impl EmbedderFamily {
 
     /// Default online-cluster similarity threshold for this family.
     ///
-    /// CAM++ cosines run hot (cross-speaker 0.70-0.90 on same-channel
-    /// audio), hence 0.85; ERes2Net is calibrated at 0.65.
+    /// Multilingual CAM++: 0.45, calibrated on held-out data with
+    /// `echo-proto bench der` (T6b, `docs/spikes/2026-10-der-baseline.md`):
+    /// DER is flat for 0.45-0.50 and rises sharply below 0.40 as speakers
+    /// merge. The EN CAM++ (0.85) and ERes2Net (0.65) values predate the
+    /// DER harness and are not calibrated with it.
     #[must_use]
     pub fn default_similarity_threshold(self) -> f32 {
         match self {
-            Self::CamPlusPlusMultilingual | Self::CamPlusPlus => 0.85,
+            Self::CamPlusPlusMultilingual => 0.45,
+            Self::CamPlusPlus => 0.85,
             Self::Eres2Net => 0.65,
         }
     }
@@ -69,13 +73,21 @@ impl EmbedderFamily {
     ///
     /// CAM++ disables online centroid merging (`merge_threshold = 1.0`):
     /// its running centroids drift together and would cascade-merge; the
-    /// offline refinement pass does the merging instead.
+    /// offline refinement pass does the merging instead. The multilingual
+    /// CAM++ caps at 8 speakers: the default cap of 4 cost 3-6 DER points
+    /// on the calibration data, where recordings have up to 6 speakers.
     #[must_use]
     pub fn cluster_config(self, similarity_threshold: Option<f32>) -> OnlineClusterConfig {
         let similarity_threshold =
             similarity_threshold.unwrap_or_else(|| self.default_similarity_threshold());
         match self {
-            Self::CamPlusPlusMultilingual | Self::CamPlusPlus => OnlineClusterConfig {
+            Self::CamPlusPlusMultilingual => OnlineClusterConfig {
+                similarity_threshold,
+                merge_threshold: 1.0,
+                max_speakers: 8,
+                ..OnlineClusterConfig::default()
+            },
+            Self::CamPlusPlus => OnlineClusterConfig {
                 similarity_threshold,
                 merge_threshold: 1.0,
                 ..OnlineClusterConfig::default()
@@ -88,9 +100,20 @@ impl EmbedderFamily {
     }
 
     /// End-of-session offline refinement configuration for this family.
+    ///
+    /// Multilingual CAM++: average-linkage merge threshold 0.50 (T6b).
+    /// At the default 0.85 the pass never merged; 0.40-0.50 merges the
+    /// online over-splits and is the flattest region of the calibration
+    /// grid. Other families keep [`OfflineRefineConfig::default`].
     #[must_use]
     pub fn refine_config(self) -> OfflineRefineConfig {
-        OfflineRefineConfig::default()
+        match self {
+            Self::CamPlusPlusMultilingual => OfflineRefineConfig {
+                merge_threshold: 0.50,
+                ..OfflineRefineConfig::default()
+            },
+            Self::CamPlusPlus | Self::Eres2Net => OfflineRefineConfig::default(),
+        }
     }
 
     /// Load the embedder adapter for this family from `path`.
@@ -135,7 +158,21 @@ mod tests {
     }
 
     #[test]
-    fn camplusplus_preset_matches_the_app() {
+    fn multilingual_campplus_uses_the_held_out_calibration() {
+        // T6b: calibrated on MLS es dev + VoxConverse dev (held out).
+        let family = EmbedderFamily::CamPlusPlusMultilingual;
+        let cfg = family.cluster_config(None);
+        assert_eq!(cfg.similarity_threshold, 0.45);
+        assert_eq!(cfg.max_speakers, 8);
+        assert_eq!(cfg.merge_threshold, 1.0);
+        let defaults = OnlineClusterConfig::default();
+        assert_eq!(cfg.max_centroid_history, defaults.max_centroid_history);
+        assert_eq!(cfg.sticky_bias, defaults.sticky_bias);
+        assert_eq!(family.refine_config().merge_threshold, 0.50);
+    }
+
+    #[test]
+    fn en_campplus_keeps_its_uncalibrated_preset() {
         let cfg = EmbedderFamily::CamPlusPlus.cluster_config(None);
         assert_eq!(cfg.similarity_threshold, 0.85);
         assert_eq!(cfg.merge_threshold, 1.0);
@@ -143,6 +180,10 @@ mod tests {
         assert_eq!(cfg.max_speakers, defaults.max_speakers);
         assert_eq!(cfg.max_centroid_history, defaults.max_centroid_history);
         assert_eq!(cfg.sticky_bias, defaults.sticky_bias);
+        assert_eq!(
+            EmbedderFamily::CamPlusPlus.refine_config().merge_threshold,
+            OfflineRefineConfig::default().merge_threshold
+        );
     }
 
     #[test]
