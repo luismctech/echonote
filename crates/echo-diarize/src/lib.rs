@@ -11,6 +11,8 @@
 //!   speaker.
 //! - [`online_diarizer`]: [`OnlineDiarizer`], the [`echo_domain::Diarizer`]
 //!   adapter that wires an embedder to a cluster.
+//! - [`metrics`]: RTTM parsing and diarization error rate (DER) scoring
+//!   for offline benchmarks.
 //!
 //! Two ONNX speaker embedder adapters are provided:
 //!
@@ -24,6 +26,7 @@ pub mod cam_plus_plus;
 pub mod cluster;
 pub mod embedding;
 pub mod eres2net;
+pub mod metrics;
 pub mod offline_refine;
 pub mod online_diarizer;
 pub mod pyannote_segmenter;
@@ -37,6 +40,9 @@ pub use embedding::{cosine_similarity, l2_normalize, SpeakerEmbedder};
 pub use eres2net::{
     Eres2NetConfig, Eres2NetEmbedder, ERES2NET_EMBED_DIM, ERES2NET_FBANK_DIM, ERES2NET_MIN_SAMPLES,
     ERES2NET_SAMPLE_RATE, ERES2NET_TARGET_FRAMES,
+};
+pub use metrics::{
+    parse_rttm, score_der, write_rttm, DerConfig, DerReport, RttmError, RttmSegment,
 };
 pub use offline_refine::{refine_speakers, OfflineRefineConfig};
 pub use online_diarizer::OnlineDiarizer;
