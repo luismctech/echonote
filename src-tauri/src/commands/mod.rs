@@ -39,8 +39,7 @@ use echo_app::{MeetingRecorder, RenameSpeaker, StreamingHandle};
 use echo_asr::WhisperCppTranscriber;
 use echo_audio::{RoutingAudioCapture, RubatoResamplerAdapter, SileroVad};
 use echo_diarize::{
-    embedding::SpeakerEmbedder, CamPlusPlusEmbedder, Eres2NetEmbedder, OnlineDiarizer,
-    PyannoteSegmenter,
+    EmbedderFamily, OfflineRefineConfig, OnlineClusterConfig, OnlineDiarizer, PyannoteSegmenter,
 };
 use echo_domain::{
     ChatAssistant, Diarizer, LlmModel, MeetingStore, Resampler, SegmentRetriever, Transcriber,
@@ -438,10 +437,10 @@ impl AppState {
 
     /// Build a fresh diarizer for the upcoming session.
     ///
-    /// Embedder selection: if the resolved path filename contains
-    /// "camplusplus" or "campplus", `CamPlusPlusEmbedder` is loaded;
-    /// otherwise `Eres2NetEmbedder` is used. The pyannote segmenter is
-    /// attached automatically when its model file is present on disk.
+    /// The embedder family, its adapter and its clustering thresholds
+    /// follow the model file name through [`EmbedderFamily`] (see
+    /// [`diarizer_preset`]). The pyannote segmenter is attached
+    /// automatically when its model file is present on disk.
     pub(crate) fn build_diarizer(
         &self,
         override_path: Option<PathBuf>,
@@ -454,59 +453,10 @@ impl AppState {
             ));
         }
 
-        let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        let started = std::time::Instant::now();
-        let embedder: Box<dyn SpeakerEmbedder> =
-            if file_name.contains("camplusplus") || file_name.contains("campplus") {
-                let emb = CamPlusPlusEmbedder::new(&path).map_err(|e| {
-                    IpcError::new(
-                        ErrorCode::Diarization,
-                        format!("load CAM++ at {}: {e}", path.display()),
-                    )
-                })?;
-                tracing::info!(
-                    model = %path.display(),
-                    load_ms = started.elapsed().as_millis() as u64,
-                    "CAM++ speaker embedder ready"
-                );
-                Box::new(emb)
-            } else {
-                let emb = Eres2NetEmbedder::new(&path).map_err(|e| {
-                    IpcError::new(
-                        ErrorCode::Diarization,
-                        format!("load ERes2Net at {}: {e}", path.display()),
-                    )
-                })?;
-                tracing::info!(
-                    model = %path.display(),
-                    load_ms = started.elapsed().as_millis() as u64,
-                    "ERes2Net speaker embedder ready"
-                );
-                Box::new(emb)
-            };
-
-        // CAM++ 512-dim embeddings have a higher cross-speaker baseline
-        // than ERes2Net 192-dim. In controlled English fixtures
-        // cross-speaker cosine is ~0.57, but real-world Spanish podcasts
-        // (same mic, same gender, similar timbre) can push cross-speaker
-        // to 0.70–0.85.
-        //
-        // Hard case: a video played through speakers and captured by a
-        // single mic — every voice shares the same acoustic path (same
-        // bocina, same room reverb, same compression) so cosines pile
-        // up in the 0.80–0.90 band even for clearly distinct speakers.
-        // That's why we sit at 0.85 by default: high enough to split
-        // most video-style recordings, low enough that the same speaker
-        // doesn't over-split across short streaming chunks. Real
-        // in-room meetings rarely have cross-speaker cosine that high,
-        // so the same threshold works for both. Users who hit edge
-        // cases can override via ECHO_DIAR_SIM_THRESHOLD (dev builds).
-        //
-        // `merge_threshold = 1.0` keeps online merging disabled — the
-        // EMA centroids drift toward each other over time and would
-        // cascade-merge all speakers at any threshold < 1.0. The
-        // offline AHC pass (refine_offline) handles merging using
-        // full-session means instead of noisy EMAs.
+        // Thresholds come from the shared per-embedder presets
+        // (`echo_diarize::presets`), calibrated with `echo-proto bench
+        // der`. Dev builds can override the online similarity threshold
+        // with ECHO_DIAR_SIM_THRESHOLD.
         let env_sim_threshold = if cfg!(debug_assertions) {
             std::env::var("ECHO_DIAR_SIM_THRESHOLD")
                 .ok()
@@ -514,27 +464,27 @@ impl AppState {
         } else {
             None
         };
-        let cluster_cfg = if file_name.contains("camplusplus") || file_name.contains("campplus") {
-            echo_diarize::OnlineClusterConfig {
-                similarity_threshold: env_sim_threshold.unwrap_or(0.85),
-                merge_threshold: 1.0, // disable online merge for CAM++
-                ..Default::default()
-            }
-        } else {
-            // ERes2Net (192-dim, lower cross-speaker baseline). 0.65 is
-            // calibrated for video-style input where cosines run hot;
-            // the old 0.55 default over-split heavily on real meetings
-            // but is still useful as a fallback.
-            echo_diarize::OnlineClusterConfig {
-                similarity_threshold: env_sim_threshold.unwrap_or(0.65),
-                ..Default::default()
-            }
-        };
-        // `with_offline_refinement` enables embedding accumulation so
-        // the streaming pipeline can run an AHC pass at end-of-session
-        // and emit SpeakersMerged. Without this the embedder's online
-        // over-splits would persist in the meeting record forever.
-        let mut diarizer = OnlineDiarizer::new(embedder, cluster_cfg).with_offline_refinement();
+        let (family, cluster_cfg, refine_cfg) = diarizer_preset(&path, env_sim_threshold);
+        let started = std::time::Instant::now();
+        let embedder = family.load(&path).map_err(|e| {
+            IpcError::new(
+                ErrorCode::Diarization,
+                format!("load {family:?} embedder at {}: {e}", path.display()),
+            )
+        })?;
+        tracing::info!(
+            model = %path.display(),
+            family = ?family,
+            similarity_threshold = cluster_cfg.similarity_threshold,
+            max_speakers = cluster_cfg.max_speakers,
+            refine_threshold = refine_cfg.merge_threshold,
+            load_ms = started.elapsed().as_millis() as u64,
+            "speaker embedder ready"
+        );
+        // Embedding accumulation lets the streaming pipeline run the
+        // offline refinement at end-of-session and emit SpeakersMerged.
+        let mut diarizer =
+            OnlineDiarizer::new(embedder, cluster_cfg).with_offline_refinement_config(refine_cfg);
 
         // Attach pyannote segmenter if the model file is installed.
         if self.seg_model_path.exists() {
@@ -702,6 +652,21 @@ fn preferred_llm_model(root: &Path) -> &'static str {
         }
     }
     "models/llm/Qwen3-14B-Q4_K_M.gguf"
+}
+
+/// Diarizer configuration for the embedder at `path`: the shared
+/// [`EmbedderFamily`] preset, with `similarity_override` (the dev-only
+/// `ECHO_DIAR_SIM_THRESHOLD`) replacing the online similarity threshold.
+fn diarizer_preset(
+    path: &Path,
+    similarity_override: Option<f32>,
+) -> (EmbedderFamily, OnlineClusterConfig, OfflineRefineConfig) {
+    let family = EmbedderFamily::from_path(path);
+    (
+        family,
+        family.cluster_config(similarity_override),
+        family.refine_config(),
+    )
 }
 
 fn preferred_embed_model(root: &Path) -> &'static str {
@@ -889,10 +854,10 @@ mod llm_selection_tests {
     const GEMMA_12B: &str = "models/llm/gemma-4-12B-it-qat-q4_0.gguf";
 
     /// Fresh empty data root under the system temp dir, removed on drop.
-    struct Root(PathBuf);
+    pub(super) struct Root(pub(super) PathBuf);
 
     impl Root {
-        fn new(name: &str) -> Self {
+        pub(super) fn new(name: &str) -> Self {
             let dir = std::env::temp_dir().join(format!(
                 "echonote-llm-{name}-{}-{}",
                 std::process::id(),
@@ -904,16 +869,20 @@ mod llm_selection_tests {
             Self(dir)
         }
 
-        fn install(&self, rel: &str) {
+        pub(super) fn install(&self, rel: &str) {
             let path = self.0.join(rel);
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(path, b"x").unwrap();
         }
 
         fn prefer(&self, rel: &str) {
+            self.prefer_for("llm", rel);
+        }
+
+        pub(super) fn prefer_for(&self, key: &str, rel: &str) {
             std::fs::write(
                 self.0.join("model_preferences.json"),
-                format!("{{\"llm\":\"{rel}\"}}"),
+                format!("{{\"{key}\":\"{rel}\"}}"),
             )
             .unwrap();
         }
@@ -964,5 +933,71 @@ mod llm_selection_tests {
         let root = Root::new("only-gemma");
         root.install(GEMMA_E4B);
         assert_eq!(preferred_llm_model(&root.0), GEMMA_E4B);
+    }
+}
+
+#[cfg(test)]
+mod embedder_selection_tests {
+    use super::llm_selection_tests::Root;
+    use super::*;
+    use echo_diarize::EmbedderFamily;
+
+    const MULTI: &str = "models/embedder/campplus_zh_en_common_advanced.onnx";
+    const CAM_EN: &str = "models/embedder/campplus_en_voxceleb.onnx";
+    const ERES2NET: &str = "models/embedder/eres2net_en_voxceleb.onnx";
+
+    #[test]
+    fn a_saved_preference_still_wins() {
+        let root = Root::new("embed-chosen");
+        root.install(MULTI);
+        root.install(CAM_EN);
+        root.prefer_for("embedder", CAM_EN);
+        assert_eq!(preferred_embed_model(&root.0), CAM_EN);
+    }
+
+    #[test]
+    fn without_the_multilingual_model_the_old_order_applies() {
+        let root = Root::new("embed-fallback");
+        root.install(ERES2NET);
+        root.install(CAM_EN);
+        assert_eq!(preferred_embed_model(&root.0), CAM_EN);
+        let empty = Root::new("embed-none");
+        assert_eq!(preferred_embed_model(&empty.0), ERES2NET);
+    }
+
+    #[test]
+    fn diarizer_config_comes_from_the_shared_presets() {
+        for rel in [MULTI, CAM_EN, ERES2NET] {
+            let path = Path::new("/data").join(rel);
+            let family = EmbedderFamily::from_path(&path);
+            let (got_family, cluster, refine) = diarizer_preset(&path, None);
+            assert_eq!(got_family, family, "{rel}");
+            assert_eq!(cluster, family.cluster_config(None), "{rel}");
+            assert_eq!(
+                refine.merge_threshold,
+                family.refine_config().merge_threshold,
+                "{rel}"
+            );
+            let (_, overridden, _) = diarizer_preset(&path, Some(0.42));
+            assert_eq!(overridden, family.cluster_config(Some(0.42)), "{rel}");
+        }
+    }
+
+    #[test]
+    fn the_shell_keeps_no_second_threshold_table() {
+        // Thresholds live in `echo_diarize::presets`; production code
+        // here must not build cluster configs by hand.
+        let src = include_str!("mod.rs");
+        let production = src.split("#[cfg(test)]").next().unwrap();
+        for needle in [
+            "OnlineClusterConfig {",
+            "similarity_threshold:",
+            "merge_threshold:",
+        ] {
+            assert!(
+                !production.contains(needle),
+                "src-tauri/src/commands/mod.rs builds `{needle}` by hand"
+            );
+        }
     }
 }
