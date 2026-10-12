@@ -685,9 +685,11 @@ fn preferred_embed_model(root: &Path) -> &'static str {
             }
         }
     }
-    // CAM++ has lower EER and better multilingual coverage than ERes2Net,
-    // so prefer it when already installed.
+    // Without a preference: the multilingual CAM++ first (lowest DER on
+    // Spanish and on English in the T6/T6b DER benchmark), then the EN
+    // CAM++ (lower EER than ERes2Net), then ERes2Net.
     const CANDIDATES: &[&str] = &[
+        "models/embedder/campplus_zh_en_common_advanced.onnx",
         "models/embedder/campplus_en_voxceleb.onnx",
         "models/embedder/eres2net_en_voxceleb.onnx",
     ];
@@ -945,6 +947,15 @@ mod embedder_selection_tests {
     const MULTI: &str = "models/embedder/campplus_zh_en_common_advanced.onnx";
     const CAM_EN: &str = "models/embedder/campplus_en_voxceleb.onnx";
     const ERES2NET: &str = "models/embedder/eres2net_en_voxceleb.onnx";
+
+    #[test]
+    fn multilingual_campplus_is_the_default_when_installed() {
+        let root = Root::new("embed-default");
+        root.install(ERES2NET);
+        root.install(CAM_EN);
+        root.install(MULTI);
+        assert_eq!(preferred_embed_model(&root.0), MULTI);
+    }
 
     #[test]
     fn a_saved_preference_still_wins() {
