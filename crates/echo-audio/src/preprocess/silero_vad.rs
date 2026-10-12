@@ -42,6 +42,8 @@
 //! apply the same `start_frames` / `end_frames` hysteresis as
 //! [`super::vad::EnergyVad`], with thresholds tuned for the model's
 //! probability scale (`start_threshold ≈ 0.5`, `end_threshold ≈ 0.35`).
+//! [`Vad::push_frames`] reports the probability and hysteresis state
+//! of every window, so callers can cut audio where speech ends.
 //!
 //! ## Cost
 //!
@@ -54,8 +56,9 @@ use std::path::Path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use echo_domain::ports::vad::VadFrame;
 use echo_domain::{DomainError, Sample, Vad, VoiceState};
-use tracing::info;
+use tracing::debug;
 use tract_onnx::prelude::*;
 
 /// Sample rate Silero VAD was trained for.
@@ -154,20 +157,130 @@ impl Default for FrameContext {
 }
 
 impl FrameContext {
-    /// Build `context ++ hop` and keep the hop's last 64 samples as
-    /// the context for the next call.
-    fn assemble(&mut self, hop: &[Sample]) -> [Sample; SILERO_INPUT_SAMPLES] {
+    /// Build `context ++ hop`. Does not advance the context: call
+    /// [`Self::advance`] once the frame was successfully inferred.
+    fn assemble(&self, hop: &[Sample]) -> [Sample; SILERO_INPUT_SAMPLES] {
         debug_assert_eq!(hop.len(), SILERO_FRAME_SAMPLES);
         let mut frame = [0.0; SILERO_INPUT_SAMPLES];
         frame[..SILERO_CONTEXT_SAMPLES].copy_from_slice(&self.tail);
         frame[SILERO_CONTEXT_SAMPLES..].copy_from_slice(hop);
+        frame
+    }
+
+    /// Keep the hop's last 64 samples as the context for the next one.
+    fn advance(&mut self, hop: &[Sample]) {
         self.tail
             .copy_from_slice(&hop[SILERO_FRAME_SAMPLES - SILERO_CONTEXT_SAMPLES..]);
-        frame
     }
 
     fn clear(&mut self) {
         self.tail = [0.0; SILERO_CONTEXT_SAMPLES];
+    }
+}
+
+/// Model-independent streaming bookkeeping: splits pushes into
+/// 512-sample windows (carrying the remainder across pushes), applies
+/// the start/end hysteresis and counts silent windows across pushes.
+/// Kept apart from the network so it can be tested with scripted
+/// probabilities.
+#[derive(Debug, Clone)]
+struct FrameScanner {
+    /// Audio that did not fill a 512-sample window on the previous push.
+    carry: Vec<Sample>,
+    hysteresis: VoiceState,
+    voiced_run: u8,
+    silent_run: u8,
+    /// Consecutive silent 512-sample windows accumulated across chunk
+    /// boundaries. When this reaches `config.lstm_state_reset_frames`
+    /// the LSTM state is reset at the next `push` call.
+    cross_chunk_silent_windows: u8,
+}
+
+impl Default for FrameScanner {
+    fn default() -> Self {
+        Self {
+            carry: Vec::with_capacity(SILERO_FRAME_SAMPLES),
+            hysteresis: VoiceState::Silence,
+            voiced_run: 0,
+            silent_run: 0,
+            cross_chunk_silent_windows: 0,
+        }
+    }
+}
+
+impl FrameScanner {
+    /// Run `infer` over every window completed by `samples` and return
+    /// one [`VadFrame`] per window, with ends relative to `samples`.
+    /// An inference error aborts the scan and is returned as is.
+    fn scan(
+        &mut self,
+        samples: &[Sample],
+        config: &SileroVadConfig,
+        infer: &mut impl FnMut(&[Sample]) -> Result<f32, DomainError>,
+    ) -> Result<Vec<VadFrame>, DomainError> {
+        let carried = self.carry.len();
+        let mut buf: Vec<Sample> = if carried == 0 {
+            samples.to_vec()
+        } else {
+            let mut b = Vec::with_capacity(carried + samples.len());
+            b.append(&mut self.carry);
+            b.extend_from_slice(samples);
+            b
+        };
+
+        let mut frames = Vec::with_capacity(buf.len() / SILERO_FRAME_SAMPLES);
+        let mut cursor = 0;
+        while cursor + SILERO_FRAME_SAMPLES <= buf.len() {
+            let probability = infer(&buf[cursor..cursor + SILERO_FRAME_SAMPLES])?;
+            self.step_hysteresis(probability, config);
+            if probability >= config.end_threshold {
+                // Any voice energy resets the cross-chunk silence counter
+                // so the LSTM state is preserved into the next chunk.
+                self.cross_chunk_silent_windows = 0;
+            } else {
+                self.cross_chunk_silent_windows = self.cross_chunk_silent_windows.saturating_add(1);
+            }
+            cursor += SILERO_FRAME_SAMPLES;
+            frames.push(VadFrame {
+                // A window ends after the carried samples, so this never
+                // underflows: cursor ≥ 512 > carried.
+                end_sample: cursor - carried,
+                probability,
+                state: self.hysteresis,
+            });
+        }
+
+        if cursor < buf.len() {
+            self.carry = buf.split_off(cursor);
+        }
+        Ok(frames)
+    }
+
+    fn step_hysteresis(&mut self, prob: f32, config: &SileroVadConfig) {
+        match self.hysteresis {
+            VoiceState::Silence => {
+                if prob >= config.start_threshold {
+                    self.voiced_run = self.voiced_run.saturating_add(1);
+                    if self.voiced_run >= config.start_frames {
+                        self.hysteresis = VoiceState::Voiced;
+                        self.silent_run = 0;
+                    }
+                } else {
+                    self.voiced_run = 0;
+                }
+            }
+            VoiceState::Voiced => {
+                if prob <= config.end_threshold {
+                    self.silent_run = self.silent_run.saturating_add(1);
+                    if self.silent_run >= config.end_frames {
+                        self.hysteresis = VoiceState::Silence;
+                        self.voiced_run = 0;
+                    }
+                } else {
+                    self.silent_run = 0;
+                }
+            }
+        }
     }
 }
 
@@ -184,15 +297,8 @@ pub struct SileroVad {
     state: Tensor,
     /// Tail of the previous hop; zeroed together with `state`.
     context: FrameContext,
-    /// Audio that did not fill a 512-sample window on the previous push.
-    carry: Vec<Sample>,
-    hysteresis: VoiceState,
-    voiced_run: u8,
-    silent_run: u8,
-    /// Consecutive silent 512-sample windows accumulated across chunk
-    /// boundaries. When this reaches `config.lstm_state_reset_frames`
-    /// the LSTM state is reset at the next `push` call.
-    cross_chunk_silent_windows: u8,
+    /// Windowing, hysteresis and cross-push silence bookkeeping.
+    scanner: FrameScanner,
 }
 
 impl std::fmt::Debug for SileroVad {
@@ -200,11 +306,11 @@ impl std::fmt::Debug for SileroVad {
         f.debug_struct("SileroVad")
             .field("config", &self.config)
             .field("state", &"<Tensor [2,1,128]>")
-            .field("carry_len", &self.carry.len())
-            .field("hysteresis", &self.hysteresis)
+            .field("carry_len", &self.scanner.carry.len())
+            .field("hysteresis", &self.scanner.hysteresis)
             .field(
                 "cross_chunk_silent_windows",
-                &self.cross_chunk_silent_windows,
+                &self.scanner.cross_chunk_silent_windows,
             )
             .finish()
     }
@@ -251,11 +357,7 @@ impl SileroVad {
             config,
             state: zero_state(),
             context: FrameContext::default(),
-            carry: Vec::with_capacity(SILERO_FRAME_SAMPLES),
-            hysteresis: VoiceState::Silence,
-            voiced_run: 0,
-            silent_run: 0,
-            cross_chunk_silent_windows: 0,
+            scanner: FrameScanner::default(),
         })
     }
 
@@ -281,47 +383,21 @@ impl SileroVad {
             config: self.config,
             state: zero_state(),
             context: FrameContext::default(),
-            carry: Vec::with_capacity(SILERO_FRAME_SAMPLES),
-            hysteresis: VoiceState::Silence,
-            voiced_run: 0,
-            silent_run: 0,
-            cross_chunk_silent_windows: 0,
+            scanner: FrameScanner::default(),
         }
     }
 
     /// Run a single 512-sample hop (with the 64-sample context of the
     /// previous hop prepended) through the network and return the raw
     /// speech probability in `[0.0, 1.0]`. Updates the LSTM state and
-    /// the context in place. Used by [`Self::push`] but exposed for
-    /// tests and tooling that wants the raw signal.
+    /// the context only when inference succeeds. Used by
+    /// [`Vad::push`] but exposed for tests and tooling that wants the
+    /// raw signal.
+    ///
+    /// Returns [`DomainError::VadFailed`] when `window` is not exactly
+    /// [`SILERO_FRAME_SAMPLES`] long.
     pub fn infer_window(&mut self, window: &[Sample]) -> Result<f32, DomainError> {
-        let frame = self.context.assemble(window);
-        let audio = Tensor::from_shape(&[1, SILERO_INPUT_SAMPLES], &frame)
-            .map_err(|e| DomainError::VadFailed(format!("audio tensor: {e}")))?;
-
-        let inputs = tvec!(audio.into_tvalue(), self.state.clone().into_tvalue(),);
-        let mut outputs = self
-            .model
-            .run(inputs)
-            .map_err(|e| DomainError::VadFailed(format!("inference: {e}")))?;
-
-        // outputs[0] is `output [1, 1]`, outputs[1] is `stateN [2, 1, 128]`.
-        let new_state_tv = outputs.remove(1);
-        let prob_tv = outputs.remove(0);
-
-        let prob_t = prob_tv
-            .into_tensor()
-            .into_shape(&[1, 1])
-            .map_err(|e| DomainError::VadFailed(format!("output shape: {e}")))?;
-        let prob = *prob_t
-            .to_array_view::<f32>()
-            .map_err(|e| DomainError::VadFailed(format!("output dtype: {e}")))?
-            .iter()
-            .next()
-            .ok_or_else(|| DomainError::VadFailed("empty output".into()))?;
-
-        self.state = new_state_tv.into_tensor();
-        Ok(prob.clamp(0.0, 1.0))
+        infer_hop(&self.model, &mut self.state, &mut self.context, window)
     }
 
     /// Zero the LSTM state and the frame context together: the context
@@ -330,33 +406,50 @@ impl SileroVad {
         self.state = zero_state();
         self.context.clear();
     }
+}
 
-    fn step_hysteresis(&mut self, prob: f32) {
-        match self.hysteresis {
-            VoiceState::Silence => {
-                if prob >= self.config.start_threshold {
-                    self.voiced_run = self.voiced_run.saturating_add(1);
-                    if self.voiced_run >= self.config.start_frames {
-                        self.hysteresis = VoiceState::Voiced;
-                        self.silent_run = 0;
-                    }
-                } else {
-                    self.voiced_run = 0;
-                }
-            }
-            VoiceState::Voiced => {
-                if prob <= self.config.end_threshold {
-                    self.silent_run = self.silent_run.saturating_add(1);
-                    if self.silent_run >= self.config.end_frames {
-                        self.hysteresis = VoiceState::Silence;
-                        self.voiced_run = 0;
-                    }
-                } else {
-                    self.silent_run = 0;
-                }
-            }
-        }
+/// Inference for one hop over explicit state, so [`FrameScanner::scan`]
+/// can borrow the scanner and the network state disjointly.
+fn infer_hop(
+    model: &SileroModel,
+    state: &mut Tensor,
+    context: &mut FrameContext,
+    window: &[Sample],
+) -> Result<f32, DomainError> {
+    if window.len() != SILERO_FRAME_SAMPLES {
+        return Err(DomainError::VadFailed(format!(
+            "Silero hop must be {SILERO_FRAME_SAMPLES} samples, got {}",
+            window.len()
+        )));
     }
+    let frame = context.assemble(window);
+    let audio = Tensor::from_shape(&[1, SILERO_INPUT_SAMPLES], &frame)
+        .map_err(|e| DomainError::VadFailed(format!("audio tensor: {e}")))?;
+
+    let inputs = tvec!(audio.into_tvalue(), state.clone().into_tvalue(),);
+    let mut outputs = model
+        .run(inputs)
+        .map_err(|e| DomainError::VadFailed(format!("inference: {e}")))?;
+
+    // outputs[0] is `output [1, 1]`, outputs[1] is `stateN [2, 1, 128]`.
+    let new_state_tv = outputs.remove(1);
+    let prob_tv = outputs.remove(0);
+
+    let prob_t = prob_tv
+        .into_tensor()
+        .into_shape(&[1, 1])
+        .map_err(|e| DomainError::VadFailed(format!("output shape: {e}")))?;
+    let prob = *prob_t
+        .to_array_view::<f32>()
+        .map_err(|e| DomainError::VadFailed(format!("output dtype: {e}")))?
+        .iter()
+        .next()
+        .ok_or_else(|| DomainError::VadFailed("empty output".into()))?;
+
+    // Commit the stream state only after the whole inference succeeded.
+    *state = new_state_tv.into_tensor();
+    context.advance(window);
+    Ok(prob.clamp(0.0, 1.0))
 }
 
 #[async_trait]
@@ -366,6 +459,20 @@ impl Vad for SileroVad {
     }
 
     async fn push(&mut self, samples: &[Sample]) -> Result<VoiceState, DomainError> {
+        // A 5-second chunk contains ~156 windows; the hysteresis may
+        // flip back to Silence at the tail end even though 3 s of
+        // speech appeared earlier. The caller wants to know "should I
+        // transcribe this chunk?" — the answer is yes if any window
+        // was voiced.
+        let frames = self.push_frames(samples).await?;
+        if frames.iter().any(|f| f.state == VoiceState::Voiced) {
+            Ok(VoiceState::Voiced)
+        } else {
+            Ok(self.scanner.hysteresis)
+        }
+    }
+
+    async fn push_frames(&mut self, samples: &[Sample]) -> Result<Vec<VadFrame>, DomainError> {
         // Reset the LSTM hidden state only when enough consecutive silent
         // windows have accumulated across chunk boundaries. During active
         // speech or short inter-chunk pauses the state propagates freely,
@@ -376,96 +483,40 @@ impl Vad for SileroVad {
         // Setting lstm_state_reset_frames = 0 restores the legacy
         // per-chunk reset (zero means "always reset").
         if self.config.lstm_state_reset_frames == 0
-            || self.cross_chunk_silent_windows >= self.config.lstm_state_reset_frames
+            || self.scanner.cross_chunk_silent_windows >= self.config.lstm_state_reset_frames
         {
             self.clear_lstm();
         }
 
-        // Concat carry + new samples, then drain in 512-sample windows.
-        let mut buf: Vec<Sample> = if self.carry.is_empty() {
-            samples.to_vec()
-        } else {
-            let mut b = Vec::with_capacity(self.carry.len() + samples.len());
-            b.append(&mut self.carry);
-            b.extend_from_slice(samples);
-            b
-        };
+        let Self {
+            model,
+            config,
+            state,
+            context,
+            scanner,
+        } = self;
+        let frames = scanner.scan(samples, config, &mut |hop| {
+            infer_hop(model, state, context, hop)
+        })?;
 
-        // Track whether voice was detected at *any* point during this
-        // push. A 5-second chunk contains ~156 windows; the hysteresis
-        // may flip back to Silence at the tail end even though 3 s of
-        // speech appeared earlier. The caller wants to know "should I
-        // transcribe this chunk?" — the answer is yes if any window
-        // was voiced. We still step the hysteresis on every frame so
-        // the LSTM state stays coherent within this push.
-        let mut any_voiced = false;
-        let mut max_prob: f32 = 0.0;
-        let mut sum_prob: f32 = 0.0;
-        let mut n_windows: u32 = 0;
-        let mut n_above_start: u32 = 0;
-        let mut n_above_end: u32 = 0;
-
-        let mut cursor = 0;
-        while cursor + SILERO_FRAME_SAMPLES <= buf.len() {
-            let prob = self.infer_window(&buf[cursor..cursor + SILERO_FRAME_SAMPLES])?;
-            self.step_hysteresis(prob);
-            if self.hysteresis == VoiceState::Voiced {
-                any_voiced = true;
-            }
-            max_prob = max_prob.max(prob);
-            sum_prob += prob;
-            n_windows += 1;
-            if prob >= self.config.start_threshold {
-                n_above_start += 1;
-            }
-            if prob >= self.config.end_threshold {
-                n_above_end += 1;
-                // Any voice energy resets the cross-chunk silence counter
-                // so the LSTM state is preserved into the next chunk.
-                self.cross_chunk_silent_windows = 0;
-            } else {
-                self.cross_chunk_silent_windows = self.cross_chunk_silent_windows.saturating_add(1);
-            }
-            cursor += SILERO_FRAME_SAMPLES;
+        if !frames.is_empty() {
+            let n = frames.len() as f32;
+            let max_prob = frames.iter().map(|f| f.probability).fold(0.0_f32, f32::max);
+            let mean_prob = frames.iter().map(|f| f.probability).sum::<f32>() / n;
+            debug!(
+                windows = frames.len(),
+                max_prob = format!("{max_prob:.3}"),
+                mean_prob = format!("{mean_prob:.3}"),
+                hysteresis = ?self.scanner.hysteresis,
+                "VAD push stats"
+            );
         }
-
-        if cursor < buf.len() {
-            self.carry = buf.split_off(cursor);
-        }
-
-        let mean_prob = if n_windows > 0 {
-            sum_prob / n_windows as f32
-        } else {
-            0.0
-        };
-
-        let result = if any_voiced {
-            VoiceState::Voiced
-        } else {
-            self.hysteresis
-        };
-
-        info!(
-            windows = n_windows,
-            max_prob = format!("{max_prob:.3}"),
-            mean_prob = format!("{mean_prob:.3}"),
-            above_start = n_above_start,
-            above_end = n_above_end,
-            hysteresis = ?self.hysteresis,
-            result = ?result,
-            "VAD chunk stats"
-        );
-
-        Ok(result)
+        Ok(frames)
     }
 
     fn reset(&mut self) {
         self.clear_lstm();
-        self.carry.clear();
-        self.hysteresis = VoiceState::Silence;
-        self.voiced_run = 0;
-        self.silent_run = 0;
-        self.cross_chunk_silent_windows = 0;
+        self.scanner = FrameScanner::default();
     }
 }
 
@@ -624,11 +675,11 @@ mod tests {
         // graph. We can't compare Arc::ptr_eq directly without
         // exposing the field, so just sanity-check the child starts
         // at the silence baseline.
-        assert_eq!(child.hysteresis, VoiceState::Silence);
-        assert_eq!(child.voiced_run, 0);
-        assert_eq!(child.silent_run, 0);
-        assert_eq!(child.cross_chunk_silent_windows, 0);
-        assert!(child.carry.is_empty());
+        assert_eq!(child.scanner.hysteresis, VoiceState::Silence);
+        assert_eq!(child.scanner.voiced_run, 0);
+        assert_eq!(child.scanner.silent_run, 0);
+        assert_eq!(child.scanner.cross_chunk_silent_windows, 0);
+        assert!(child.scanner.carry.is_empty());
 
         // And it should still classify pure silence as silent on a
         // fresh stream — proves the LSTM state was zeroed too.
@@ -680,7 +731,7 @@ mod tests {
             vad.push(&silent_window).await.unwrap();
         }
         assert!(
-            vad.cross_chunk_silent_windows >= 4,
+            vad.scanner.cross_chunk_silent_windows >= 4,
             "counter should have reached threshold after 4 silent windows"
         );
 
@@ -694,7 +745,7 @@ mod tests {
         let mut counter_was_reset = false;
         for hop in speech.as_chunks::<SILERO_FRAME_SAMPLES>().0 {
             vad.push(hop).await.unwrap();
-            if vad.cross_chunk_silent_windows == 0 {
+            if vad.scanner.cross_chunk_silent_windows == 0 {
                 counter_was_reset = true;
                 break;
             }
@@ -762,7 +813,7 @@ mod tests {
 
     #[test]
     fn first_frame_is_zero_context_followed_by_the_hop() {
-        let mut ctx = FrameContext::default();
+        let ctx = FrameContext::default();
         let hop = ramp_hop(1.0);
         let frame = ctx.assemble(&hop);
         assert_eq!(frame.len(), SILERO_INPUT_SAMPLES);
@@ -775,7 +826,7 @@ mod tests {
         let mut ctx = FrameContext::default();
         let first = ramp_hop(1.0);
         let second = ramp_hop(10_000.0);
-        ctx.assemble(&first);
+        ctx.advance(&first);
         let frame = ctx.assemble(&second);
         assert_eq!(
             &frame[..SILERO_CONTEXT_SAMPLES],
@@ -787,7 +838,7 @@ mod tests {
     #[test]
     fn clear_zeroes_the_context() {
         let mut ctx = FrameContext::default();
-        ctx.assemble(&ramp_hop(1.0));
+        ctx.advance(&ramp_hop(1.0));
         ctx.clear();
         let frame = ctx.assemble(&ramp_hop(1.0));
         assert!(frame[..SILERO_CONTEXT_SAMPLES].iter().all(|&x| x == 0.0));
@@ -826,12 +877,164 @@ mod tests {
         vad.push(&vec![0.0_f32; 2 * SILERO_FRAME_SAMPLES])
             .await
             .unwrap();
-        assert!(vad.cross_chunk_silent_windows >= 2);
+        assert!(vad.scanner.cross_chunk_silent_windows >= 2);
 
         // Poison the context, then push less than one hop: the reset
         // at the start of `push` must clear it without any inference.
         vad.context.tail = [1.0; SILERO_CONTEXT_SAMPLES];
         vad.push(&[0.0_f32; 100]).await.unwrap();
         assert!(context_is_zero(&vad));
+    }
+
+    #[test]
+    fn assembling_a_frame_does_not_advance_the_context() {
+        let mut ctx = FrameContext::default();
+        ctx.advance(&ramp_hop(1.0));
+        let before = ctx.tail;
+        let _ = ctx.assemble(&ramp_hop(10_000.0));
+        assert_eq!(
+            ctx.tail, before,
+            "only a successful inference may advance it"
+        );
+    }
+
+    /// Inference stub returning `probs` in order, one per hop.
+    fn scripted(probs: &[f32]) -> impl FnMut(&[Sample]) -> Result<f32, DomainError> + '_ {
+        let mut next = probs.iter();
+        move |hop| {
+            assert_eq!(hop.len(), SILERO_FRAME_SAMPLES);
+            Ok(*next.next().expect("script exhausted"))
+        }
+    }
+
+    fn ends(frames: &[VadFrame]) -> Vec<usize> {
+        frames.iter().map(|f| f.end_sample).collect()
+    }
+
+    #[test]
+    fn scanner_reports_window_ends_relative_to_each_push() {
+        let config = SileroVadConfig::meetings();
+        let mut scanner = FrameScanner::default();
+        let probs = [0.0; 3];
+        let mut infer = scripted(&probs);
+
+        let first = scanner.scan(&[0.0; 700], &config, &mut infer).unwrap();
+        assert_eq!(ends(&first), vec![512]);
+        // 188 carried samples + 324 new ones complete the next window.
+        let second = scanner.scan(&[0.0; 400], &config, &mut infer).unwrap();
+        assert_eq!(ends(&second), vec![324]);
+        // 76 + 100 samples do not fill a window: no frame, all carried.
+        let third = scanner.scan(&[0.0; 100], &config, &mut infer).unwrap();
+        assert!(third.is_empty());
+        assert_eq!(scanner.carry.len(), 176);
+    }
+
+    #[test]
+    fn scanner_applies_hysteresis_per_window() {
+        let config = SileroVadConfig {
+            start_threshold: 0.5,
+            end_threshold: 0.3,
+            start_frames: 2,
+            end_frames: 3,
+            lstm_state_reset_frames: 32,
+        };
+        let probs = [0.1, 0.9, 0.9, 0.9, 0.2, 0.4, 0.2, 0.2, 0.2, 0.1];
+        let mut scanner = FrameScanner::default();
+        let frames = scanner
+            .scan(
+                &vec![0.0; probs.len() * SILERO_FRAME_SAMPLES],
+                &config,
+                &mut scripted(&probs),
+            )
+            .unwrap();
+
+        use VoiceState::{Silence as S, Voiced as V};
+        let states: Vec<VoiceState> = frames.iter().map(|f| f.state).collect();
+        // Speech starts on the 2nd consecutive window above 0.5; 0.4
+        // (above the end threshold) restarts the silent run, so speech
+        // ends on the 3rd consecutive window at or below 0.3.
+        assert_eq!(states, vec![S, S, V, V, V, V, V, V, S, S]);
+        let reported: Vec<f32> = frames.iter().map(|f| f.probability).collect();
+        assert_eq!(reported, probs.to_vec());
+        assert_eq!(
+            ends(&frames),
+            (1..=probs.len())
+                .map(|k| k * SILERO_FRAME_SAMPLES)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn scanner_propagates_inference_errors() {
+        let config = SileroVadConfig::meetings();
+        let mut scanner = FrameScanner::default();
+        let mut failing = |_: &[Sample]| -> Result<f32, DomainError> {
+            Err(DomainError::VadFailed("boom".into()))
+        };
+        let result = scanner.scan(&[0.0; SILERO_FRAME_SAMPLES], &config, &mut failing);
+        assert!(matches!(result, Err(DomainError::VadFailed(_))));
+    }
+
+    #[tokio::test]
+    async fn infer_window_rejects_a_wrong_hop_length_without_advancing() {
+        let Some(path) = model_path() else {
+            return;
+        };
+        let mut vad = SileroVad::for_meetings(&path).expect("load model");
+        let result = vad.infer_window(&[0.5; 100]);
+        assert!(
+            matches!(result, Err(DomainError::VadFailed(_))),
+            "{result:?}"
+        );
+        assert!(
+            context_is_zero(&vad),
+            "a rejected hop must not reach the context"
+        );
+    }
+
+    /// End-to-end boundary reporting on real speech: frames are
+    /// contiguous 512-sample windows in stream coordinates, `push`
+    /// agrees with them, and the trailing second of silence produces a
+    /// speech → silence transition exactly where the hysteresis says.
+    #[tokio::test]
+    async fn reports_speech_boundaries_on_meeting_fixture() {
+        let Some(path) = model_path() else {
+            return;
+        };
+        let Some(fixture) = meeting_fixture() else {
+            return;
+        };
+        let config = SileroVadConfig::meetings();
+        let mut vad = SileroVad::from_path(&path, config).expect("load model");
+        let mut samples = load_wav_f32(&fixture);
+        samples.extend(std::iter::repeat_n(0.0, 16_000));
+
+        let mut frames: Vec<VadFrame> = Vec::new();
+        let mut pushed = 0;
+        for chunk in samples.chunks(1_600) {
+            for f in vad.push_frames(chunk).await.unwrap() {
+                assert!(f.end_sample <= chunk.len());
+                frames.push(VadFrame {
+                    end_sample: pushed + f.end_sample,
+                    ..f
+                });
+            }
+            pushed += chunk.len();
+        }
+
+        assert_eq!(frames.len(), samples.len() / SILERO_FRAME_SAMPLES);
+        for (k, f) in frames.iter().enumerate() {
+            assert_eq!(f.end_sample, (k + 1) * SILERO_FRAME_SAMPLES);
+        }
+        assert!(frames.iter().any(|f| f.state == VoiceState::Voiced));
+        assert_eq!(frames.last().unwrap().state, VoiceState::Silence);
+
+        let end = frames
+            .windows(2)
+            .rposition(|w| w[0].state == VoiceState::Voiced && w[1].state == VoiceState::Silence)
+            .map(|i| i + 1)
+            .expect("speech followed by a second of silence must end");
+        let quiet = &frames[end + 1 - config.end_frames as usize..=end];
+        assert!(quiet.iter().all(|f| f.probability <= config.end_threshold));
     }
 }
