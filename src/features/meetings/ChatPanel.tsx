@@ -347,6 +347,7 @@ function replacePlaceholders(
   let lastIndex = 0;
   let match: RegExpExecArray | null;
 
+  // biome-ignore lint/suspicious/noAssignInExpressions: canonical RegExp#exec loop; hoisting the assignment would duplicate the exec call
   while ((match = placeholderRe.exec(text)) !== null) {
     if (match.index > lastIndex) {
       parts.push(text.slice(lastIndex, match.index));

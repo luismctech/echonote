@@ -65,15 +65,13 @@ export const SearchResults = memo(function SearchResults({
                 {m.title}
               </span>
               {/*
-                Snippet markers (`<mark>...</mark>`) are emitted by
-                SQLite over text we ourselves indexed. The XSS surface
-                is therefore identical to rendering the raw segment
-                text, which the rest of the UI already does in plain
-                strings — so `dangerouslySetInnerHTML` here is no more
-                dangerous than e.g. a transcript line.
+                The snippet is HTML-escaped server-side by `sanitize_fts_snippet`
+                (echo-storage, sqlite.rs) before only the FTS5 `<mark>` tags are
+                restored, so transcript text cannot inject markup here.
               */}
               <span
                 className="line-clamp-2 text-ui-xs leading-snug text-content-secondary [&_mark]:rounded-sm [&_mark]:bg-amber-200/60 [&_mark]:px-0.5 [&_mark]:text-content-primary dark:[&_mark]:bg-amber-500/30"
+                // biome-ignore lint/security/noDangerouslySetInnerHtml: escaped server-side by sanitize_fts_snippet; only FTS5 <mark> tags are restored
                 dangerouslySetInnerHTML={{ __html: hit.snippet }}
               />
               <span className="text-micro tabular-nums text-content-placeholder">

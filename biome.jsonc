@@ -21,14 +21,12 @@
 			},
 			"suspicious": {
 				// Downgraded: index keys are used on static/append-only lists; fix needs stable ids.
-				"noArrayIndexKey": "warn",
-				// Downgraded: regex exec loop idiom in ChatPanel placeholder parser.
-				"noAssignInExpressions": "warn"
+				"noArrayIndexKey": "warn"
 			},
 			"security": {
-				// Downgraded, not accepted: SearchResults renders FTS snippets as HTML; needs a
-				// sanitisation review (tracked as follow-up) before this can be an error or silenced.
-				"noDangerouslySetInnerHtml": "warn"
+				// Not in the recommended set; enforced explicitly. The one use (SearchResults)
+				// carries an inline suppression documenting the server-side escaping.
+				"noDangerouslySetInnerHtml": "error"
 			},
 			"a11y": {
 				// Downgraded: accessibility rework of Modal/ContextMenu/ResizableHandle/autofocus is
