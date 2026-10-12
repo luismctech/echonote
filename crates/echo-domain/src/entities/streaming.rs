@@ -69,12 +69,12 @@ pub struct StreamingOptions {
     pub speech_aligned_chunks: bool,
     /// Speech-aligned mode: shortest chunk cut at a speech pause, in
     /// milliseconds, unless the utterance is followed by silence.
-    /// Default 3000.
+    /// Default 4000 (tuned in `docs/spikes/2026-10-vad-chunking-bench.md`).
     #[serde(default = "default_min_chunk_ms")]
     pub min_chunk_ms: u32,
     /// Speech-aligned mode: longest chunk, in milliseconds. Without a
     /// pause by then the chunk is cut at the quietest point shortly
-    /// before it. Must be `>= min_chunk_ms`. Default 15000 (Whisper
+    /// before it. Must be `>= min_chunk_ms`. Default 20000 (Whisper
     /// decodes up to 30 s windows).
     #[serde(default = "default_max_chunk_ms")]
     pub max_chunk_ms: u32,
@@ -83,9 +83,9 @@ pub struct StreamingOptions {
 /// Default for [`StreamingOptions::speech_aligned_chunks`].
 const DEFAULT_SPEECH_ALIGNED_CHUNKS: bool = true;
 /// Default for [`StreamingOptions::min_chunk_ms`].
-const DEFAULT_MIN_CHUNK_MS: u32 = 3_000;
+const DEFAULT_MIN_CHUNK_MS: u32 = 4_000;
 /// Default for [`StreamingOptions::max_chunk_ms`].
-const DEFAULT_MAX_CHUNK_MS: u32 = 15_000;
+const DEFAULT_MAX_CHUNK_MS: u32 = 20_000;
 
 fn default_speech_aligned_chunks() -> bool {
     DEFAULT_SPEECH_ALIGNED_CHUNKS
@@ -286,7 +286,7 @@ mod tests {
         assert!(opts.silence_rms_threshold > 0.0);
         assert!(opts.language.is_none());
         assert!(opts.speech_aligned_chunks);
-        assert_eq!((opts.min_chunk_ms, opts.max_chunk_ms), (3_000, 15_000));
+        assert_eq!((opts.min_chunk_ms, opts.max_chunk_ms), (4_000, 20_000));
     }
 
     #[test]
