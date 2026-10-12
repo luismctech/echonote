@@ -22,9 +22,13 @@
 //!   (Wired Sprint 0 day 10.)
 //! - `bench wer` / `bench llm` — Phase 0 benchmarks.
 //!   (Wired Sprint 0 day 9-10.)
+//! - `bench der` — diarization error rate of the streaming diarizer over
+//!   `<wav> <rttm>` pairs (see [`bench_der`]).
 //!
 //! Every subcommand is a thin adapter that builds the relevant use case
 //! from `echo-app` and executes it.
+
+mod bench_der;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -334,6 +338,60 @@ enum BenchKind {
         #[arg(long)]
         report: Option<PathBuf>,
     },
+    /// Diarization error rate (DER) benchmark.
+    ///
+    /// Runs every `<wav> <rttm>` pair of `--manifest` through the
+    /// streaming pipeline with the app's diarizer preset for the chosen
+    /// embedder (no ASR), applies the offline refinement merges, and
+    /// scores the speaker spans against the reference RTTM.
+    Der {
+        /// Manifest: one `<wav> <rttm>` pair per line, `#` comments,
+        /// paths relative to the manifest's directory.
+        #[arg(long)]
+        manifest: PathBuf,
+        /// Speaker embedder ONNX model; names containing `campplus` load
+        /// CAM++, anything else ERes2Net.
+        #[arg(long, env = "ECHO_EMBED_MODEL")]
+        embedder: PathBuf,
+        /// Pyannote segmenter ONNX model (tract-patched export). Without
+        /// it each chunk is embedded whole.
+        #[arg(long)]
+        segmenter: Option<PathBuf>,
+        /// Override the preset online-cluster similarity threshold.
+        #[arg(long)]
+        threshold: Option<f32>,
+        /// Skip the end-of-session offline refinement pass.
+        #[arg(long, default_value_t = false)]
+        no_refine: bool,
+        /// Silero VAD model for speech-aligned chunks.
+        #[arg(long, env = "ECHO_VAD_MODEL")]
+        vad: Option<PathBuf>,
+        /// Run fixed `--chunk-ms` chunks behind the RMS gate instead of
+        /// the VAD.
+        #[arg(long, default_value_t = false)]
+        no_neural_vad: bool,
+        /// Minimum speech-aligned chunk length.
+        #[arg(long, default_value_t = StreamingOptions::default().min_chunk_ms)]
+        min_chunk_ms: u32,
+        /// Maximum speech-aligned chunk length.
+        #[arg(long, default_value_t = StreamingOptions::default().max_chunk_ms)]
+        max_chunk_ms: u32,
+        /// Fixed chunk length when the neural VAD is off.
+        #[arg(long, default_value_t = 5_000)]
+        chunk_ms: u32,
+        /// Seconds excluded on each side of every reference boundary.
+        #[arg(long, default_value_t = 0.25)]
+        collar: f64,
+        /// Exclude reference overlap regions from scoring.
+        #[arg(long, default_value_t = false)]
+        skip_overlap: bool,
+        /// Write one hypothesis RTTM per recording into this directory.
+        #[arg(long)]
+        hyp_dir: Option<PathBuf>,
+        /// Print the report as JSON.
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
     /// LLM summary benchmark over gold transcripts.
     ///
     /// Scaffolding only — wires the contract (input set, prompt
@@ -425,6 +483,45 @@ async fn main() -> Result<()> {
                 max_wer,
                 report,
             } => run_bench_wer(fixtures, model, language, max_wer, report).await,
+            BenchKind::Der {
+                manifest,
+                embedder,
+                segmenter,
+                threshold,
+                no_refine,
+                vad,
+                no_neural_vad,
+                min_chunk_ms,
+                max_chunk_ms,
+                chunk_ms,
+                collar,
+                skip_overlap,
+                hyp_dir,
+                json,
+            } => {
+                if !no_neural_vad && vad.is_none() {
+                    anyhow::bail!(
+                        "bench der needs --vad (or ECHO_VAD_MODEL) for speech-aligned chunks; \
+                         pass --no-neural-vad for fixed chunks"
+                    );
+                }
+                bench_der::run(bench_der::DerArgs {
+                    manifest,
+                    embedder,
+                    segmenter,
+                    threshold,
+                    no_refine,
+                    vad: vad.filter(|_| !no_neural_vad),
+                    min_chunk_ms,
+                    max_chunk_ms,
+                    chunk_ms,
+                    collar,
+                    skip_overlap,
+                    hyp_dir,
+                    json,
+                })
+                .await
+            }
             BenchKind::Llm { fixtures, model } => run_bench_llm(fixtures, model).await,
         },
         Command::Meetings { kind } => run_meetings(kind).await,

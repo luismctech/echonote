@@ -1,0 +1,551 @@
+//! `bench der`: diarization error rate of the app's streaming
+//! diarization over a manifest of `<wav> <rttm>` pairs.
+//!
+//! Each recording is fed through the real [`StreamingPipeline`] (file
+//! capture, rubato resampler, Silero VAD with speech-aligned chunks,
+//! [`OnlineDiarizer`] with the app's per-embedder preset) with a no-op
+//! transcriber, so chunk boundaries and diarizer calls are exactly the
+//! ones a live session makes. A recording decorator around the diarizer
+//! captures every chunk's speaker spans; `Chunk` events supply each
+//! chunk's session offset and `SpeakersMerged` the offline refinement,
+//! which is applied to the spans before scoring.
+//!
+//! The hypothesis is the diarizer's span timeline. The app persists one
+//! speaker per Whisper segment (dominant span), so app-visible DER also
+//! depends on ASR segmentation; this harness isolates the diarizer.
+
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
+
+use anyhow::{bail, ensure, Context, Result};
+use async_trait::async_trait;
+use serde::Serialize;
+
+use echo_app::StreamingPipeline;
+use echo_audio::{RubatoResamplerAdapter, SileroVad};
+use echo_diarize::{
+    parse_rttm, score_der, write_rttm, DerConfig, DerReport, EmbedderFamily, OnlineDiarizer,
+    PyannoteSegmenter, RttmSegment,
+};
+use echo_domain::{
+    AudioCapture, AudioFormat, AudioFrame, AudioSource, AudioStream, CaptureSpec, DeviceInfo,
+    Diarizer, DomainError, Resampler, Sample, Speaker, SpeakerId, SpeakerSpan, StreamingOptions,
+    TranscribeOptions, Transcriber, Transcript, TranscriptEvent,
+};
+
+/// Diarizer sample rate: spans are in 16 kHz samples.
+const SPAN_RATE_HZ: f64 = 16_000.0;
+/// Device frames per capture callback (20 ms at 16 kHz), like a live mic.
+const FRAME_MS: u32 = 20;
+
+/// Options of `echo-proto bench der`.
+#[derive(Debug, Clone)]
+pub(crate) struct DerArgs {
+    /// Manifest file: one `<wav> <rttm>` pair per line.
+    pub manifest: PathBuf,
+    /// Speaker embedder model; the family follows the file name.
+    pub embedder: PathBuf,
+    /// Optional pyannote segmenter model (whole-chunk embedding when absent).
+    pub segmenter: Option<PathBuf>,
+    /// Override of the preset similarity threshold.
+    pub threshold: Option<f32>,
+    /// Skip the end-of-session offline refinement.
+    pub no_refine: bool,
+    /// Silero VAD model; `None` runs fixed chunks behind the RMS gate.
+    pub vad: Option<PathBuf>,
+    /// Speech-aligned chunk bounds (ignored without a VAD).
+    pub min_chunk_ms: u32,
+    /// Speech-aligned chunk bounds (ignored without a VAD).
+    pub max_chunk_ms: u32,
+    /// Fixed chunk length when no VAD is used.
+    pub chunk_ms: u32,
+    /// Scoring collar in seconds on each side of reference boundaries.
+    pub collar: f64,
+    /// Exclude reference overlap from scoring.
+    pub skip_overlap: bool,
+    /// Directory to write hypothesis RTTMs into.
+    pub hyp_dir: Option<PathBuf>,
+    /// Print a JSON report instead of the text table.
+    pub json: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct FileReport {
+    name: String,
+    audio_s: f64,
+    der: f64,
+    missed: f64,
+    false_alarm: f64,
+    confusion: f64,
+    scored_s: f64,
+    ref_speakers: usize,
+    hyp_speakers: usize,
+    chunks: usize,
+    merges: usize,
+    elapsed_s: f64,
+}
+
+#[derive(Debug, Serialize)]
+struct Report {
+    embedder: String,
+    family: String,
+    similarity_threshold: f32,
+    segmenter: Option<String>,
+    refine: bool,
+    vad: Option<String>,
+    min_chunk_ms: u32,
+    max_chunk_ms: u32,
+    collar: f64,
+    skip_overlap: bool,
+    files: Vec<FileReport>,
+    pooled: PooledReport,
+}
+
+#[derive(Debug, Serialize)]
+struct PooledReport {
+    der: f64,
+    missed: f64,
+    false_alarm: f64,
+    confusion: f64,
+    scored_s: f64,
+    /// Mean of |hyp_speakers - ref_speakers| over files.
+    mean_abs_speaker_count_error: f64,
+}
+
+/// Entry point of `echo-proto bench der`.
+pub(crate) async fn run(args: DerArgs) -> Result<()> {
+    let pairs = read_manifest(&args.manifest)?;
+    ensure!(
+        !pairs.is_empty(),
+        "manifest {} lists no pairs",
+        args.manifest.display()
+    );
+    ensure!(
+        args.embedder.exists(),
+        "embedder {} not found",
+        args.embedder.display()
+    );
+    let family = EmbedderFamily::from_path(&args.embedder);
+    let cluster = family.cluster_config(args.threshold);
+    let der_config = DerConfig {
+        collar: args.collar,
+        skip_overlap: args.skip_overlap,
+    };
+
+    let mut files = Vec::with_capacity(pairs.len());
+    let mut pooled = DerReport::default();
+    for (wav, rttm) in &pairs {
+        let name = wav
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("recording")
+            .to_string();
+        let reference = parse_rttm(
+            &std::fs::read_to_string(rttm).with_context(|| format!("read {}", rttm.display()))?,
+        )
+        .with_context(|| format!("parse {}", rttm.display()))?;
+
+        let mut diarizer = OnlineDiarizer::new(family.load(&args.embedder)?, cluster);
+        if !args.no_refine {
+            diarizer = diarizer.with_offline_refinement();
+        }
+        if let Some(seg) = &args.segmenter {
+            diarizer = diarizer.with_segmenter(Box::new(
+                PyannoteSegmenter::new(seg).context("load pyannote segmenter")?,
+            ));
+        }
+        let started = Instant::now();
+        let run = diarize_file(wav, Box::new(diarizer), &args).await?;
+        let elapsed_s = started.elapsed().as_secs_f64();
+
+        let hypothesis = spans_to_segments(&name, &run.chunks, &resolve_merges(&run.merges));
+        if let Some(dir) = &args.hyp_dir {
+            std::fs::create_dir_all(dir)?;
+            std::fs::write(dir.join(format!("{name}.rttm")), write_rttm(&hypothesis))?;
+        }
+        let r = score_der(&reference, &hypothesis, &der_config);
+        pooled += r;
+        let file = FileReport {
+            name,
+            audio_s: run.audio_s,
+            der: r.der(),
+            missed: r.missed,
+            false_alarm: r.false_alarm,
+            confusion: r.confusion,
+            scored_s: r.total,
+            ref_speakers: r.ref_speakers,
+            hyp_speakers: r.hyp_speakers,
+            chunks: run.chunks.len(),
+            merges: run.merges.len(),
+            elapsed_s,
+        };
+        if !args.json {
+            eprintln!(
+                "{:<16} DER {:>6.2}%  miss {:>6.1}s  FA {:>6.1}s  conf {:>6.1}s  spk {}/{}  chunks {}  {:.1}s",
+                file.name,
+                file.der * 100.0,
+                file.missed,
+                file.false_alarm,
+                file.confusion,
+                file.hyp_speakers,
+                file.ref_speakers,
+                file.chunks,
+                file.elapsed_s
+            );
+        }
+        files.push(file);
+    }
+
+    let count_err = files
+        .iter()
+        .map(|f| f.hyp_speakers.abs_diff(f.ref_speakers) as f64)
+        .sum::<f64>()
+        / files.len() as f64;
+    let report = Report {
+        embedder: args.embedder.display().to_string(),
+        family: format!("{family:?}"),
+        similarity_threshold: cluster.similarity_threshold,
+        segmenter: args.segmenter.as_ref().map(|p| p.display().to_string()),
+        refine: !args.no_refine,
+        vad: args.vad.as_ref().map(|p| p.display().to_string()),
+        min_chunk_ms: args.min_chunk_ms,
+        max_chunk_ms: args.max_chunk_ms,
+        collar: args.collar,
+        skip_overlap: args.skip_overlap,
+        pooled: PooledReport {
+            der: pooled.der(),
+            missed: pooled.missed,
+            false_alarm: pooled.false_alarm,
+            confusion: pooled.confusion,
+            scored_s: pooled.total,
+            mean_abs_speaker_count_error: count_err,
+        },
+        files,
+    };
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        let p = &report.pooled;
+        println!(
+            "pooled ({} files, {:.0} s scored): DER {:.2}%  miss {:.2}%  FA {:.2}%  conf {:.2}%  |Δspk| {:.2}",
+            report.files.len(),
+            p.scored_s,
+            p.der * 100.0,
+            100.0 * p.missed / p.scored_s.max(f64::MIN_POSITIVE),
+            100.0 * p.false_alarm / p.scored_s.max(f64::MIN_POSITIVE),
+            100.0 * p.confusion / p.scored_s.max(f64::MIN_POSITIVE),
+            p.mean_abs_speaker_count_error
+        );
+    }
+    Ok(())
+}
+
+/// Parse a manifest: one `<wav> <rttm>` pair per non-blank line, `#`
+/// starts a comment, relative paths resolve against the manifest's
+/// directory.
+fn read_manifest(path: &Path) -> Result<Vec<(PathBuf, PathBuf)>> {
+    let text = std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    parse_manifest(&text, path.parent().unwrap_or(Path::new(".")))
+}
+
+fn parse_manifest(text: &str, base: &Path) -> Result<Vec<(PathBuf, PathBuf)>> {
+    let mut pairs = Vec::new();
+    for (i, line) in text.lines().enumerate() {
+        let line = line.split('#').next().unwrap_or("").trim();
+        if line.is_empty() {
+            continue;
+        }
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        if fields.len() != 2 {
+            bail!("manifest line {}: expected `<wav> <rttm>`", i + 1);
+        }
+        pairs.push((base.join(fields[0]), base.join(fields[1])));
+    }
+    Ok(pairs)
+}
+
+/// Follow `(absorbed, surviving)` chains to each absorbed speaker's
+/// final survivor.
+fn resolve_merges(merges: &[(SpeakerId, SpeakerId)]) -> HashMap<SpeakerId, SpeakerId> {
+    let direct: HashMap<SpeakerId, SpeakerId> = merges.iter().copied().collect();
+    direct
+        .keys()
+        .map(|&start| {
+            let mut id = start;
+            // Bounded walk: a cycle would be a refine bug, not a hang.
+            for _ in 0..=direct.len() {
+                match direct.get(&id) {
+                    Some(&next) if next != id => id = next,
+                    _ => break,
+                }
+            }
+            (start, id)
+        })
+        .collect()
+}
+
+/// Turn per-chunk spans into session-time RTTM segments, relabelled
+/// through `merges`.
+fn spans_to_segments(
+    file_id: &str,
+    chunks: &[(u32, Vec<SpeakerSpan>)],
+    merges: &HashMap<SpeakerId, SpeakerId>,
+) -> Vec<RttmSegment> {
+    let mut segments = Vec::new();
+    for (offset_ms, spans) in chunks {
+        let offset = f64::from(*offset_ms) / 1_000.0;
+        for span in spans {
+            let id = merges
+                .get(&span.speaker_id)
+                .copied()
+                .unwrap_or(span.speaker_id);
+            segments.push(RttmSegment {
+                file_id: file_id.to_string(),
+                speaker: id.to_string(),
+                start: offset + span.start_sample as f64 / SPAN_RATE_HZ,
+                duration: span.len_samples() as f64 / SPAN_RATE_HZ,
+            });
+        }
+    }
+    segments
+}
+
+struct FileRun {
+    audio_s: f64,
+    /// `(chunk offset ms, spans)` per diarized chunk, in order.
+    chunks: Vec<(u32, Vec<SpeakerSpan>)>,
+    merges: Vec<(SpeakerId, SpeakerId)>,
+}
+
+async fn diarize_file(wav: &Path, diarizer: Box<dyn Diarizer>, args: &DerArgs) -> Result<FileRun> {
+    let (samples, format) =
+        super::load_wav_as_pcm(wav).with_context(|| format!("read {}", wav.display()))?;
+    let audio_s = samples.len() as f64
+        / f64::from(format.channels.max(1))
+        / f64::from(format.sample_rate_hz.max(1));
+    let span_log: SpanLog = Arc::default();
+    let capture: Arc<dyn AudioCapture> = Arc::new(FileCapture {
+        samples: Arc::new(samples),
+        format,
+    });
+    let resampler: Arc<dyn Resampler> = Arc::new(RubatoResamplerAdapter::new());
+    let mut pipeline = StreamingPipeline::new(capture, resampler, Arc::new(NullTranscriber))
+        .with_diarizer(Box::new(RecordingDiarizer {
+            inner: diarizer,
+            log: Arc::clone(&span_log),
+        }));
+    if let Some(vad) = &args.vad {
+        pipeline = pipeline.with_vad(Box::new(
+            SileroVad::for_meetings(vad).context("load Silero VAD")?,
+        ));
+    }
+    let options = StreamingOptions {
+        chunk_ms: args.chunk_ms,
+        speech_aligned_chunks: args.vad.is_some(),
+        min_chunk_ms: args.min_chunk_ms,
+        max_chunk_ms: args.max_chunk_ms,
+        ..StreamingOptions::default()
+    };
+    let mut handle = pipeline.start(options).await?;
+    let mut offsets = Vec::new();
+    let mut merges = Vec::new();
+    while let Some(event) = handle.next_event().await {
+        match event {
+            TranscriptEvent::Chunk { offset_ms, .. } => offsets.push(offset_ms),
+            TranscriptEvent::SpeakersMerged { merges: m, .. } => {
+                merges.extend(m.into_iter().map(|x| (x.absorbed, x.surviving)));
+            }
+            TranscriptEvent::Failed { message, .. } => bail!("pipeline failed: {message}"),
+            TranscriptEvent::Stopped { .. } => break,
+            _ => {}
+        }
+    }
+    let spans = std::mem::take(&mut *span_log.lock().expect("span log poisoned"));
+    ensure!(
+        spans.len() == offsets.len(),
+        "{} diarizer calls but {} chunk events",
+        spans.len(),
+        offsets.len()
+    );
+    Ok(FileRun {
+        audio_s,
+        chunks: offsets.into_iter().zip(spans).collect(),
+        merges,
+    })
+}
+
+type SpanLog = Arc<Mutex<Vec<Vec<SpeakerSpan>>>>;
+
+/// Forwards to the real diarizer and records each chunk's spans.
+struct RecordingDiarizer {
+    inner: Box<dyn Diarizer>,
+    log: SpanLog,
+}
+
+#[async_trait]
+impl Diarizer for RecordingDiarizer {
+    fn sample_rate_hz(&self) -> u32 {
+        self.inner.sample_rate_hz()
+    }
+
+    async fn assign(&mut self, samples: &[Sample]) -> Result<Option<SpeakerId>, DomainError> {
+        self.inner.assign(samples).await
+    }
+
+    async fn assign_spans(&mut self, samples: &[Sample]) -> Result<Vec<SpeakerSpan>, DomainError> {
+        // Errors are logged as an empty chunk, matching the pipeline,
+        // which treats a failed diarization as unlabelled.
+        let result = self.inner.assign_spans(samples).await;
+        let spans = result.as_ref().map(Clone::clone).unwrap_or_default();
+        self.log.lock().expect("span log poisoned").push(spans);
+        result
+    }
+
+    fn speakers(&self) -> Vec<Speaker> {
+        self.inner.speakers()
+    }
+
+    fn rename(&mut self, id: SpeakerId, label: &str) -> Result<bool, DomainError> {
+        self.inner.rename(id, label)
+    }
+
+    fn reset(&mut self) {
+        self.inner.reset();
+    }
+
+    fn refine_offline(&self) -> Vec<(SpeakerId, SpeakerId)> {
+        self.inner.refine_offline()
+    }
+}
+
+/// Transcriber that returns no text: the bench only needs the
+/// pipeline's chunking and diarizer calls.
+struct NullTranscriber;
+
+#[async_trait]
+impl Transcriber for NullTranscriber {
+    async fn transcribe(
+        &self,
+        samples: &[Sample],
+        _options: &TranscribeOptions,
+    ) -> Result<Transcript, DomainError> {
+        Ok(Transcript {
+            segments: Vec::new(),
+            language: None,
+            duration_ms: (samples.len() as f64 * 1_000.0 / SPAN_RATE_HZ) as u32,
+        })
+    }
+}
+
+/// Capture that serves a decoded file in 20 ms frames as fast as the
+/// pipeline pulls them, then ends the stream.
+struct FileCapture {
+    samples: Arc<Vec<f32>>,
+    format: AudioFormat,
+}
+
+#[async_trait]
+impl AudioCapture for FileCapture {
+    async fn list_devices(&self, _source: AudioSource) -> Result<Vec<DeviceInfo>, DomainError> {
+        Ok(Vec::new())
+    }
+
+    async fn start(&self, _spec: CaptureSpec) -> Result<Box<dyn AudioStream>, DomainError> {
+        let frame = (self.format.sample_rate_hz * FRAME_MS / 1_000) as usize
+            * usize::from(self.format.channels.max(1));
+        Ok(Box::new(FileStream {
+            samples: Arc::clone(&self.samples),
+            format: self.format,
+            frame: frame.max(1),
+            pos: 0,
+        }))
+    }
+}
+
+struct FileStream {
+    samples: Arc<Vec<f32>>,
+    format: AudioFormat,
+    frame: usize,
+    pos: usize,
+}
+
+#[async_trait]
+impl AudioStream for FileStream {
+    fn format(&self) -> AudioFormat {
+        self.format
+    }
+
+    async fn next_frame(&mut self) -> Option<AudioFrame> {
+        // Yield so the pipeline task interleaves like a live callback.
+        tokio::task::yield_now().await;
+        if self.pos >= self.samples.len() {
+            return None;
+        }
+        let end = (self.pos + self.frame).min(self.samples.len());
+        let samples = self.samples[self.pos..end].to_vec();
+        self.pos = end;
+        Some(AudioFrame {
+            samples,
+            format: self.format,
+            captured_at_ns: 0,
+        })
+    }
+
+    async fn stop(&mut self) -> Result<(), DomainError> {
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn manifest_resolves_relative_paths_and_skips_comments() {
+        let pairs = parse_manifest(
+            "# eval set\n\na.wav a.rttm\n/abs/b.wav  b.rttm # trailing\n",
+            Path::new("/data"),
+        )
+        .unwrap();
+        assert_eq!(
+            pairs,
+            vec![
+                (PathBuf::from("/data/a.wav"), PathBuf::from("/data/a.rttm")),
+                (PathBuf::from("/abs/b.wav"), PathBuf::from("/data/b.rttm")),
+            ]
+        );
+        assert!(parse_manifest("only-one-field\n", Path::new(".")).is_err());
+    }
+
+    #[test]
+    fn merge_chains_resolve_to_the_final_survivor() {
+        let (a, b, c) = (SpeakerId::new(), SpeakerId::new(), SpeakerId::new());
+        let resolved = resolve_merges(&[(a, b), (b, c)]);
+        assert_eq!(resolved[&a], c);
+        assert_eq!(resolved[&b], c);
+        assert!(!resolved.contains_key(&c));
+    }
+
+    #[test]
+    fn spans_are_offset_and_relabelled() {
+        let (a, b) = (SpeakerId::new(), SpeakerId::new());
+        let span = |id, s, e| SpeakerSpan {
+            speaker_id: id,
+            slot: 0,
+            start_sample: s,
+            end_sample: e,
+        };
+        let chunks = vec![
+            (0, vec![span(a, 0, 16_000)]),
+            (4_000, vec![span(b, 8_000, 24_000)]),
+        ];
+        let merges = HashMap::from([(b, a)]);
+        let segs = spans_to_segments("rec", &chunks, &merges);
+        assert_eq!(segs.len(), 2);
+        assert_eq!(segs[1].speaker, a.to_string());
+        assert!((segs[1].start - 4.5).abs() < 1e-9);
+        assert!((segs[1].duration - 1.0).abs() < 1e-9);
+    }
+}

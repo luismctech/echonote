@@ -25,6 +25,7 @@ echo-storage.workspace = true
 echo-telemetry.workspace = true
 
 tokio.workspace = true
+async-trait.workspace = true
 clap.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
