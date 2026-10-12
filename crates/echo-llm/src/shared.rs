@@ -75,7 +75,10 @@ const THINK_CLOSE: &str = "</think>";
 const CHANNEL_OPEN: &str = "<|channel>";
 const CHANNEL_CLOSE: &str = "<channel|>";
 /// Channel names (lowercase) whose content is reasoning and never shown:
-/// Gemma's `thought`, gpt-oss/harmony's `analysis`, and generic spellings.
+/// Gemma's `thought` and generic spellings (`thinking`, `reasoning`,
+/// `analysis`). Only Gemma's `<|channel>NAME\n…<channel|>` syntax is
+/// recognised: gpt-oss/harmony frames channels as
+/// `<|channel|>analysis<|message|>…<|end|>`, which is not handled here.
 const REASONING_CHANNELS: &[&str] = &["thought", "thinking", "reasoning", "analysis"];
 /// A channel header (`NAME` up to a newline or closing marker) longer than
 /// this is not a name: the channel is treated as plain text so nothing is

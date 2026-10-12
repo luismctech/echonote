@@ -48,6 +48,15 @@ pub(crate) const CHATML_STOP: &str = "<|im_end|>";
 /// turn.
 const QWEN_NO_THINK: &str = "\n/no_think";
 
+/// Empty reasoning block Qwen3's own template pre-fills when thinking is
+/// off. Chat prompts end with it and history assistant turns start with it,
+/// so the text the model continues from, and the answer it generates, are
+/// byte-identical to what the next turn re-renders: the KV cache covers
+/// prompt + answer. (Leaving the block for the model to generate and only
+/// adding it to the history does not work: Qwen then opens `<think>` but
+/// skips the closing tag, which the stream filter reports as an error.)
+const QWEN_EMPTY_THINK: &str = "<think>\n\n</think>\n\n";
+
 /// Where Qwen's `/no_think` suffix goes. Other families ignore it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NoThink {
@@ -60,6 +69,8 @@ pub enum NoThink {
     /// Every user turn (chat). The history is re-rendered each turn, so a
     /// suffix on the last turn alone would vanish from it on the next one
     /// and break the KV prefix reuse right after the first user message.
+    /// For Qwen the empty think block is pre-filled after the generation
+    /// prompt and on history assistant turns (see `QWEN_EMPTY_THINK`).
     EveryTurn,
 }
 
@@ -221,14 +232,23 @@ impl PromptProfile {
             .iter()
             .map(|m| ChatMessage::new(m.role, strip_special(&m.content, &self.specials)))
             .collect();
+        let mut prefill_think = false;
         if let Some(suffix) = self.format.no_think_suffix() {
+            prefill_think = no_think == NoThink::EveryTurn;
             match no_think {
                 NoThink::Off => {}
                 NoThink::LastTurn => append_to_last_user_turn(&mut messages, suffix),
-                NoThink::EveryTurn => messages
-                    .iter_mut()
-                    .filter(|m| m.role == ChatRole::User)
-                    .for_each(|m| m.content.push_str(suffix)),
+                NoThink::EveryTurn => {
+                    for m in &mut messages {
+                        match m.role {
+                            ChatRole::User => m.content.push_str(suffix),
+                            ChatRole::Assistant => {
+                                m.content.insert_str(0, QWEN_EMPTY_THINK);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
             }
         }
 
@@ -251,8 +271,12 @@ impl PromptProfile {
 
         let mut stops: Vec<String> = vec![CHATML_STOP.into()];
         stops.extend(self.format.stops().iter().map(|s| (*s).to_string()));
+        let mut text = render_chatml(&messages);
+        if prefill_think {
+            text.push_str(QWEN_EMPTY_THINK);
+        }
         Rendered {
-            text: render_chatml(&messages),
+            text,
             stops: merge_stops(&[], &stops),
         }
     }
@@ -504,15 +528,16 @@ second
             r1.text,
             "<|im_start|>system\nSYS<|im_end|>\n\
              <|im_start|>user\nfirst\n/no_think<|im_end|>\n\
-             <|im_start|>assistant\n"
+             <|im_start|>assistant\n<think>\n\n</think>\n\n"
         );
-        // Turn 2 = turn 1's prompt + the answer it produced + the next turn:
-        // the KV cache covers everything up to the new user message.
+        // Turn 2 = turn 1's prompt (which already ends with the pre-filled
+        // empty think block) + the answer generated after it + the next turn,
+        // so the KV cache covers everything up to the new user message.
         let expected_prefix = format!("{}answer<|im_end|>\n", r1.text);
         assert!(r2.text.starts_with(&expected_prefix), "{}", r2.text);
-        assert!(r2
-            .text
-            .ends_with("second\n/no_think<|im_end|>\n<|im_start|>assistant\n"));
+        assert!(r2.text.ends_with(
+            "second\n/no_think<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+        ));
 
         // With only the last turn marked, the prefix would diverge.
         let last_only = p.render(&turn2, NoThink::LastTurn, never_called);

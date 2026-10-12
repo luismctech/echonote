@@ -15,8 +15,9 @@
 //!   The prompt evaluation is negligible, so the first call shows model
 //!   warm-up plus context creation and the second shows what a request
 //!   costs once any reusable state exists.
-//! * **prompt-eval throughput** - a ~6,000-token ChatML prompt with
-//!   `max_tokens = 1`, so the time is dominated by evaluating the prompt.
+//! * **prompt-eval throughput** - a ~6,000-token ChatML prompt, timed up to
+//!   the first visible streamed token, so decode of the answer is excluded
+//!   (only the few think-block steps of Qwen remain).
 //! * **chat turns** - the same long prompt with a 64-token greedy answer
 //!   (cold, then again with the whole prompt reusable), then a follow-up
 //!   turn carrying the first turn as history: time to first token, total
@@ -35,6 +36,12 @@ use echo_llm::{LlamaCppLlm, LoadOptions};
 use futures::StreamExt;
 
 const TARGET_PROMPT_TOKENS: usize = 6_000;
+
+/// Decode budget for the short requests. Qwen3 with `/no_think` first emits
+/// an empty `<think>\n\n</think>\n\n` block (about 6 tokens), so a budget
+/// of 1 would end before any visible text; 16 leaves room for it plus an
+/// answer word.
+const SHORT_REPLY_TOKENS: u32 = 16;
 
 fn model_from_env() -> Option<PathBuf> {
     let path = PathBuf::from(std::env::var("ECHO_LLM_MODEL").ok()?);
@@ -128,9 +135,12 @@ async fn llama_latency_and_memory_baseline() {
     let tiny = conversation("Answer with one word.", "Say OK.");
     for call in 1..=2 {
         let started = Instant::now();
-        let out = llm.generate_chat(&tiny, &greedy(16)).await.expect("tiny");
+        let out = llm
+            .generate_chat(&tiny, &greedy(SHORT_REPLY_TOKENS))
+            .await
+            .expect("tiny");
         eprintln!(
-            "[bench] tiny request #{call} (16 tokens max, tiny prompt): {} ms (output {out:?})",
+            "[bench] tiny request #{call} ({SHORT_REPLY_TOKENS} tokens max, tiny prompt): {} ms (output {out:?})",
             started.elapsed().as_millis()
         );
         report_rss(&format!("after tiny request #{call}"));
@@ -147,14 +157,31 @@ async fn llama_latency_and_memory_baseline() {
         "[bench] prompt starts {:?}",
         rendered.chars().take(40).collect::<String>()
     );
+    // Prompt evaluation is timed as time-to-first-token of a streamed chat
+    // request: the first delta arrives only after the whole prompt has been
+    // evaluated, so decode steps (including Qwen's empty think block) stay out
+    // of the number.
+    let chat_probe = llm.chat_handle();
+    let probe = ChatRequest {
+        messages: long.clone(),
+        options: ChatOptions {
+            max_tokens: SHORT_REPLY_TOKENS,
+            temperature: 0.0,
+            top_p: 1.0,
+            seed: Some(7),
+            stop: vec!["<|im_end|>".into()],
+        },
+    };
     let started = Instant::now();
-    let _ = llm
-        .generate_chat(&long, &greedy(16))
-        .await
-        .expect("long prompt");
-    let eval = started.elapsed();
+    let mut stream = chat_probe.ask(&probe).await.expect("long prompt");
+    let mut eval = None;
+    while let Some(item) = stream.next().await {
+        item.expect("stream item");
+        eval.get_or_insert_with(|| started.elapsed());
+    }
+    let eval = eval.expect("long prompt produced no visible token");
     eprintln!(
-        "[bench] prompt eval: {n_prompt} tokens in {} ms = {:.1} tok/s (includes up to 16 generated tokens: Qwen's empty think block first)",
+        "[bench] prompt eval: {n_prompt} tokens, time to first visible token {} ms = {:.1} tok/s (prompt eval only; for Qwen the first visible token follows the empty think block, a few decode steps)",
         eval.as_millis(),
         n_prompt as f64 / eval.as_secs_f64()
     );
@@ -165,7 +192,10 @@ async fn llama_latency_and_memory_baseline() {
     let chat = llm.chat_handle();
     // Step (b) left this very prompt in the KV cache; evict it with an
     // unrelated request so turn 1 below is a true cold start.
-    let _ = llm.generate_chat(&tiny, &greedy(16)).await.expect("evict");
+    let _ = llm
+        .generate_chat(&tiny, &greedy(SHORT_REPLY_TOKENS))
+        .await
+        .expect("evict");
     let options = ChatOptions {
         max_tokens: 64,
         temperature: 0.0,
