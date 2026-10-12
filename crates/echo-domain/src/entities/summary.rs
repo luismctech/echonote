@@ -310,6 +310,7 @@ pub struct Summary {
     pub language: Option<String>,
     /// RFC 3339 instant the summary finished generating.
     #[serde(with = "time::serde::rfc3339")]
+    #[specta(type = String)]
     pub created_at: OffsetDateTime,
     /// Structured payload — discriminated on `template`.
     #[serde(flatten)]

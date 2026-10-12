@@ -37,23 +37,21 @@ fn show_main_window(app: &tauri::AppHandle) {
     }
 }
 
-/// Entry point invoked by `main.rs`. Kept library-friendly so mobile
-/// targets (Tauri 2 iOS/Android) can reuse the same builder.
-pub fn run() {
-    echo_telemetry::init();
+/// Path of the generated TypeScript IPC bindings, relative to this crate.
+const BINDINGS_PATH: &str = "../src/ipc/bindings.ts";
 
-    tracing::info!(
-        version = env!("CARGO_PKG_VERSION"),
-        commit = env!("ECHO_GIT_HASH"),
-        "echo-shell starting"
-    );
-
-    // Build the tauri-specta binding layer. This collects all
-    // `#[specta::specta]`-annotated commands and their types so they
-    // can be (a) fed to Tauri's invoke handler and (b) exported to
-    // TypeScript at dev time.
-    let specta_builder =
-        tauri_specta::Builder::<tauri::Wry>::new().commands(tauri_specta::collect_commands![
+/// Collects every `#[specta::specta]` command into the tauri-specta layer.
+///
+/// Shared by [`run`] (invoke handler + dev-time export) and the
+/// `regenerate_bindings` test so both see the exact same command set.
+/// `i64`/`u64` are rendered as `number` (specta forbids BigInt by default).
+/// Serde phases stay enabled: unified mode cannot represent
+/// `skip_serializing_if`, so asymmetric types export as
+/// `_Serialize`/`_Deserialize` pairs.
+fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
+    tauri_specta::Builder::<tauri::Wry>::new()
+        .dangerously_cast_bigints_to_number()
+        .commands(tauri_specta::collect_commands![
             commands::health_check,
             commands::streaming::start_streaming,
             commands::streaming::stop_streaming,
@@ -98,25 +96,39 @@ pub fn run() {
             commands::mcp::install_mcp_client,
             commands::mcp::uninstall_mcp_client,
             commands::mcp::get_mcp_config_snippet,
-        ]);
+        ])
+}
+
+/// Exports the TypeScript bindings to [`BINDINGS_PATH`].
+fn export_bindings(builder: &tauri_specta::Builder<tauri::Wry>) {
+    let bindings_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(BINDINGS_PATH);
+    builder
+        .export(
+            specta_typescript::Typescript::default().header("// @ts-nocheck"),
+            &bindings_path,
+        )
+        .expect("failed to export tauri-specta TypeScript bindings");
+}
+
+/// Entry point invoked by `main.rs`. Kept library-friendly so mobile
+/// targets (Tauri 2 iOS/Android) can reuse the same builder.
+pub fn run() {
+    echo_telemetry::init();
+
+    tracing::info!(
+        version = env!("CARGO_PKG_VERSION"),
+        commit = env!("ECHO_GIT_HASH"),
+        "echo-shell starting"
+    );
+
+    let specta_builder = specta_builder();
 
     // In dev builds, export TypeScript bindings so the frontend can
     // import fully typed command wrappers and domain types from a
     // single generated file. The file is written at app startup, NOT
     // on every hot-reload, because we gate on `debug_assertions`.
     #[cfg(debug_assertions)]
-    {
-        let bindings_path =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../src/ipc/bindings.ts");
-        specta_builder
-            .export(
-                specta_typescript::Typescript::default()
-                    .bigint(specta_typescript::BigIntExportBehavior::Number)
-                    .header("// @ts-nocheck"),
-                &bindings_path,
-            )
-            .expect("failed to export tauri-specta TypeScript bindings");
-    }
+    export_bindings(&specta_builder);
 
     // NOTE: `tauri-plugin-log` conflicts with `echo_telemetry::init`,
     // which already installs a global `log → tracing` bridge. Logging
@@ -228,4 +240,15 @@ pub fn run() {
             _ => {}
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    /// Regenerates `src/ipc/bindings.ts` without launching the GUI:
+    /// `cargo test -p echo-shell regenerate_bindings -- --ignored`.
+    #[test]
+    #[ignore = "writes src/ipc/bindings.ts; run explicitly to regenerate"]
+    fn regenerate_bindings() {
+        super::export_bindings(&super::specta_builder());
+    }
 }

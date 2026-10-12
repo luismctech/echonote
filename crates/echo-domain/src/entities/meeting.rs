@@ -57,10 +57,12 @@ pub struct MeetingSummary {
     pub title: String,
     /// RFC 3339 instant the recording started.
     #[serde(with = "time::serde::rfc3339")]
+    #[specta(type = String)]
     pub started_at: OffsetDateTime,
     /// RFC 3339 instant the recording stopped. `None` while the
     /// session is still running.
     #[serde(with = "time::serde::rfc3339::option")]
+    #[specta(type = Option<String>)]
     pub ended_at: Option<OffsetDateTime>,
     /// Total audio captured, in milliseconds.
     pub duration_ms: u32,
