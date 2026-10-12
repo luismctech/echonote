@@ -360,6 +360,12 @@ enum BenchKind {
         /// Override the preset online-cluster similarity threshold.
         #[arg(long)]
         threshold: Option<f32>,
+        /// Override the preset online speaker cap.
+        #[arg(long)]
+        max_speakers: Option<usize>,
+        /// Override the preset offline refinement merge threshold.
+        #[arg(long)]
+        refine_threshold: Option<f32>,
         /// Skip the end-of-session offline refinement pass.
         #[arg(long, default_value_t = false)]
         no_refine: bool,
@@ -377,7 +383,7 @@ enum BenchKind {
         #[arg(long, default_value_t = StreamingOptions::default().max_chunk_ms)]
         max_chunk_ms: u32,
         /// Fixed chunk length when the neural VAD is off.
-        #[arg(long, default_value_t = 5_000)]
+        #[arg(long, default_value_t = StreamingOptions::default().chunk_ms)]
         chunk_ms: u32,
         /// Seconds excluded on each side of every reference boundary.
         #[arg(long, default_value_t = 0.25)]
@@ -488,6 +494,8 @@ async fn main() -> Result<()> {
                 embedder,
                 segmenter,
                 threshold,
+                max_speakers,
+                refine_threshold,
                 no_refine,
                 vad,
                 no_neural_vad,
@@ -510,6 +518,8 @@ async fn main() -> Result<()> {
                     embedder,
                     segmenter,
                     threshold,
+                    max_speakers,
+                    refine_threshold,
                     no_refine,
                     vad: vad.filter(|_| !no_neural_vad),
                     min_chunk_ms,

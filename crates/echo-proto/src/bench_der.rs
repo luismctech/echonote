@@ -51,6 +51,10 @@ pub(crate) struct DerArgs {
     pub segmenter: Option<PathBuf>,
     /// Override of the preset similarity threshold.
     pub threshold: Option<f32>,
+    /// Override of the preset online speaker cap.
+    pub max_speakers: Option<usize>,
+    /// Override of the preset offline refinement merge threshold.
+    pub refine_threshold: Option<f32>,
     /// Skip the end-of-session offline refinement.
     pub no_refine: bool,
     /// Silero VAD model; `None` runs fixed chunks behind the RMS gate.
@@ -92,8 +96,11 @@ struct Report {
     embedder: String,
     family: String,
     similarity_threshold: f32,
+    max_speakers: usize,
     segmenter: Option<String>,
     refine: bool,
+    /// Offline merge threshold; `None` when the refinement is skipped.
+    refine_threshold: Option<f32>,
     vad: Option<String>,
     min_chunk_ms: u32,
     max_chunk_ms: u32,
@@ -128,7 +135,14 @@ pub(crate) async fn run(args: DerArgs) -> Result<()> {
         args.embedder.display()
     );
     let family = EmbedderFamily::from_path(&args.embedder);
-    let cluster = family.cluster_config(args.threshold);
+    let mut cluster = family.cluster_config(args.threshold);
+    if let Some(max_speakers) = args.max_speakers {
+        cluster.max_speakers = max_speakers;
+    }
+    let mut refine = family.refine_config();
+    if let Some(threshold) = args.refine_threshold {
+        refine.merge_threshold = threshold;
+    }
     let der_config = DerConfig {
         collar: args.collar,
         skip_overlap: args.skip_overlap,
@@ -136,20 +150,18 @@ pub(crate) async fn run(args: DerArgs) -> Result<()> {
 
     let mut files = Vec::with_capacity(pairs.len());
     let mut pooled = DerReport::default();
-    for (wav, rttm) in &pairs {
-        let name = wav
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("recording")
-            .to_string();
+    let names = unique_names(&pairs);
+    for ((wav, rttm), name) in pairs.iter().zip(names) {
         let reference = parse_rttm(
             &std::fs::read_to_string(rttm).with_context(|| format!("read {}", rttm.display()))?,
         )
         .with_context(|| format!("parse {}", rttm.display()))?;
+        let reference = reference_for(reference, &file_stem(wav))
+            .with_context(|| format!("select reference in {}", rttm.display()))?;
 
         let mut diarizer = OnlineDiarizer::new(family.load(&args.embedder)?, cluster);
         if !args.no_refine {
-            diarizer = diarizer.with_offline_refinement();
+            diarizer = diarizer.with_offline_refinement_config(refine);
         }
         if let Some(seg) = &args.segmenter {
             diarizer = diarizer.with_segmenter(Box::new(
@@ -207,8 +219,10 @@ pub(crate) async fn run(args: DerArgs) -> Result<()> {
         embedder: args.embedder.display().to_string(),
         family: format!("{family:?}"),
         similarity_threshold: cluster.similarity_threshold,
+        max_speakers: cluster.max_speakers,
         segmenter: args.segmenter.as_ref().map(|p| p.display().to_string()),
         refine: !args.no_refine,
+        refine_threshold: (!args.no_refine).then_some(refine.merge_threshold),
         vad: args.vad.as_ref().map(|p| p.display().to_string()),
         min_chunk_ms: args.min_chunk_ms,
         max_chunk_ms: args.max_chunk_ms,
@@ -264,6 +278,53 @@ fn parse_manifest(text: &str, base: &Path) -> Result<Vec<(PathBuf, PathBuf)>> {
         pairs.push((base.join(fields[0]), base.join(fields[1])));
     }
     Ok(pairs)
+}
+
+/// File stem of `path`, the RTTM file id a recording is matched by.
+fn file_stem(path: &Path) -> String {
+    path.file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("recording")
+        .to_string()
+}
+
+/// One report name per pair: the wav stem, suffixed `_2`, `_3`, … when
+/// two recordings share a stem, so hypothesis RTTMs never overwrite
+/// each other.
+fn unique_names(pairs: &[(PathBuf, PathBuf)]) -> Vec<String> {
+    let mut seen: HashMap<String, usize> = HashMap::new();
+    pairs
+        .iter()
+        .map(|(wav, _)| {
+            let stem = file_stem(wav);
+            let n = seen.entry(stem.clone()).or_insert(0);
+            *n += 1;
+            if *n == 1 {
+                stem
+            } else {
+                format!("{stem}_{n}")
+            }
+        })
+        .collect()
+}
+
+/// Reference turns of recording `file_id`. An RTTM that lists several
+/// recordings is filtered by file id (and must contain `file_id`); a
+/// single-recording RTTM is used whole, whatever id it carries.
+fn reference_for(segments: Vec<RttmSegment>, file_id: &str) -> Result<Vec<RttmSegment>> {
+    let first = segments.first().map(|s| s.file_id.clone());
+    if segments.iter().all(|s| Some(&s.file_id) == first.as_ref()) {
+        return Ok(segments);
+    }
+    let selected: Vec<RttmSegment> = segments
+        .into_iter()
+        .filter(|s| s.file_id == file_id)
+        .collect();
+    ensure!(
+        !selected.is_empty(),
+        "multi-recording RTTM has no turns for file id `{file_id}`"
+    );
+    Ok(selected)
 }
 
 /// Follow `(absorbed, surviving)` chains to each absorbed speaker's
@@ -517,6 +578,37 @@ mod tests {
             ]
         );
         assert!(parse_manifest("only-one-field\n", Path::new(".")).is_err());
+    }
+
+    fn seg(file_id: &str, speaker: &str) -> RttmSegment {
+        RttmSegment {
+            file_id: file_id.to_string(),
+            speaker: speaker.to_string(),
+            start: 0.0,
+            duration: 1.0,
+        }
+    }
+
+    #[test]
+    fn multi_recording_rttm_is_filtered_by_file_id() {
+        let all = vec![seg("a", "x"), seg("b", "y"), seg("a", "z")];
+        let got = reference_for(all.clone(), "a").unwrap();
+        assert_eq!(got.len(), 2);
+        assert!(got.iter().all(|s| s.file_id == "a"));
+        assert!(reference_for(all, "missing").is_err());
+    }
+
+    #[test]
+    fn single_recording_rttm_is_used_whatever_its_id() {
+        let one = vec![seg("other", "x"), seg("other", "y")];
+        assert_eq!(reference_for(one, "rec").unwrap().len(), 2);
+    }
+
+    #[test]
+    fn duplicate_stems_get_distinct_names() {
+        let pair = |w: &str| (PathBuf::from(w), PathBuf::from("r.rttm"));
+        let names = unique_names(&[pair("/x/rec.wav"), pair("/y/rec.wav"), pair("/z/b.wav")]);
+        assert_eq!(names, vec!["rec", "rec_2", "b"]);
     }
 
     #[test]
