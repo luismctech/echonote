@@ -121,6 +121,119 @@ exactly. Each configuration is deterministic.
    boundaries and from backchannels shorter than the embedder minimum. FA is below 1 %.
    Neither is a priority compared with confusion.
 
+## Calibration (held-out)
+
+Task T6b, 2026-10-12, at `5ab2484` (bench flags `--max-speakers` and `--refine-threshold`).
+Embedder: multilingual CAM++, segmenter on, Silero v6.2, same harness as above. The values
+were chosen on the **dev** sets only. The T6 sets above are the untouched **test** sets.
+
+### Dev data
+
+| Set | Content | Licence |
+|---|---|---|
+| `mls_es_dev` (synthetic) | 20 conversations built by the same generator with seed 20261013 and speaker counts drawn from {2, 2, 3, 3, 4, 5, 6}: 2 speakers 4, 3 speakers 9, 4 speakers 2, 5 speakers 4, 6 speakers 1. 89.9 min, 183-346 s each. 20 readers from the MLS Spanish **dev** split (`spanish/dev-00000-of-00001.parquet`, 157.1 MB, SHA-256 `f0ae1ca05f1c5cf4…`). MLS splits are speaker-disjoint: 0 readers shared with the test set. 1003 turns, 138 backchannels, 60 overlapped turns (33.7 s) | CC-BY-4.0 |
+| `voxconverse_dev` (real) | 12 VoxConverse dev recordings, disjoint from the 12 test files: picked with seed 20261013 from the same pool (2-6 speakers, 2-8 min) after excluding the test files. 47.4 min, 2-6 speakers (mean 3.67). 78 MB range-extracted | CC-BY-4.0 |
+
+New downloads: about 237 MB.
+
+### Grid
+
+Objective: pooled DER weighted 2:1 for `mls_es_dev` : `voxconverse_dev`, because the app is
+Spanish-first. 150 runs in three stages:
+
+1. Online similarity 0.30-0.70 (step 0.05) × `max_speakers` {4, 6, 8}, refine off.
+2. Online {0.40, 0.45, 0.50, 0.55} × `max_speakers` {6, 8} × refine {0.40, 0.50, 0.60, 0.70}.
+3. The same online and cap values × refine {0.30, 0.35}.
+
+Stage 1 results (weighted dev DER %, refine off):
+
+| Online | cap 4 | cap 6 | cap 8 |
+|---|---|---|---|
+| 0.30 | 23.63 | 23.20 | 23.20 |
+| 0.35 | 17.61 | 14.83 | 14.83 |
+| 0.40 | 13.35 | 9.52 | 9.52 |
+| 0.45 | 13.93 | 11.06 | 10.00 |
+| 0.50 | 14.52 | 10.54 | 9.48 |
+| 0.55 | 16.09 | 11.01 | 10.72 |
+| 0.60 | 17.62 | 11.56 | 11.91 |
+| 0.65 | 17.17 | 12.81 | 13.24 |
+| 0.70 | 18.33 | 15.12 | 15.16 |
+
+Stages 2-3 with cap 8 (weighted dev DER %):
+
+| Online \ refine | 0.35 | 0.40 | 0.50 | 0.60 | off |
+|---|---|---|---|---|---|
+| 0.40 | 10.22 | 9.52 | 9.52 | 9.52 | 9.52 |
+| 0.45 | 9.76 | 9.08 | **9.32** | 10.00 | 10.00 |
+| 0.50 | 9.68 | 9.05 | 8.80 | 9.48 | 9.48 |
+| 0.55 | 10.36 | 9.83 | 10.05 | 10.72 | 10.72 |
+
+Refine 0.70 equals 0.60 in every row. With cap 6, every point from 0.45 to 0.55 is worse than
+with cap 8. The best cap-6 point is 0.50 / 0.50 at 9.91.
+
+What the grid shows:
+
+- A cap of 4 costs 3-6 DER points at every threshold. It merges the 5-6 speaker recordings.
+- Below 0.40, DER rises sharply because distinct speakers merge (0.35: 14.8, 0.30: 23.2).
+  Above 0.40, the curve is flat and then rises slowly as speakers over-split.
+- The offline refine starts merging only at 0.50 or below. From 0.60 up it is a no-op, as it
+  was at 0.85. At 0.35 it merges more, and DER goes up again.
+
+### Chosen values
+
+| Knob | Before | After |
+|---|---|---|
+| Online similarity threshold | 0.85 | **0.45** |
+| `max_speakers` | 4 | **8** |
+| Offline refine merge threshold | 0.85 | **0.50** |
+| Online centroid merging | off (1.0) | off (1.0) |
+
+The single dev minimum is 0.50 / 8 / 0.50 (8.80). The chosen point, 0.45 / 8 / 0.50 (9.32),
+has the lowest 3×3 neighbourhood mean on the cap-8 grid: 9.37, with a worst neighbour of 10.00.
+It also sits 0.05 above the cliff at 0.40 rather than on its edge. Only the multilingual CAM++
+was calibrated. EN CAM++ (0.85) and ERes2Net (0.65) keep their old values in
+`echo_diarize::presets`.
+
+### Dev results
+
+| Config | Set | DER % | Miss % | FA % | Conf % | Est. / true spk (mean) | Count exact | Median file DER % | Merges |
+|---|---|---|---|---|---|---|---|---|---|
+| 0.85 / 4 / 0.85 (old) | `mls_es_dev` | 17.89 | 0.62 | 0.98 | 16.29 | 4.00 / 3.45 | 2/20 | 10.81 | 0 |
+| **0.45 / 8 / 0.50** | `mls_es_dev` | **5.85** | 0.63 | 0.98 | 4.24 | 4.75 / 3.45 | 5/20 | 3.79 | 2 |
+| 0.50 / 8 / 0.50 (dev min) | `mls_es_dev` | 6.19 | 0.61 | 0.98 | 4.60 | 5.55 / 3.45 | 1/20 | 4.23 | 2 |
+| 0.40 / 6 / 0.50 | `mls_es_dev` | 6.16 | 0.64 | 0.98 | 4.53 | 3.85 / 3.45 | 12/20 | 3.81 | 0 |
+| 0.85 / 4 / 0.85 (old) | `voxconverse_dev` | 27.51 | 8.09 | 1.32 | 18.10 | 4.00 / 3.67 | 3/12 | 24.19 | 0 |
+| **0.45 / 8 / 0.50** | `voxconverse_dev` | **16.26** | 7.20 | 1.45 | 7.61 | 5.42 / 3.67 | 0/12 | 12.38 | 0 |
+| 0.50 / 8 / 0.50 (dev min) | `voxconverse_dev` | 14.02 | 7.18 | 1.45 | 5.38 | 6.00 / 3.67 | 0/12 | 10.64 | 0 |
+| 0.40 / 6 / 0.50 | `voxconverse_dev` | 16.23 | 7.37 | 1.45 | 7.41 | 4.67 / 3.67 | 3/12 | 15.29 | 0 |
+
+### Test results (untouched T6 sets)
+
+| Config | Set | DER % | Miss % | FA % | Conf % | Est. / true spk (mean) | Count exact | Median file DER % |
+|---|---|---|---|---|---|---|---|---|
+| 0.85 / 4 / 0.85 (T6 app baseline) | `mls_es` | 18.76 | 2.96 | 0.70 | 15.10 | 4.00 / 2.80 | 3/20 | 10.65 |
+| **0.45 / 8 / 0.50 (new preset)** | `mls_es` | **7.31** | 2.94 | 0.70 | 3.67 | 4.15 / 2.80 | 3/20 | 6.30 |
+| 0.50 / 8 / 0.50 (dev min) | `mls_es` | 6.72 | 2.95 | 0.70 | 3.07 | 5.25 / 2.80 | 1/20 | 6.74 |
+| 0.40 / 6 / 0.50 | `mls_es` | 7.17 | 2.95 | 0.70 | 3.53 | 3.50 / 2.80 | 7/20 | 6.29 |
+| 0.85 / 4 / 0.85 (T6 app baseline) | `voxconverse` | 20.19 | 2.99 | 0.90 | 16.30 | 4.00 / 3.33 | 0/12 | 13.11 |
+| **0.45 / 8 / 0.50 (new preset)** | `voxconverse` | **5.56** | 2.53 | 0.92 | 2.11 | 4.67 / 3.33 | 2/12 | 1.80 |
+| 0.50 / 8 / 0.50 (dev min) | `voxconverse` | 6.98 | 2.53 | 0.95 | 3.51 | 5.17 / 3.33 | 2/12 | 2.09 |
+| 0.40 / 6 / 0.50 | `voxconverse` | 6.65 | 2.57 | 0.89 | 3.20 | 4.00 / 3.33 | 5/12 | 1.74 |
+
+Medians here are the mean of the two middle files, so the baseline medians differ slightly from
+the T6 tables. Pooled numbers match T6 exactly. A run with the committed preset and no
+overrides (`1c80958`) reproduced the new-preset rows on all four sets.
+
+On the test sets, DER falls 2.6× on Spanish (18.76 → 7.31) and 3.6× on VoxConverse (20.19 →
+5.56). Confusion falls from about 80 % of DER to about 40-50 %. Miss is now the largest part on
+VoxConverse.
+
+**Caveat: speaker counts.** The preset over-counts by about 1.3 speakers on average (4.15 vs
+2.80 on `mls_es`). The extra clusters are short, so they cost little DER. A user will still see
+them as extra speakers in the transcript. The 0.40 / 6 point counts best (7/20 and 5/12 exact)
+for about the same test DER, but it sits on the edge of the merge cliff on dev. Reducing the
+over-count is a job for T10 (VBx), which can split and re-assign speakers, not only merge them.
+
 ## Reproduce
 
 ```
@@ -128,7 +241,7 @@ ECHO_LOG=warn echo-proto bench der --manifest <set>/manifest.txt \
   --embedder models/embedder/campplus_zh_en_common_advanced.onnx \
   --segmenter models/segmenter/pyannote_segmentation_3_tract.onnx \
   --vad <silero v6.2 inlined>.onnx [--no-refine] [--threshold X] \
-  [--hyp-dir out/] [--json]
+  [--max-speakers N] [--refine-threshold Y] [--hyp-dir out/] [--json]
 ```
 
 `ECHO_LOG=warn` keeps the tracing logs off stdout, so `--json` output stays parseable. A
@@ -138,8 +251,8 @@ matrix.
 
 ## Next
 
-- T7: compare candidate embedders with this harness, each with its own calibrated threshold.
-- Calibrate the multilingual CAM++ threshold on a held-out split, for example the MLS es
-  `dev` split. Consider raising `max_speakers` or making it adaptive.
-- `build_diarizer` should call `EmbedderFamily::cluster_config` so that the app and the
-  benchmark cannot drift apart. That is a one-function change in `src-tauri`, not made here.
+- T7: compare candidate embedders with this harness, each with its own threshold calibrated on
+  the dev sets above. EN CAM++ and ERes2Net are still uncalibrated.
+- T10 (VBx) should target the speaker over-count that remains after calibration.
+- Done in T6b: `build_diarizer` builds the diarizer from `EmbedderFamily` (`a7f843a`), and the
+  app defaults to the multilingual CAM++ when the user has no preference (`bb29136`).
