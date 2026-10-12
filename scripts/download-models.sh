@@ -20,7 +20,7 @@
 #   scripts/download-models.sh small.en       # ~466 MB, English-only
 #   scripts/download-models.sh asr-es         # whisper-large-v3-turbo Spanish fine-tune
 #                                             # (requires Python; see Pack C below)
-#   scripts/download-models.sh vad            # Silero VAD v5.1.2 (~2 MB)
+#   scripts/download-models.sh vad            # Silero VAD v6.2.3 (~2.7 MB raw, ~1.5 MB inlined)
 #   scripts/download-models.sh embed          # 3D-Speaker ERes2Net (~26 MB)
 #   scripts/download-models.sh cam-plus-plus  # CAM++ EN-VoxCeleb embedder (~28 MB)
 #   scripts/download-models.sh embed-multi    # CAM++ multilingual zh_en embedder (~27 MB, better on Spanish)
@@ -53,28 +53,25 @@ MODELS_DIR="$ASR_DIR"
 
 # Hugging Face repository that mirrors the ggerganov/whisper.cpp models.
 HF_BASE="https://huggingface.co/ggerganov/whisper.cpp/resolve/main"
-# Silero VAD v5.1.2 (last v5 release). Pinned to a tagged release so we
-# get reproducible downloads across machines and over time.
+# Silero VAD v6.2.3 (MIT). Pinned to the release commit so downloads are
+# reproducible across machines and over time, and verified by SHA-256.
 #
-# The upstream v5 ONNX *does* contain a control-flow `If` operator
-# (dispatching between the 16 kHz and 8 kHz sub-networks on the `sr`
-# input). pure-Rust `tract-onnx` — the inference backend used by
-# `crates/echo-audio/src/preprocess/silero_vad.rs` — does not
-# implement `If`, so loading the raw file errors with
-# `optimize: Failed analyse for node #5 "If_0"`.
+# We fetch `silero_vad_op18_ifless.onnx`: upstream already folded its
+# nested shape `If`s, but one top-level `If` still dispatches between
+# the 16 kHz and 8 kHz sub-networks on the `sr` input. pure-Rust
+# `tract-onnx` — the inference backend used by
+# `crates/echo-audio/src/preprocess/silero_vad.rs` — does not implement
+# `If`, so after download `scripts/inline-silero-vad.py` inlines the
+# 16 kHz branch and drops the `sr` input (onnx only, no ORT pass).
 #
-# We work around this by post-processing the ONNX after download with
-# `scripts/simplify-silero-vad.py`: inline the 16 kHz branch, drop the
-# now-orphan `sr` input and let ORT's constant-folding eliminate the
-# nested shape-dependent `If`s. The resulting graph is ~31 nodes of
-# pure feed-forward + LSTM, bitwise-equivalent to the upstream model
-# at 16 kHz, and loads cleanly in tract.
-#
-# v6 was evaluated and rejected: it changed the state signature
-# (`[2,1,128]` → two separate LSTM states) so the Rust adapter would
-# need a full rewrite on top of the simplification; the ~16% noisy-
-# audio WER improvement it promises is not worth that churn for MVP.
-SILERO_VAD_URL="https://github.com/snakers4/silero-vad/raw/v5.1.2/src/silero_vad/data/silero_vad.onnx"
+# The state signature is unchanged from v5 (`state [2,1,128]`); only the
+# separate `16k_sequence` export splits h/c. v6 does need 64 samples of
+# context prepended to each 512-sample hop (a `[1,576]` input), which the
+# adapter supplies.
+SILERO_VAD_COMMIT="5cd7945676eb32225748052e2e6a0580e4686a08"
+SILERO_VAD_URL="https://github.com/snakers4/silero-vad/raw/${SILERO_VAD_COMMIT}/src/silero_vad/data/silero_vad_op18_ifless.onnx"
+SILERO_VAD_SHA256="7671cd04b004e9076da0d4a7b1a5aec36adf161c39230c1cb94a4fd5db6bbd28"
+SILERO_VAD_BYTES=2845718
 # 3D-Speaker ERes2Net (English VoxCeleb) — the speaker embedder used by
 # echo-diarize. Mirrored on Hugging Face by csukuangfj (sherpa-onnx
 # maintainer); upstream lives on ModelScope. ~26 MB, opset 13, outputs
@@ -211,61 +208,66 @@ download_one() {
   printf "  ${GRN}✓${RST} %s (%d MiB)\n" "$fname" "$got_mib"
 }
 
+sha256_of() {
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | cut -d' ' -f1
+  else
+    sha256sum "$1" | cut -d' ' -f1
+  fi
+}
+
 download_silero_vad() {
   local out="${VAD_DIR}/silero_vad.onnx"
-  local simplifier="${REPO_ROOT}/scripts/simplify-silero-vad.py"
+  # The untouched upstream file is cached next to the tract-ready build
+  # so re-runs can re-inline without re-downloading. Its SHA-256 is the
+  # readiness signal: a cached v5 upstream (or a truncated file) fails
+  # the check and triggers a fresh v6.2 download.
+  local raw="${out}.upstream"
+  local inliner="${REPO_ROOT}/scripts/inline-silero-vad.py"
 
-  # Caching strategy: file size alone is NOT a reliable readiness signal.
-  # A previous version of the simplifier ran ORT at ENABLE_ALL and emitted
-  # files of the same ~1220 KiB as the current BASIC pipeline but laced
-  # with FusedConv (an ORT contrib op tract rejects). To recover those
-  # users transparently, we always run the simplifier — its
-  # `already_simplified` check is O(few-ms) and correctly inspects op
-  # types, not just byte counts.
-  local need_download=1
-  if [[ -f "$out" ]]; then
-    local got_kib
-    got_kib=$(( $(wc -c < "$out") / 1024 ))
-    if (( got_kib < 1000 )); then
-      warn "silero_vad.onnx present but truncated (${got_kib} KiB). Re-downloading."
-    else
-      info "silero_vad.onnx already on disk (${got_kib} KiB) — will verify with simplifier."
-      need_download=0
-    fi
-  fi
-
-  if (( need_download )); then
-    info "Fetching Silero VAD v5.1.2 → ${out}"
+  if [[ -f "$raw" && "$(sha256_of "$raw")" == "$SILERO_VAD_SHA256" ]]; then
+    info "Silero VAD v6.2.3 upstream already cached — skipping download."
+  else
+    info "Fetching Silero VAD v6.2.3 → ${raw}"
     if command -v curl >/dev/null 2>&1; then
-      curl --fail --location --progress-bar --output "$out" "$SILERO_VAD_URL"
+      curl --fail --location --progress-bar --output "$raw" "$SILERO_VAD_URL"
     elif command -v wget >/dev/null 2>&1; then
-      wget --show-progress --output-document="$out" "$SILERO_VAD_URL"
+      wget --show-progress --output-document="$raw" "$SILERO_VAD_URL"
     else
       fail "Neither curl nor wget is installed."
     fi
-    local got_kib
-    got_kib=$(( $(wc -c < "$out") / 1024 ))
-    if (( got_kib < 1000 )); then
-      fail "silero_vad.onnx downloaded incompletely (${got_kib} KiB)"
+    local got_bytes
+    got_bytes=$(wc -c < "$raw" | tr -d ' ')
+    if (( got_bytes != SILERO_VAD_BYTES )); then
+      rm -f "$raw"
+      fail "Silero VAD downloaded incompletely (${got_bytes} B, expected ${SILERO_VAD_BYTES} B)"
+    fi
+    if [[ "$(sha256_of "$raw")" != "$SILERO_VAD_SHA256" ]]; then
+      rm -f "$raw"
+      fail "Silero VAD SHA-256 mismatch (expected ${SILERO_VAD_SHA256})"
     fi
   fi
 
-  info "Verifying / simplifying Silero VAD for tract-onnx (BASIC ORT level, no contrib ops)"
+  info "Inlining the 16 kHz branch of Silero VAD for tract-onnx"
   if ! command -v python3 >/dev/null 2>&1; then
-    fail "python3 is required to simplify Silero VAD. Install Python 3.9+ and re-run."
+    fail "python3 is required to inline Silero VAD. Install Python 3.9+ and re-run."
   fi
-  if ! python3 -c "import onnx, onnxruntime" >/dev/null 2>&1; then
-    info "Installing simplifier deps: pip install --user onnx onnxruntime"
-    python3 -m pip install --quiet --user onnx onnxruntime \
-      || fail "Could not install onnx/onnxruntime. Install them manually and re-run."
+  if ! python3 -c "import onnx" >/dev/null 2>&1; then
+    info "Installing inliner deps: pip install --user onnx"
+    python3 -m pip install --quiet --user onnx \
+      || fail "Could not install onnx. Install it manually and re-run."
   fi
-  # The simplifier is idempotent: it short-circuits on a clean output
-  # and re-emits a fresh BASIC build on a stale FusedConv-tainted file.
-  python3 "$simplifier" --input "$out" --output "$out" \
-    || fail "Silero VAD simplification failed. Delete ${out} and ${out}.upstream and re-run to start clean."
+  # Always re-inline from the verified upstream: it takes well under a
+  # second and replaces any previous (e.g. v5) build in place.
+  python3 "$inliner" --input "$raw" --output "$out" \
+    || fail "Silero VAD inlining failed. Delete ${out} and ${raw} and re-run to start clean."
 
+  # The inlined graph drops the 8 kHz weights: ~1,520 KiB.
   local got_kib
   got_kib=$(( $(wc -c < "$out") / 1024 ))
+  if (( got_kib < 1400 )); then
+    fail "silero_vad.onnx looks wrong after inlining (${got_kib} KiB, expected ~1,520 KiB)"
+  fi
   printf "  ${GRN}✓${RST} silero_vad.onnx (%d KiB, tract-ready)\n" "$got_kib"
 }
 

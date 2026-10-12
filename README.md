@@ -138,11 +138,13 @@ All processing happens locally using open-source models:
 |-------|---------|------|
 | [Whisper](https://github.com/ggerganov/whisper.cpp) | Speech-to-text | 148 MB – 1.6 GB |
 | [Qwen 3](https://huggingface.co/Qwen) | Summaries & chat | 2.6 – 9.2 GB |
-| [Silero VAD](https://github.com/snakers4/silero-vad) | Voice activity detection | ~1.2 MB |
+| [Silero VAD](https://github.com/snakers4/silero-vad) v6.2 | Voice activity detection | ~1.5 MB |
 | [3D-Speaker](https://github.com/modelscope/3D-Speaker) | Speaker embeddings (ERes2Net / CAM++) | ~26 MB |
 | [pyannote](https://github.com/pyannote/pyannote-audio) | Speaker segmentation | ~17 MB |
 
 Models are downloaded on-demand from the built-in model manager (**Settings → Models**).
+
+**Third-party models.** Silero VAD is © Silero Team, released under the [MIT License](https://github.com/snakers4/silero-vad/blob/master/LICENSE); `scripts/inline-silero-vad.py` inlines its 16 kHz branch for tract ONNX inference.
 
 <details>
 <summary><strong>Which models should I choose?</strong></summary>

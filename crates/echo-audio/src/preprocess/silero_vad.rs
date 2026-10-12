@@ -1,7 +1,7 @@
-//! Silero VAD v5 adapter — neural Voice Activity Detection.
+//! Silero VAD v6.2 adapter — neural Voice Activity Detection.
 //!
-//! Implements the [`Vad`] domain port using the Silero VAD v5 model
-//! (`silero_vad.onnx`, ~1.2 MB after pre-processing) running through
+//! Implements the [`Vad`] domain port using the Silero VAD v6.2 model
+//! (`silero_vad.onnx`, ~1.5 MB after pre-processing) running through
 //! pure-Rust ONNX inference (`tract-onnx`). Compared to the
 //! energy-based baseline this adapter:
 //!
@@ -10,27 +10,30 @@
 //!   an utterance are stitched correctly;
 //! - is robust to gain (a soft speaker still scores high probability).
 //!
-//! ## Sample rate and frame size
+//! ## Sample rate, hop and context
 //!
-//! Silero VAD v5 expects 16 kHz mono PCM and processes audio in
-//! fixed 512-sample windows (32 ms). The 8 kHz path (256-sample
-//! windows) exists upstream but is intentionally not exposed here —
-//! the rest of EchoNote is 16 kHz / mono.
+//! Silero VAD expects 16 kHz mono PCM and advances in fixed
+//! 512-sample hops (32 ms). Following the upstream reference
+//! implementation, every inference sees the **last 64 samples of the
+//! previous hop prepended** to the current one, so the network input
+//! is `[1, 576]`. The context is zeroed whenever the LSTM state is.
+//! v6.2 depends on it: fed bare 512-sample hops it scores ~0 on
+//! everything. The previously shipped v5 file accepts the same
+//! 576-sample input, so both builds work with this adapter. The 8 kHz
+//! path (256-sample hops) exists upstream but is intentionally not
+//! exposed here — the rest of EchoNote is 16 kHz / mono.
 //!
 //! ## Why the on-disk ONNX is a modified build
 //!
-//! The upstream Silero v5 graph dispatches between the 16 kHz and
-//! 8 kHz sub-networks through an ONNX `If` operator controlled by the
-//! `sr` input. `tract-onnx` does not implement `If`, so loading the
-//! raw upstream file fails with `optimize: Failed analyse for node
-//! #5 "If_0" If`. We therefore pre-process the model at download
-//! time (`scripts/simplify-silero-vad.py`): we inline the 16 kHz
-//! `then_branch`, drop the now-unused `sr` input and let ORT's
-//! constant-folding pass collapse the nested `If`s that depended on
-//! static shape values. The result is a pure feed-forward + LSTM
-//! graph with 2 inputs (`input`, `state`) and 2 outputs (`output`,
-//! `stateN`), bitwise-equivalent to the upstream model for 16 kHz
-//! audio.
+//! The upstream `silero_vad_op18_ifless.onnx` still dispatches between
+//! the 16 kHz and 8 kHz sub-networks through one top-level ONNX `If`
+//! controlled by the `sr` input (its nested shape `If`s are already
+//! gone). `tract-onnx` does not implement `If`, so we pre-process the
+//! model at download time (`scripts/inline-silero-vad.py`): we inline
+//! the 16 kHz `then_branch` and drop the now-unused `sr` input. The
+//! result is a pure feed-forward + LSTM graph with 2 inputs (`input`,
+//! `state [2, 1, 128]`) and 2 outputs (`output`, `stateN`), equivalent
+//! to the upstream model for 16 kHz audio.
 //!
 //! ## Hysteresis
 //!
@@ -42,7 +45,7 @@
 //!
 //! ## Cost
 //!
-//! Each `push` runs the LSTM over 512 samples on CPU. On Apple Silicon
+//! Each hop runs the network over a 576-sample frame on CPU. On Apple Silicon
 //! a single inference takes < 1 ms; throughput is ~30 000 ms of audio
 //! per second on one core. We can therefore call it on every chunk of
 //! the streaming pipeline without measurable latency impact.
@@ -55,11 +58,18 @@ use echo_domain::{DomainError, Sample, Vad, VoiceState};
 use tracing::info;
 use tract_onnx::prelude::*;
 
-/// Sample rate Silero VAD v5 was trained for.
+/// Sample rate Silero VAD was trained for.
 pub const SILERO_SAMPLE_RATE: u32 = 16_000;
 
-/// Number of samples consumed per inference at 16 kHz (~32 ms).
+/// Number of new samples consumed per inference at 16 kHz (~32 ms).
 pub const SILERO_FRAME_SAMPLES: usize = 512;
+
+/// Trailing samples of the previous hop prepended to each inference
+/// (upstream convention for 16 kHz).
+pub const SILERO_CONTEXT_SAMPLES: usize = 64;
+
+/// Network input width: context followed by one hop.
+const SILERO_INPUT_SAMPLES: usize = SILERO_CONTEXT_SAMPLES + SILERO_FRAME_SAMPLES;
 
 /// Hidden-state width per LSTM layer. Hard-coded by the model.
 const STATE_HIDDEN: usize = 128;
@@ -128,16 +138,52 @@ impl SileroVadConfig {
     }
 }
 
+/// Rolling 64-sample context that turns a 512-sample hop into the
+/// 576-sample frame the network expects.
+#[derive(Debug, Clone, Copy)]
+struct FrameContext {
+    tail: [Sample; SILERO_CONTEXT_SAMPLES],
+}
+
+impl Default for FrameContext {
+    fn default() -> Self {
+        Self {
+            tail: [0.0; SILERO_CONTEXT_SAMPLES],
+        }
+    }
+}
+
+impl FrameContext {
+    /// Build `context ++ hop` and keep the hop's last 64 samples as
+    /// the context for the next call.
+    fn assemble(&mut self, hop: &[Sample]) -> [Sample; SILERO_INPUT_SAMPLES] {
+        debug_assert_eq!(hop.len(), SILERO_FRAME_SAMPLES);
+        let mut frame = [0.0; SILERO_INPUT_SAMPLES];
+        frame[..SILERO_CONTEXT_SAMPLES].copy_from_slice(&self.tail);
+        frame[SILERO_CONTEXT_SAMPLES..].copy_from_slice(hop);
+        self.tail
+            .copy_from_slice(&hop[SILERO_FRAME_SAMPLES - SILERO_CONTEXT_SAMPLES..]);
+        frame
+    }
+
+    fn clear(&mut self) {
+        self.tail = [0.0; SILERO_CONTEXT_SAMPLES];
+    }
+}
+
 /// Concrete tract model type for an optimized + runnable Silero graph.
 type SileroModel = SimplePlan<TypedFact, Box<dyn TypedOp>, Graph<TypedFact, Box<dyn TypedOp>>>;
 
-/// Silero VAD v5 detector. Holds the loaded model (cheap to clone via
-/// `Arc`) and the per-stream LSTM state plus hysteresis bookkeeping.
+/// Silero VAD detector. Holds the loaded model (cheap to clone via
+/// `Arc`) and the per-stream LSTM state, frame context and hysteresis
+/// bookkeeping.
 pub struct SileroVad {
     model: Arc<SileroModel>,
     config: SileroVadConfig,
     /// LSTM hidden state, shape `[2, 1, 128]`.
     state: Tensor,
+    /// Tail of the previous hop; zeroed together with `state`.
+    context: FrameContext,
     /// Audio that did not fill a 512-sample window on the previous push.
     carry: Vec<Sample>,
     hysteresis: VoiceState,
@@ -187,7 +233,7 @@ impl SileroVad {
             // `InferenceFact`, hence the `dt_shape` helper.
             .with_input_fact(
                 0,
-                InferenceFact::dt_shape(f32::datum_type(), [1, SILERO_FRAME_SAMPLES]),
+                InferenceFact::dt_shape(f32::datum_type(), [1, SILERO_INPUT_SAMPLES]),
             )
             .map_err(|e| DomainError::VadFailed(format!("input fact: {e}")))?
             .with_input_fact(
@@ -204,6 +250,7 @@ impl SileroVad {
             model: Arc::new(model),
             config,
             state: zero_state(),
+            context: FrameContext::default(),
             carry: Vec::with_capacity(SILERO_FRAME_SAMPLES),
             hysteresis: VoiceState::Silence,
             voiced_run: 0,
@@ -233,6 +280,7 @@ impl SileroVad {
             model: Arc::clone(&self.model),
             config: self.config,
             state: zero_state(),
+            context: FrameContext::default(),
             carry: Vec::with_capacity(SILERO_FRAME_SAMPLES),
             hysteresis: VoiceState::Silence,
             voiced_run: 0,
@@ -241,14 +289,14 @@ impl SileroVad {
         }
     }
 
-    /// Run a single 512-sample window through the network and return
-    /// the raw speech probability in `[0.0, 1.0]`. Updates the LSTM
-    /// state in place. Used by [`Self::push`] but exposed for tests
-    /// and tooling that wants the raw signal.
+    /// Run a single 512-sample hop (with the 64-sample context of the
+    /// previous hop prepended) through the network and return the raw
+    /// speech probability in `[0.0, 1.0]`. Updates the LSTM state and
+    /// the context in place. Used by [`Self::push`] but exposed for
+    /// tests and tooling that wants the raw signal.
     pub fn infer_window(&mut self, window: &[Sample]) -> Result<f32, DomainError> {
-        debug_assert_eq!(window.len(), SILERO_FRAME_SAMPLES);
-
-        let audio = Tensor::from_shape(&[1, SILERO_FRAME_SAMPLES], window)
+        let frame = self.context.assemble(window);
+        let audio = Tensor::from_shape(&[1, SILERO_INPUT_SAMPLES], &frame)
             .map_err(|e| DomainError::VadFailed(format!("audio tensor: {e}")))?;
 
         let inputs = tvec!(audio.into_tvalue(), self.state.clone().into_tvalue(),);
@@ -274,6 +322,13 @@ impl SileroVad {
 
         self.state = new_state_tv.into_tensor();
         Ok(prob.clamp(0.0, 1.0))
+    }
+
+    /// Zero the LSTM state and the frame context together: the context
+    /// belongs to the same temporal stream the state summarizes.
+    fn clear_lstm(&mut self) {
+        self.state = zero_state();
+        self.context.clear();
     }
 
     fn step_hysteresis(&mut self, prob: f32) {
@@ -323,7 +378,7 @@ impl Vad for SileroVad {
         if self.config.lstm_state_reset_frames == 0
             || self.cross_chunk_silent_windows >= self.config.lstm_state_reset_frames
         {
-            self.state = zero_state();
+            self.clear_lstm();
         }
 
         // Concat carry + new samples, then drain in 512-sample windows.
@@ -405,7 +460,7 @@ impl Vad for SileroVad {
     }
 
     fn reset(&mut self) {
-        self.state = zero_state();
+        self.clear_lstm();
         self.carry.clear();
         self.hysteresis = VoiceState::Silence;
         self.voiced_run = 0;
@@ -425,7 +480,7 @@ fn zero_state() -> Tensor {
 // Tests
 // ---------------------------------------------------------------------------
 //
-// These tests require `models/vad/silero_vad.onnx` on disk. They are
+// The model-backed tests require `models/vad/silero_vad.onnx` on disk. They are
 // `#[ignore]`-able via the `ECHO_VAD_MODEL` env knob: when the file
 // is missing we skip rather than fail, so a fresh checkout without
 // `scripts/download-models.sh vad` does not break `cargo test`.
@@ -435,13 +490,29 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
+    /// Workspace root, so default paths resolve no matter which
+    /// directory `cargo test` runs from (it uses the crate dir).
+    fn workspace_root() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
+    }
+
     fn model_path() -> Option<PathBuf> {
         let candidate = std::env::var("ECHO_VAD_MODEL")
             .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from("./models/vad/silero_vad.onnx"));
+            .unwrap_or_else(|_| workspace_root().join("models/vad/silero_vad.onnx"));
         if candidate.exists() {
             Some(candidate)
         } else {
+            None
+        }
+    }
+
+    fn meeting_fixture() -> Option<PathBuf> {
+        let fixture = workspace_root().join("fixtures/audio/01_short_meeting.wav");
+        if fixture.exists() {
+            Some(fixture)
+        } else {
+            eprintln!("skipping: fixture {} missing", fixture.display());
             None
         }
     }
@@ -459,7 +530,7 @@ mod tests {
 
     /// Load a 16 kHz mono WAV into a `Vec<f32>` in `[-1, 1]`. Used by
     /// the speech-detection test.
-    fn load_wav_f32(path: &str) -> Vec<f32> {
+    fn load_wav_f32(path: &Path) -> Vec<f32> {
         let mut reader = hound::WavReader::open(path).expect("open wav");
         let spec = reader.spec();
         assert_eq!(spec.sample_rate, 16_000, "fixture must be 16 kHz");
@@ -514,14 +585,12 @@ mod tests {
         let Some(path) = model_path() else {
             return;
         };
-        let fixture = "./fixtures/audio/01_short_meeting.wav";
-        if !std::path::Path::new(fixture).exists() {
-            eprintln!("skipping: fixture {fixture} missing");
+        let Some(fixture) = meeting_fixture() else {
             return;
-        }
+        };
 
         let mut vad = SileroVad::for_meetings(&path).expect("load model");
-        let samples = load_wav_f32(fixture);
+        let samples = load_wav_f32(&fixture);
 
         // Feed the whole clip in 100 ms chunks (≈1600 samples) to
         // exercise the carry buffer the way the streaming pipeline
@@ -615,17 +684,24 @@ mod tests {
             "counter should have reached threshold after 4 silent windows"
         );
 
-        // A subsequent push with voiced content (even just a sine)
-        // should reset the counter within the loop.
-        let voiced = sine(440.0, 500, 0.5);
-        vad.push(&voiced).await.unwrap();
-        // The model may or may not classify the sine as voiced, but
-        // even if it does, the loop resets cross_chunk_silent_windows
-        // to 0 on the first window above end_threshold. We verify the
-        // counter is strictly less than the threshold.
+        // Real speech, one hop per push: the first window at or above
+        // `end_threshold` must drop the counter back to zero. A pure
+        // tone cannot be used here because Silero rejects it.
+        let Some(fixture) = meeting_fixture() else {
+            return;
+        };
+        let speech = load_wav_f32(&fixture);
+        let mut counter_was_reset = false;
+        for hop in speech.as_chunks::<SILERO_FRAME_SAMPLES>().0 {
+            vad.push(hop).await.unwrap();
+            if vad.cross_chunk_silent_windows == 0 {
+                counter_was_reset = true;
+                break;
+            }
+        }
         assert!(
-            vad.cross_chunk_silent_windows < config.lstm_state_reset_frames,
-            "counter should be below threshold after voiced content"
+            counter_was_reset,
+            "a voiced window must reset the cross-chunk silence counter"
         );
     }
 
@@ -647,5 +723,115 @@ mod tests {
         // verify it doesn't panic and classifies silence as silence.
         let state = vad.push(&vec![0.0_f32; 16_000]).await.unwrap();
         assert_eq!(state, VoiceState::Silence);
+    }
+
+    /// Raw-probability check: the meeting fixture contains clear
+    /// speech, so at least one hop must score well above the meeting
+    /// thresholds. Guards against a model that loads but is fed the
+    /// wrong frame layout (v6 without its 64-sample context scores
+    /// ~0.001 everywhere while still "working").
+    #[tokio::test]
+    async fn meeting_fixture_speech_reaches_high_probability() {
+        let Some(path) = model_path() else {
+            return;
+        };
+        let Some(fixture) = meeting_fixture() else {
+            return;
+        };
+        let mut vad = SileroVad::for_meetings(&path).expect("load model");
+        let samples = load_wav_f32(&fixture);
+
+        let max_prob = samples
+            .as_chunks::<SILERO_FRAME_SAMPLES>()
+            .0
+            .iter()
+            .map(|hop| vad.infer_window(hop).expect("inference"))
+            .fold(0.0_f32, f32::max);
+        assert!(
+            max_prob > 0.5,
+            "speech in the meeting fixture must reach p > 0.5, got {max_prob:.3} with {}",
+            path.display()
+        );
+    }
+
+    fn ramp_hop(offset: f32) -> Vec<f32> {
+        (0..SILERO_FRAME_SAMPLES)
+            .map(|i| offset + i as f32)
+            .collect()
+    }
+
+    #[test]
+    fn first_frame_is_zero_context_followed_by_the_hop() {
+        let mut ctx = FrameContext::default();
+        let hop = ramp_hop(1.0);
+        let frame = ctx.assemble(&hop);
+        assert_eq!(frame.len(), SILERO_INPUT_SAMPLES);
+        assert!(frame[..SILERO_CONTEXT_SAMPLES].iter().all(|&x| x == 0.0));
+        assert_eq!(&frame[SILERO_CONTEXT_SAMPLES..], hop.as_slice());
+    }
+
+    #[test]
+    fn next_frame_is_prefixed_with_the_tail_of_the_previous_hop() {
+        let mut ctx = FrameContext::default();
+        let first = ramp_hop(1.0);
+        let second = ramp_hop(10_000.0);
+        ctx.assemble(&first);
+        let frame = ctx.assemble(&second);
+        assert_eq!(
+            &frame[..SILERO_CONTEXT_SAMPLES],
+            &first[SILERO_FRAME_SAMPLES - SILERO_CONTEXT_SAMPLES..]
+        );
+        assert_eq!(&frame[SILERO_CONTEXT_SAMPLES..], second.as_slice());
+    }
+
+    #[test]
+    fn clear_zeroes_the_context() {
+        let mut ctx = FrameContext::default();
+        ctx.assemble(&ramp_hop(1.0));
+        ctx.clear();
+        let frame = ctx.assemble(&ramp_hop(1.0));
+        assert!(frame[..SILERO_CONTEXT_SAMPLES].iter().all(|&x| x == 0.0));
+    }
+
+    fn context_is_zero(vad: &SileroVad) -> bool {
+        vad.context.tail.iter().all(|&x| x == 0.0)
+    }
+
+    #[tokio::test]
+    async fn reset_and_clone_zero_the_context() {
+        let Some(path) = model_path() else {
+            return;
+        };
+        let mut vad = SileroVad::for_meetings(&path).expect("load model");
+        vad.push(&sine(440.0, 100, 0.5)).await.unwrap();
+        assert!(!context_is_zero(&vad), "a pushed hop must fill the context");
+
+        let child = vad.clone_for_new_session();
+        assert!(context_is_zero(&child));
+
+        vad.reset();
+        assert!(context_is_zero(&vad));
+    }
+
+    #[tokio::test]
+    async fn silence_driven_lstm_reset_also_zeroes_the_context() {
+        let Some(path) = model_path() else {
+            return;
+        };
+        let config = SileroVadConfig {
+            lstm_state_reset_frames: 2,
+            ..SileroVadConfig::meetings()
+        };
+        let mut vad = SileroVad::from_path(&path, config).expect("load model");
+        vad.push(&vec![0.0_f32; 2 * SILERO_FRAME_SAMPLES])
+            .await
+            .unwrap();
+        assert!(vad.cross_chunk_silent_windows >= 2);
+
+        // Poison the context, then push less than one hop: the reset
+        // at the start of `push` must clear it without any inference.
+        vad.context.tail = [1.0; SILERO_CONTEXT_SAMPLES];
+        vad.push(&[0.0_f32; 100]).await.unwrap();
+        assert!(context_is_zero(&vad));
     }
 }
