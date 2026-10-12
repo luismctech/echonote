@@ -1281,6 +1281,19 @@ absorbed: SpeakerId;
  */
 surviving: SpeakerId }
 /**
+ * A speaker referenced by a [`TranscriptEvent::Chunk`]: its stable id
+ * plus the arrival-order slot the recorder persists it under.
+ */
+export type SpeakerRef = { 
+/**
+ * Speaker identifier, as referenced by `Segment::speaker_id`.
+ */
+id: SpeakerId; 
+/**
+ * Arrival-order slot (0-based) of the speaker.
+ */
+slot: number }
+/**
  * Options the frontend may pass when starting a streaming session.
  * All fields optional; defaults match `StreamingOptions::default()`.
  */
@@ -1462,7 +1475,7 @@ export type TranscriptEvent =
  * One transcribed chunk. Segments inside are timestamped relative
  * to the start of the session (not the chunk).
  */
-{ type: "chunk"; sessionId: StreamingSessionId; chunkIndex: number; offsetMs: number; segments: Segment[]; language: string | null; rtf: number; speakerId?: SpeakerId | null; speakerSlot?: number | null } | 
+{ type: "chunk"; sessionId: StreamingSessionId; chunkIndex: number; offsetMs: number; segments: Segment[]; language: string | null; rtf: number; speakerId?: SpeakerId | null; speakerSlot?: number | null; speakers?: SpeakerRef[] } | 
 /**
  * A chunk was discarded by the silence gate before being sent to
  * the ASR backend. Useful for UI / metrics.
