@@ -25,6 +25,7 @@ use echo_domain::{
 };
 
 use super::{referenced_speakers, StreamingHandle, StreamingPipeline};
+use echo_domain::SpeakerRef;
 
 /// Yields N pre-baked frames then EOF.
 struct FakeStream {
@@ -1006,8 +1007,10 @@ async fn pause_flushes_buffered_speech_and_resume_resets_the_vad() {
     let capture = FakeCapture::new(AudioFormat::WHISPER, vec![]);
     let resampler = Arc::new(PassThroughResampler) as Arc<dyn Resampler>;
     let transcriber = FakeTranscriber::new();
-    let pipeline =
-        StreamingPipeline::new(capture, resampler, transcriber.clone()).with_vad(Box::new(vad));
+    let (diarizer, contexts) = RefiningDiarizer::new(Refine::Identity);
+    let pipeline = StreamingPipeline::new(capture, resampler, transcriber.clone())
+        .with_vad(Box::new(vad))
+        .with_diarizer(Box::new(diarizer));
     let mut handle = pipeline
         .start_with_stream(Box::new(stream), aligned_options(3_000, 15_000))
         .await
@@ -1032,6 +1035,12 @@ async fn pause_flushes_buffered_speech_and_resume_resets_the_vad() {
     );
     assert_eq!(resets.load(Ordering::SeqCst), 2, "session start + resume");
     assert_eq!(transcriber.call_count(), 2);
+    let epochs: Vec<u16> = contexts.lock().unwrap().iter().map(|c| c.epoch).collect();
+    assert_eq!(
+        epochs,
+        vec![0, 1],
+        "the diarizer sees the resume as a new run"
+    );
 }
 
 #[test]
@@ -1057,4 +1066,259 @@ fn referenced_speakers_lists_every_span_speaker_once_with_dominant_included() {
         vec![SpeakerRef { id: a, slot: 0 }, SpeakerRef { id: b, slot: 1 }]
     );
     assert!(referenced_speakers(&[], None).is_empty());
+}
+
+// ---------- End-of-session re-segmentation (ADR 0001, D3) ----------------
+
+/// What [`RefiningDiarizer::refine_plan`] does at stop.
+#[derive(Clone)]
+enum Refine {
+    /// Relabel every logged span to one fresh speaker (slot 9).
+    AllTo(Speaker),
+    /// Relabel every span to the speaker it already has.
+    Identity,
+    Fail,
+    Panic,
+    /// Sleep past the deadline, ignoring it.
+    Hang(Duration),
+}
+
+/// [`FakeDiarizer`] that records the contexts it was called with and
+/// returns a scripted refine plan.
+struct RefiningDiarizer {
+    inner: FakeDiarizer,
+    refine: Refine,
+    contexts: Arc<Mutex<Vec<echo_domain::ChunkContext>>>,
+    spans: Vec<(echo_domain::SpanRef, SpeakerId)>,
+}
+
+impl RefiningDiarizer {
+    fn new(refine: Refine) -> (Self, Arc<Mutex<Vec<echo_domain::ChunkContext>>>) {
+        let contexts = Arc::new(Mutex::new(Vec::new()));
+        (
+            Self {
+                inner: FakeDiarizer::new(),
+                refine,
+                contexts: Arc::clone(&contexts),
+                spans: Vec::new(),
+            },
+            contexts,
+        )
+    }
+}
+
+#[async_trait]
+impl Diarizer for RefiningDiarizer {
+    fn sample_rate_hz(&self) -> u32 {
+        16_000
+    }
+    async fn assign(&mut self, samples: &[Sample]) -> Result<Option<SpeakerId>, DomainError> {
+        self.inner.assign(samples).await
+    }
+    async fn assign_spans_at(
+        &mut self,
+        samples: &[Sample],
+        ctx: echo_domain::ChunkContext,
+    ) -> Result<Vec<echo_domain::SpeakerSpan>, DomainError> {
+        self.contexts.lock().unwrap().push(ctx);
+        let spans = self.assign_spans(samples).await?;
+        for (i, s) in spans.iter().enumerate() {
+            let at = echo_domain::SpanRef {
+                chunk_index: ctx.chunk_index,
+                span_index: i as u16,
+            };
+            self.spans.push((at, s.speaker_id));
+        }
+        Ok(spans)
+    }
+    fn speakers(&self) -> Vec<Speaker> {
+        self.inner.speakers()
+    }
+    fn rename(&mut self, id: SpeakerId, label: &str) -> Result<bool, DomainError> {
+        self.inner.rename(id, label)
+    }
+    fn reset(&mut self) {
+        self.inner.reset();
+    }
+    fn refine_plan(
+        &self,
+        budget: echo_domain::RefineBudget,
+    ) -> Result<echo_domain::RefineOutcome, DomainError> {
+        let plan = |spans: Vec<(echo_domain::SpanRef, SpeakerId)>, created| {
+            echo_domain::RefineOutcome::Relabel(echo_domain::SpanRelabelPlan {
+                spans,
+                created,
+                retired: vec![],
+            })
+        };
+        match &self.refine {
+            Refine::AllTo(s) => Ok(plan(
+                self.spans.iter().map(|(at, _)| (*at, s.id)).collect(),
+                vec![s.clone()],
+            )),
+            Refine::Identity => Ok(plan(self.spans.clone(), vec![])),
+            Refine::Fail => Err(DomainError::DiarizationFailed("scripted".into())),
+            Refine::Panic => panic!("scripted refine panic"),
+            Refine::Hang(d) => {
+                std::thread::sleep(*d);
+                let _ = budget;
+                Ok(plan(vec![], vec![]))
+            }
+        }
+    }
+}
+
+async fn run_refining(
+    refine: Refine,
+    timeout: Duration,
+) -> (Vec<TranscriptEvent>, Vec<echo_domain::ChunkContext>) {
+    let frames = vec![sine(16_000, 0.5), sine(16_000, -0.5), sine(16_000, 0.5)];
+    let capture = FakeCapture::new(AudioFormat::WHISPER, frames);
+    let (diarizer, contexts) = RefiningDiarizer::new(refine);
+    let pipeline = StreamingPipeline::new(
+        capture,
+        Arc::new(PassThroughResampler),
+        FakeTranscriber::new(),
+    )
+    .with_diarizer(Box::new(diarizer))
+    .with_refine_timeout(timeout);
+    let mut handle = pipeline
+        .start(StreamingOptions {
+            chunk_ms: 1_000,
+            silence_rms_threshold: 0.005,
+            ..StreamingOptions::default()
+        })
+        .await
+        .unwrap();
+    let events = drain_until_stopped(&mut handle).await;
+    let contexts = contexts.lock().unwrap().clone();
+    (events, contexts)
+}
+
+fn reassigned(events: &[TranscriptEvent]) -> Vec<&TranscriptEvent> {
+    events
+        .iter()
+        .filter(|e| matches!(e, TranscriptEvent::SpeakersReassigned { .. }))
+        .collect()
+}
+
+#[tokio::test]
+async fn diarizer_receives_the_session_context_of_each_chunk() {
+    let (events, contexts) = run_refining(Refine::Identity, Duration::from_secs(5)).await;
+    let chunks: Vec<(u32, u32)> = events
+        .iter()
+        .filter_map(|e| match e {
+            TranscriptEvent::Chunk {
+                chunk_index,
+                offset_ms,
+                ..
+            } => Some((*chunk_index, *offset_ms)),
+            _ => None,
+        })
+        .collect();
+    let seen: Vec<(u32, u32, u16)> = contexts
+        .iter()
+        .map(|c| (c.chunk_index, c.offset_ms, c.epoch))
+        .collect();
+    assert_eq!(chunks, vec![(0, 0), (1, 1_000), (2, 2_000)]);
+    assert_eq!(seen, vec![(0, 0, 0), (1, 1_000, 0), (2, 2_000, 0)]);
+}
+
+#[tokio::test]
+async fn reassignment_covers_every_emitted_segment_between_last_chunk_and_stopped() {
+    let fresh = Speaker::anonymous(9);
+    let (events, _) = run_refining(Refine::AllTo(fresh.clone()), Duration::from_secs(5)).await;
+
+    let emitted: Vec<SegmentId> = events
+        .iter()
+        .filter_map(|e| match e {
+            TranscriptEvent::Chunk { segments, .. } => Some(segments.iter().map(|s| s.id)),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    let at = |pred: fn(&TranscriptEvent) -> bool| events.iter().rposition(pred).unwrap();
+    let last_chunk = at(|e| matches!(e, TranscriptEvent::Chunk { .. }));
+    let reassign_at = at(|e| matches!(e, TranscriptEvent::SpeakersReassigned { .. }));
+    let stopped_at = at(|e| matches!(e, TranscriptEvent::Stopped { .. }));
+    assert!(
+        last_chunk < reassign_at && reassign_at < stopped_at,
+        "{events:#?}"
+    );
+
+    let TranscriptEvent::SpeakersReassigned {
+        created,
+        retired,
+        segments,
+        chunks,
+        ..
+    } = &events[reassign_at]
+    else {
+        unreachable!()
+    };
+    let moved: Vec<SegmentId> = segments.iter().map(|s| s.segment_id).collect();
+    assert_eq!(moved, emitted, "the plan covers every emitted segment");
+    assert!(segments.iter().all(|s| s.speaker_id == Some(fresh.id)));
+    assert_eq!(
+        created,
+        &vec![SpeakerRef {
+            id: fresh.id,
+            slot: 9
+        }]
+    );
+    assert_eq!(retired.len(), 2, "both online speakers lost every segment");
+    assert!(retired
+        .iter()
+        .all(|r| r.majority_recipient == Some(fresh.id)));
+    assert_eq!(chunks.len(), 3);
+    assert!(chunks.iter().all(|c| c.speaker_slot == Some(9)));
+}
+
+#[tokio::test]
+async fn plan_that_moves_nothing_emits_no_reassignment() {
+    let (events, _) = run_refining(Refine::Identity, Duration::from_secs(5)).await;
+    assert!(reassigned(&events).is_empty());
+    assert!(matches!(
+        events.last(),
+        Some(TranscriptEvent::Stopped { .. })
+    ));
+}
+
+#[tokio::test]
+async fn failed_or_panicking_refine_keeps_the_online_result() {
+    for refine in [Refine::Fail, Refine::Panic] {
+        let (events, _) = run_refining(refine, Duration::from_secs(5)).await;
+        assert!(reassigned(&events).is_empty());
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e, TranscriptEvent::Chunk { .. }))
+                .count(),
+            3
+        );
+        assert!(matches!(
+            events.last(),
+            Some(TranscriptEvent::Stopped { .. })
+        ));
+    }
+}
+
+#[tokio::test]
+async fn refine_ignoring_its_deadline_still_lets_the_session_stop() {
+    let started = std::time::Instant::now();
+    let (events, _) = run_refining(
+        Refine::Hang(Duration::from_secs(3)),
+        Duration::from_millis(100),
+    )
+    .await;
+    assert!(reassigned(&events).is_empty());
+    assert!(matches!(
+        events.last(),
+        Some(TranscriptEvent::Stopped { .. })
+    ));
+    assert!(
+        started.elapsed() < Duration::from_millis(2_500),
+        "Stopped waited for the hung refine: {:?}",
+        started.elapsed()
+    );
 }

@@ -37,6 +37,7 @@
 //! policy can be added in Sprint 1 once metrics are wired.
 
 mod chunker;
+mod refine;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -48,10 +49,13 @@ use tracing::{debug, error, info, warn};
 
 use chunker::{ChunkBounds, Cut, SpeechTimeline, TimedFrame};
 use echo_domain::{
-    AudioCapture, AudioFormat, CaptureSpec, Diarizer, DomainError, Punctuator, Resampler, Sample,
-    SpeakerId, SpeakerMerge, SpeakerRef, SpeakerSpan, StreamingOptions, StreamingSessionId,
-    TranscribeOptions, Transcriber, TranscriptEvent, Vad, VoiceState,
+    AudioCapture, AudioFormat, CaptureSpec, ChunkContext, Diarizer, DomainError, Punctuator,
+    RefineOutcome, Resampler, Sample, SpeakerId, SpeakerMerge, SpeakerRef, SpeakerSpan,
+    StreamingOptions, StreamingSessionId, TranscribeOptions, Transcriber, TranscriptEvent, Vad,
+    VoiceState,
 };
+pub use refine::DEFAULT_REFINE_TIMEOUT;
+use refine::{refine_at_stop, AttributionLedger};
 
 /// Capacity of the event channel. ~10 minutes of headroom for a
 /// 5-second chunk cadence; if consumers are slower than that we have a
@@ -104,6 +108,8 @@ pub struct StreamingPipeline {
     /// (Whisper large-v3-turbo produces reasonable punctuation on its
     /// own; the restorer is most valuable for small/fast models).
     punctuator: Option<Arc<dyn Punctuator>>,
+    /// Hard limit on the end-of-session diarization refine.
+    refine_timeout: Duration,
 }
 
 impl StreamingPipeline {
@@ -120,7 +126,18 @@ impl StreamingPipeline {
             diarizer: None,
             vad: None,
             punctuator: None,
+            refine_timeout: DEFAULT_REFINE_TIMEOUT,
         }
+    }
+
+    /// Override the end-of-session refine deadline
+    /// ([`DEFAULT_REFINE_TIMEOUT`] by default). When the refine fails or
+    /// runs out of time, the online speaker attribution stands and
+    /// `Stopped` is still emitted.
+    #[must_use]
+    pub fn with_refine_timeout(mut self, timeout: Duration) -> Self {
+        self.refine_timeout = timeout;
+        self
     }
 
     /// Attach a diarizer. Call once before `start*`. The diarizer must
@@ -238,6 +255,7 @@ impl StreamingPipeline {
             event_tx,
             stop_rx,
             Arc::clone(&paused),
+            self.refine_timeout,
         ));
 
         Ok(StreamingHandle {
@@ -351,6 +369,7 @@ async fn run_pipeline(
     events: mpsc::Sender<TranscriptEvent>,
     mut stop_rx: oneshot::Receiver<()>,
     paused: Arc<AtomicBool>,
+    refine_timeout: Duration,
 ) {
     info!(%session_id, vad_enabled = vad.is_some(), "streaming pipeline starting");
 
@@ -402,6 +421,8 @@ async fn run_pipeline(
         chunk_index: 0,
         emitted_frames: 0,
         total_segments: 0,
+        epoch: 0,
+        ledger: AttributionLedger::default(),
     };
     info!(%session_id, speech_aligned = chunker.is_speech_aligned(), "chunking policy");
 
@@ -440,6 +461,9 @@ async fn run_pipeline(
             // Reset VAD hidden state — the LSTM would be stale after
             // the gap, producing unreliable voice/silence decisions.
             chunker.reset_vad();
+            // Audio before and after the pause is not contiguous: the
+            // diarizer's log must not treat it as one run.
+            emitter.epoch = emitter.epoch.saturating_add(1);
             let _ = events.send(TranscriptEvent::Resumed { session_id }).await;
             was_paused = false;
         }
@@ -462,32 +486,56 @@ async fn run_pipeline(
     // Flush whatever is still buffered as final, possibly-shorter chunks.
     chunker.flush(&mut buffer, &mut emitter).await;
 
-    // Offline diarization refinement: re-cluster the embeddings we
-    // accumulated during streaming, then emit the resulting merges so
-    // the recorder can rewrite already-persisted segments. Adapters
-    // that don't opt into offline accumulation return an empty vec,
-    // which we filter out to keep the wire quiet on the common case.
-    if let Some(d) = emitter.diarizer.as_deref() {
-        let merges = d.refine_offline();
-        if !merges.is_empty() {
-            let payload: Vec<SpeakerMerge> = merges
-                .into_iter()
-                .map(|(absorbed, surviving)| SpeakerMerge {
-                    absorbed,
-                    surviving,
-                })
-                .collect();
-            info!(
-                %session_id,
-                merges = payload.len(),
-                "offline diarization refinement collapsed over-split speakers"
-            );
-            let _ = events
-                .send(TranscriptEvent::SpeakersMerged {
-                    session_id,
-                    merges: payload,
-                })
-                .await;
+    // Offline diarization refinement (ADR 0001, D3). ASR runs inline per
+    // chunk, so every segment was emitted before this point and the
+    // plan covers all of them. The refine runs on the blocking pool
+    // under a deadline; on any failure the online result stands.
+    if let Some(d) = emitter.diarizer.take() {
+        match refine_at_stop(d, refine_timeout, session_id).await {
+            Some((RefineOutcome::Merges(merges), _)) => {
+                let payload: Vec<SpeakerMerge> = merges
+                    .into_iter()
+                    .map(|(absorbed, surviving)| SpeakerMerge {
+                        absorbed,
+                        surviving,
+                    })
+                    .collect();
+                info!(
+                    %session_id,
+                    merges = payload.len(),
+                    "offline diarization refinement collapsed over-split speakers"
+                );
+                let _ = events
+                    .send(TranscriptEvent::SpeakersMerged {
+                        session_id,
+                        merges: payload,
+                    })
+                    .await;
+            }
+            Some((RefineOutcome::Relabel(plan), speakers)) => {
+                if let Some(r) = emitter.ledger.reassign(&plan, &speakers) {
+                    let plan_id = uuid::Uuid::now_v7();
+                    info!(
+                        %session_id,
+                        %plan_id,
+                        segments = r.segments.len(),
+                        created = r.created.len(),
+                        retired = r.retired.len(),
+                        "offline diarization re-segmentation moved segments"
+                    );
+                    let _ = events
+                        .send(TranscriptEvent::SpeakersReassigned {
+                            session_id,
+                            plan_id,
+                            created: r.created,
+                            retired: r.retired,
+                            segments: r.segments,
+                            chunks: r.chunks,
+                        })
+                        .await;
+                }
+            }
+            Some((RefineOutcome::Unchanged, _)) | None => {}
         }
     }
 
@@ -727,6 +775,10 @@ struct ChunkEmitter {
     /// Device frames (samples per channel) emitted so far.
     emitted_frames: u64,
     total_segments: u32,
+    /// Capture run: 0 at start, +1 after every resume.
+    epoch: u16,
+    /// Vector-free record of every attribution, for the stop refine.
+    ledger: AttributionLedger,
 }
 
 impl ChunkEmitter {
@@ -839,8 +891,13 @@ impl ChunkEmitter {
         // and let the per-segment attribution below pick the dominant
         // speaker for each Whisper segment by sample-window overlap.
         // Spans are relative to this chunk, whatever its length.
+        let ctx = ChunkContext {
+            chunk_index,
+            offset_ms,
+            epoch: self.epoch,
+        };
         let spans = match self.diarizer.as_deref_mut() {
-            Some(d) => assign_speaker_spans(d, &resampled, chunk_index, session_id).await,
+            Some(d) => assign_speaker_spans(d, &resampled, ctx, session_id).await,
             None => Vec::new(),
         };
 
@@ -888,6 +945,19 @@ impl ChunkEmitter {
                 // Chunk-level speaker for the UI palette: dominant span
                 // across the entire chunk by sample-weighted majority.
                 let chunk_dominant = chunk_dominant_speaker(&spans);
+                self.ledger.record(
+                    chunk_index,
+                    &spans,
+                    transcript.segments.iter().map(|seg| {
+                        (
+                            seg.id,
+                            ms_to_chunk_samples(seg.start_ms.saturating_sub(offset_ms)),
+                            ms_to_chunk_samples(seg.end_ms.saturating_sub(offset_ms)),
+                            seg.speaker_id,
+                        )
+                    }),
+                    chunk_dominant.map(|(id, _)| id),
+                );
                 let speakers = referenced_speakers(&spans, chunk_dominant);
                 let _ = self
                     .events
@@ -1012,14 +1082,14 @@ fn dominant_span(spans: &[SpeakerSpan], start: usize, end: usize) -> Option<Spea
 async fn assign_speaker_spans(
     diarizer: &mut dyn Diarizer,
     samples: &[Sample],
-    chunk_index: u32,
+    ctx: ChunkContext,
     session_id: StreamingSessionId,
 ) -> Vec<SpeakerSpan> {
-    match diarizer.assign_spans(samples).await {
+    match diarizer.assign_spans_at(samples, ctx).await {
         Ok(spans) => spans,
         Err(e) => {
             warn!(
-                %session_id, chunk_index, error = %e,
+                %session_id, chunk_index = ctx.chunk_index, error = %e,
                 "diarizer failed; chunk will be unlabelled"
             );
             Vec::new()
