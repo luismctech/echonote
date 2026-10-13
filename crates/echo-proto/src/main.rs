@@ -29,6 +29,7 @@
 //! from `echo-app` and executes it.
 
 mod bench_der;
+mod embed_dump;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -411,6 +412,27 @@ enum BenchKind {
         #[arg(long, default_value_t = false)]
         json: bool,
     },
+    /// Dump speaker embeddings of a list of wav files to one binary file
+    /// (offline PLDA fitting; see `scripts/fit-plda.py`).
+    ///
+    /// Developer tooling for public corpora: each `<wav> <label>` line of
+    /// `--list` (mono, at the embedder's rate) is embedded whole with the
+    /// app's adapter for the embedder family.
+    EmbedDump {
+        /// List: one `<wav> <label>` pair per line, `#` comments, paths
+        /// relative to the list's directory.
+        #[arg(long)]
+        list: PathBuf,
+        /// Speaker embedder ONNX model.
+        #[arg(long, env = "ECHO_EMBED_MODEL")]
+        embedder: PathBuf,
+        /// Catalog id of the embedder (e.g. `embedder-campplus-multi`).
+        #[arg(long)]
+        embedder_id: Option<String>,
+        /// Output file; labels go to `<out>.labels.txt`.
+        #[arg(long)]
+        out: PathBuf,
+    },
     /// LLM summary benchmark over gold transcripts.
     ///
     /// Scaffolding only — wires the contract (input set, prompt
@@ -552,6 +574,17 @@ async fn main() -> Result<()> {
                 })
                 .await
             }
+            BenchKind::EmbedDump {
+                list,
+                embedder,
+                embedder_id,
+                out,
+            } => embed_dump::run(&embed_dump::EmbedDumpArgs {
+                list,
+                embedder,
+                embedder_id,
+                out,
+            }),
             BenchKind::Llm { fixtures, model } => run_bench_llm(fixtures, model).await,
         },
         Command::Meetings { kind } => run_meetings(kind).await,
