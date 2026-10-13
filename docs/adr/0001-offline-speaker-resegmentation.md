@@ -351,9 +351,10 @@ flowchart LR
    roughly twice the embed cost. Condition: T10 must also bound the merge-only refine to at most
    4 096 representatives, like the AHC/VBx path, so peak memory stays at about 35 MB for the log
    plus about 35 MB transient at stop, regardless of meeting length or window density.
-4. **Q4. Default flip criterion.** What DER gain on the held-out sets justifies making
-   `Resegment` the default? For example, a weighted DER at least 0.5 points lower and an
-   over-count no worse than today.
+4. **Q4. Default flip criterion.** Resolved 2026-10-13: `Resegment` becomes the default only if,
+   on the held-out T6 test sets with the calibrated preset, the weighted DER (2·ES + Vox)/3 is at
+   least 0.5 points lower than merge-only (today 6.73) **and** the speaker over-count is no worse
+   (Spanish test set: at most 4.15 estimated speakers against 2.80 true).
 
 ## Implementation notes (T9)
 
