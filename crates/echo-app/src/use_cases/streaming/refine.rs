@@ -95,8 +95,18 @@ impl AttributionLedger {
     }
 
     /// Apply `plan` to the recorded attribution. `online` is the
-    /// diarizer's speaker list at stop (for slots). Returns `None` when
-    /// no segment changes speaker.
+    /// diarizer's speaker list at stop (for slots).
+    ///
+    /// Returns `None` when no segment changes speaker, even if a chunk's
+    /// dominant speaker changed: chunk rows only recolour live-pane
+    /// lines, and without a moved segment there is nothing to persist
+    /// or to report in the refine notice.
+    ///
+    /// The payload is self-consistent: `retired` is in speaker-id order,
+    /// and every speaker a chunk row or a recipient names is either known
+    /// online or listed in `created`. A created speaker that owns no
+    /// segment is not sent, and chunk rows naming it are dropped (those
+    /// live-pane lines keep their online colour).
     pub(super) fn reassign(
         &self,
         plan: &SpanRelabelPlan,
@@ -182,6 +192,7 @@ impl AttributionLedger {
                 retired_ids.push(*id);
             }
         }
+        retired_ids.sort_by_key(|id| id.0);
         let mut retired = Vec::new();
         for speaker in retired_ids {
             if after.contains_key(&speaker) {
@@ -223,6 +234,12 @@ impl AttributionLedger {
                 r.majority_recipient = None;
             }
         }
+        let unsent = |id: Option<SpeakerId>| {
+            id.is_some_and(|id| {
+                plan.created.iter().any(|c| c.id == id) && !created.iter().any(|c| c.id == id)
+            })
+        };
+        chunks.retain(|c| !unsent(c.speaker_id));
 
         Some(Reassignment {
             created,
@@ -244,7 +261,7 @@ pub(super) async fn refine_at_stop(
 ) -> Option<(RefineOutcome, Vec<Speaker>)> {
     let started = Instant::now();
     let budget = RefineBudget {
-        deadline: started + timeout,
+        deadline: deadline_after(started, timeout),
     };
     let task = tokio::task::spawn_blocking(move || {
         let speakers = diarizer.speakers();
@@ -253,7 +270,7 @@ pub(super) async fn refine_at_stop(
             .map(|outcome| (outcome, speakers))
     });
     let elapsed_ms = || started.elapsed().as_millis() as u64;
-    match tokio::time::timeout(timeout + JOIN_GRACE, task).await {
+    match tokio::time::timeout(timeout.saturating_add(JOIN_GRACE), task).await {
         Ok(Ok(Ok(result))) => {
             info!(
                 %session_id,
@@ -276,6 +293,17 @@ pub(super) async fn refine_at_stop(
             None
         }
     }
+}
+
+/// `start + timeout`. When that overflows (an effectively unbounded
+/// timeout) the deadline is about 136 years away instead; if even that
+/// overflows, `start` itself, so the refine fails fast and the online
+/// result stands.
+fn deadline_after(start: Instant, timeout: Duration) -> Instant {
+    start
+        .checked_add(timeout)
+        .or_else(|| start.checked_add(Duration::from_secs(u64::from(u32::MAX))))
+        .unwrap_or(start)
 }
 
 fn outcome_kind(outcome: &RefineOutcome) -> &'static str {
@@ -414,6 +442,89 @@ mod tests {
             ..SpanRelabelPlan::default()
         };
         assert_eq!(ledger.reassign(&plan, &[a]), None);
+    }
+
+    #[test]
+    fn retirements_come_in_speaker_id_order() {
+        let speakers: Vec<Speaker> = (0..8).map(Speaker::anonymous).collect();
+        let keeper = Speaker::anonymous(8);
+        let mut ledger = AttributionLedger::default();
+        for (i, s) in speakers.iter().enumerate() {
+            ledger.record(
+                i as u32,
+                &[span(s.id, s.slot, 0, 100)],
+                [(SegmentId::new(), 0, 100, Some(s.id))],
+                Some(s.id),
+            );
+        }
+        let plan = SpanRelabelPlan {
+            spans: (0..8).map(|i| (at(i, 0), keeper.id)).collect(),
+            ..SpanRelabelPlan::default()
+        };
+        let mut online = speakers.clone();
+        online.push(keeper);
+        let r = ledger.reassign(&plan, &online).unwrap();
+        let got: Vec<SpeakerId> = r.retired.iter().map(|x| x.speaker).collect();
+        let mut sorted = got.clone();
+        sorted.sort_by_key(|id| id.0);
+        assert_eq!(got.len(), 8);
+        assert_eq!(got, sorted);
+    }
+
+    #[test]
+    fn chunk_rows_never_name_a_speaker_the_store_is_not_told_to_create() {
+        let (a, b) = (Speaker::anonymous(0), Speaker::anonymous(1));
+        let fresh = Speaker::anonymous(2);
+        let s0 = SegmentId::new();
+        let mut ledger = AttributionLedger::default();
+        // Chunk 0: a short span with a segment, then a long span with
+        // none (ASR found no words in it).
+        ledger.record(
+            0,
+            &[span(a.id, 0, 0, 100), span(a.id, 0, 100, 400)],
+            [(s0, 0, 100, Some(a.id))],
+            Some(a.id),
+        );
+        ledger.record(
+            1,
+            &[span(b.id, 1, 0, 100)],
+            [(SegmentId::new(), 0, 100, Some(b.id))],
+            Some(b.id),
+        );
+        // The segment moves to b; the long span becomes a new speaker
+        // that owns no segment.
+        let plan = SpanRelabelPlan {
+            spans: vec![(at(0, 0), b.id), (at(0, 1), fresh.id), (at(1, 0), b.id)],
+            created: vec![fresh.clone()],
+            retired: vec![],
+        };
+        let r = ledger.reassign(&plan, &[a, b]).unwrap();
+        assert!(r.created.is_empty(), "fresh owns no segment");
+        assert!(
+            r.chunks.iter().all(|c| c.speaker_id != Some(fresh.id)),
+            "{:?}",
+            r.chunks
+        );
+    }
+
+    #[test]
+    fn chunk_only_changes_are_discarded() {
+        let a = Speaker::anonymous(0);
+        let b = Speaker::anonymous(1);
+        let mut ledger = AttributionLedger::default();
+        // The segment sits on the first span; only the second, longer
+        // span (and so the chunk's dominant speaker) changes.
+        ledger.record(
+            0,
+            &[span(a.id, 0, 0, 100), span(a.id, 0, 100, 400)],
+            [(SegmentId::new(), 0, 100, Some(a.id))],
+            Some(a.id),
+        );
+        let plan = SpanRelabelPlan {
+            spans: vec![(at(0, 0), a.id), (at(0, 1), b.id)],
+            ..SpanRelabelPlan::default()
+        };
+        assert_eq!(ledger.reassign(&plan, &[a, b]), None);
     }
 
     #[test]

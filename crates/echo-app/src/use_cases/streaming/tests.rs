@@ -1322,3 +1322,14 @@ async fn refine_ignoring_its_deadline_still_lets_the_session_stop() {
         started.elapsed()
     );
 }
+
+#[tokio::test]
+async fn an_unbounded_refine_timeout_does_not_overflow_and_still_stops() {
+    let fresh = Speaker::anonymous(9);
+    let (events, _) = run_refining(Refine::AllTo(fresh), Duration::MAX).await;
+    assert_eq!(reassigned(&events).len(), 1);
+    assert!(matches!(
+        events.last(),
+        Some(TranscriptEvent::Stopped { .. })
+    ));
+}
