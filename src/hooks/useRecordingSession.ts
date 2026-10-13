@@ -40,6 +40,11 @@ import {
 import type { AudioSourceKind, TranscriptEvent } from "../types/streaming";
 import type { Note } from "../types/meeting";
 import type { StreamLine } from "../types/view";
+import {
+  applyChunkSpeakers,
+  applySpeakerMerges,
+  refinementSummary,
+} from "../lib/speakerRefinement";
 
 export type RecordingStats = {
   chunks: number;
@@ -157,6 +162,25 @@ export function useRecordingSession({
     }
   }, [stream, toast, t]);
 
+  // One-line notice after stop (ADR 0001, Q2): no diff and no undo.
+  const notifyRefinement = useCallback(
+    (evt: TranscriptEvent) => {
+      const summary = refinementSummary(evt);
+      if (summary === null) return;
+      toast.push({
+        kind: "info",
+        message:
+          summary.segmentsMoved > 0
+            ? t("toast.speakersRefined", {
+                segments: summary.segmentsMoved,
+                speakers: summary.speakersMerged,
+              })
+            : t("toast.speakersMergedOnly", { speakers: summary.speakersMerged }),
+      });
+    },
+    [toast, t],
+  );
+
   const handleEvent = useCallback((evt: TranscriptEvent) => {
     switch (evt.type) {
       case "started":
@@ -194,6 +218,7 @@ export function useRecordingSession({
               text: text || t("live.noSpeech"),
               language: evt.language,
               rtf: evt.rtf,
+              speakerId: evt.speakerId,
               speakerSlot: evt.speakerSlot,
             },
           ];
@@ -247,13 +272,21 @@ export function useRecordingSession({
         dispatch({ type: "STREAMING_RESUMED" });
         break;
       case "speakersMerged":
-        // Backend already rewrote the persisted segments and dropped
-        // the absorbed speaker rows; this event is informational only
-        // for live UI. The meeting fetch on STREAMING_STOPPED will
-        // pick up the consolidated speaker list.
+        // Backend already rewrote the persisted segments; patch the
+        // live lines and tell the user. The meeting fetch on
+        // STREAMING_STOPPED picks up the consolidated speaker list.
+        setLines((prev) => applySpeakerMerges(prev, evt.merges));
+        notifyRefinement(evt);
+        break;
+      case "speakersReassigned":
+        // Already persisted by the recorder (set semantics, so a
+        // replayed plan is harmless). Lines evicted by the live cap
+        // are simply not patched.
+        setLines((prev) => applyChunkSpeakers(prev, evt.chunks));
+        notifyRefinement(evt);
         break;
     }
-  }, [t]);
+  }, [t, notifyRefinement]);
 
   const start = useCallback(
     async ({ language, diarize, source }: StartOptions) => {

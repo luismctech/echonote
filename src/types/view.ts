@@ -9,6 +9,7 @@
 
 import type { HealthStatus } from "./health";
 import type { Meeting, MeetingId } from "./meeting";
+import type { SpeakerId } from "./speaker";
 
 /** Backend health probe state shown in the header pill. */
 export type Probe =
@@ -33,6 +34,8 @@ export type StreamLine =
       text: string;
       language: string | null;
       rtf: number;
+      /** Diarized speaker of the chunk, or undefined if diarization is off. */
+      speakerId?: SpeakerId | undefined;
       /** 0-based slot of the diarized speaker, or undefined if diarization is off. */
       speakerSlot?: number | undefined;
     }

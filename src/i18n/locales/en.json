@@ -295,6 +295,8 @@
     "dismiss": "Dismiss notification",
     "meetingSaved": "Meeting saved",
     "meetingDetail": "{{segments}} segments · {{seconds}} s",
+    "speakersRefined": "Speaker attribution refined: {{segments}} segments moved, {{speakers}} speakers merged",
+    "speakersMergedOnly": "Speaker attribution refined: {{speakers}} speakers merged",
     "meetingNotFound": "Meeting not found",
     "loadFailed": "Couldn't load meeting.",
     "renameFailed": "Couldn't rename meeting.",

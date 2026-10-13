@@ -295,6 +295,8 @@
     "dismiss": "Descartar notificación",
     "meetingSaved": "Reunión guardada",
     "meetingDetail": "{{segments}} segmentos · {{seconds}} s",
+    "speakersRefined": "Atribución de hablantes refinada: {{segments}} segmentos movidos, {{speakers}} hablantes fusionados",
+    "speakersMergedOnly": "Atribución de hablantes refinada: {{speakers}} hablantes fusionados",
     "meetingNotFound": "Reunión no encontrada",
     "loadFailed": "No se pudo cargar la reunión.",
     "renameFailed": "No se pudo renombrar la reunión.",

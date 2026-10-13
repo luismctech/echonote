@@ -128,7 +128,43 @@ export type TranscriptEvent =
       type: "speakersMerged";
       sessionId: StreamingSessionId;
       merges: SpeakerMerge[];
+    }
+  | {
+      /**
+       * Offline re-segmentation applied at end-of-session (ADR 0001).
+       * Ids, slots and indices only; every field is a set-to-value, so
+       * applying it twice is harmless. The recorder has already
+       * persisted it when the frontend sees it. Emitted after the last
+       * `chunk` and before `stopped`, only when a segment moved.
+       */
+      type: "speakersReassigned";
+      sessionId: StreamingSessionId;
+      /** UUIDv7 of the plan; lets the UI detect a replay. */
+      planId: string;
+      created: SpeakerRef[];
+      retired: SpeakerRetirement[];
+      segments: SegmentSpeaker[];
+      chunks: ChunkSpeaker[];
     };
+
+/** A speaker the refine left without segments, and who took its speech. */
+export type SpeakerRetirement = {
+  speaker: SpeakerId;
+  majorityRecipient: SpeakerId | null;
+};
+
+/** New speaker of one already-emitted segment. */
+export type SegmentSpeaker = {
+  segmentId: string;
+  speakerId: SpeakerId | null;
+};
+
+/** New dominant speaker of one already-emitted chunk (live pane). */
+export type ChunkSpeaker = {
+  chunkIndex: number;
+  speakerId: SpeakerId | null;
+  speakerSlot: number | null;
+};
 
 /** A speaker referenced by a chunk: stable id plus arrival-order slot. */
 export type SpeakerRef = {
