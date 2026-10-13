@@ -213,7 +213,7 @@ async fn reassign_speakers(
   - A matched speaker keeps its id, and therefore its label.
   - A retired speaker with a label passes its label to `majority_recipient` only if that row's
     label is `NULL`. Otherwise the labelled row is **kept** with zero segments, so no
-    user-authored name is ever destroyed. This conservative default is Open question Q1.
+    user-authored name is ever destroyed. Owner decision 2026-10-13 (Q1): adopt this default.
   - Labels are read inside the transaction. A rename that races the stop is serialised by
     SQLite: it lands either before the transaction (and the rule then sees it) or after it (and
     applies to a row that still exists, or returns `false` if the row was deleted).
@@ -341,12 +341,12 @@ flowchart LR
 
 ## Open questions (product decisions for the owner)
 
-1. **Q1. Labelled speaker retired by VBx.** Should its label move to the majority recipient
-   even if the recipient already has a different label? Should the labelled row be kept with no
-   segments (the proposed default), or should the user be asked?
-2. **Q2. Show the user a diff?** Should the app show a one-line notice after stop ("speaker
-   attribution refined: N segments moved, M speakers merged") with an undo option? Undo would
-   require keeping the online assignment in the database, which this ADR does not do.
+1. **Q1. Labelled speaker retired by VBx.** Resolved 2026-10-13: never overwrite a label; the
+   labelled row is kept with zero segments, and its label moves only to a recipient whose label
+   is `NULL`.
+2. **Q2. Show the user a diff?** Resolved 2026-10-13: show a one-line notice after stop
+   ("speaker attribution refined: N segments moved, M speakers merged") without undo. Nothing
+   extra is persisted; the notice is built from the `SpeakersReassigned` payload.
 3. **Q3. Extra window embeddings.** Should T10 be allowed to compute extra embeddings (for
    example 1.5 s windows inside spans longer than 3 s) during the session, roughly doubling the
    embed cost (CAM++ about 75 ms per window), to give VBx a denser sequence?
