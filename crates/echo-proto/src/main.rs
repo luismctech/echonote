@@ -978,6 +978,15 @@ async fn run_stream(
             Some(TranscriptEvent::SpeakersMerged { merges, .. }) => {
                 println!("  ⤳ offline refine merged {} speaker(s)", merges.len());
             }
+            Some(TranscriptEvent::SpeakersReassigned {
+                segments, retired, ..
+            }) => {
+                println!(
+                    "  ⤳ offline refine moved {} segment(s), retired {} speaker(s)",
+                    segments.len(),
+                    retired.len()
+                );
+            }
             None => break,
         }
     }

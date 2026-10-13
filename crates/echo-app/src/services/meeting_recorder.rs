@@ -31,7 +31,7 @@ use tracing::{debug, warn};
 
 use echo_domain::{
     CreateMeeting, DomainError, FinalizeMeeting, MeetingId, MeetingStore, Speaker, SpeakerId,
-    SpeakerRef, StreamingSessionId, TranscriptEvent,
+    SpeakerReassignment, SpeakerRef, StreamingSessionId, TranscriptEvent,
 };
 
 /// Stateful recorder. One instance per session is the simplest pattern,
@@ -296,6 +296,48 @@ impl MeetingRecorder {
                 );
                 Ok(Some(meeting_id))
             }
+            TranscriptEvent::SpeakersReassigned {
+                session_id,
+                plan_id,
+                created,
+                retired,
+                segments,
+                ..
+            } => {
+                let meeting_id = self
+                    .sessions
+                    .lock()
+                    .await
+                    .get(session_id)
+                    .map(|s| s.meeting_id);
+                let Some(meeting_id) = meeting_id else {
+                    warn!(%session_id, %plan_id, "recorder: speakers-reassigned for unknown session");
+                    return Ok(None);
+                };
+                let plan = SpeakerReassignment {
+                    created: created.clone(),
+                    retired: retired.clone(),
+                    segments: segments.clone(),
+                };
+                // One all-or-nothing call: on failure the store rolled
+                // back and the online attribution stays persisted, so the
+                // session still finalises normally.
+                match self.store.reassign_speakers(meeting_id, &plan).await {
+                    Ok(out) => debug!(
+                        %session_id, %meeting_id, %plan_id,
+                        segments = out.segments_updated,
+                        created = out.speakers_created,
+                        deleted = out.speakers_deleted,
+                        labels_moved = out.labels_moved,
+                        "recorder: speaker reassignment applied"
+                    ),
+                    Err(e) => warn!(
+                        %session_id, %meeting_id, %plan_id, error = %e,
+                        "recorder: reassign_speakers failed; online attribution kept"
+                    ),
+                }
+                Ok(Some(meeting_id))
+            }
             // Paused / Resumed are informational UI events — the
             // recorder doesn't persist anything for them.
             TranscriptEvent::Paused { .. } | TranscriptEvent::Resumed { .. } => Ok(None),
@@ -341,6 +383,10 @@ mod tests {
     #[derive(Default)]
     struct FakeStore {
         meetings: Mutex<Vec<Meeting>>,
+        /// Every plan passed to `reassign_speakers`.
+        reassignments: Mutex<Vec<(MeetingId, echo_domain::SpeakerReassignment)>>,
+        /// Make `reassign_speakers` fail (rollback simulation).
+        fail_reassign: bool,
     }
 
     impl FakeStore {
@@ -470,6 +516,20 @@ mod tests {
                 changed = true;
             }
             Ok(changed)
+        }
+        async fn reassign_speakers(
+            &self,
+            meeting_id: MeetingId,
+            plan: &echo_domain::SpeakerReassignment,
+        ) -> Result<echo_domain::ReassignOutcome, DomainError> {
+            if self.fail_reassign {
+                return Err(DomainError::Storage("injected".into()));
+            }
+            self.reassignments
+                .lock()
+                .unwrap()
+                .push((meeting_id, plan.clone()));
+            Ok(echo_domain::ReassignOutcome::default())
         }
         async fn list_speakers(&self, meeting_id: MeetingId) -> Result<Vec<Speaker>, DomainError> {
             let guard = self.meetings.lock().unwrap();
@@ -824,5 +884,93 @@ mod tests {
             .iter()
             .any(|s| s.id == alice && s.slot == 0));
         assert!(snap[0].speakers.iter().any(|s| s.id == bob && s.slot == 1));
+    }
+    fn reassigned(session_id: StreamingSessionId) -> TranscriptEvent {
+        let speaker = SpeakerId::new();
+        TranscriptEvent::SpeakersReassigned {
+            session_id,
+            plan_id: uuid::Uuid::now_v7(),
+            created: vec![SpeakerRef {
+                id: speaker,
+                slot: 3,
+            }],
+            retired: vec![echo_domain::SpeakerRetirement {
+                speaker: SpeakerId::new(),
+                majority_recipient: Some(speaker),
+            }],
+            segments: vec![echo_domain::SegmentSpeaker {
+                segment_id: SegmentId::new(),
+                speaker_id: Some(speaker),
+            }],
+            chunks: vec![],
+        }
+    }
+
+    async fn started(recorder: &MeetingRecorder) -> (StreamingSessionId, MeetingId) {
+        let session = StreamingSessionId::new();
+        let meeting = recorder
+            .record(&TranscriptEvent::Started {
+                session_id: session,
+                input_format: AudioFormat::WHISPER,
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        (session, meeting)
+    }
+
+    #[tokio::test]
+    async fn speakers_reassigned_is_applied_in_one_store_call() {
+        let store = Arc::new(FakeStore::default());
+        let recorder = MeetingRecorder::with_default_title(store.clone());
+        let (session, meeting) = started(&recorder).await;
+        let event = reassigned(session);
+
+        let out = recorder.record(&event).await.unwrap();
+
+        assert_eq!(out, Some(meeting));
+        let TranscriptEvent::SpeakersReassigned {
+            created,
+            retired,
+            segments,
+            ..
+        } = event
+        else {
+            unreachable!()
+        };
+        assert_eq!(
+            *store.reassignments.lock().unwrap(),
+            vec![(
+                meeting,
+                echo_domain::SpeakerReassignment {
+                    created,
+                    retired,
+                    segments,
+                }
+            )]
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_reassignment_keeps_the_session_finalisable() {
+        let store = Arc::new(FakeStore {
+            fail_reassign: true,
+            ..FakeStore::default()
+        });
+        let recorder = MeetingRecorder::with_default_title(store.clone());
+        let (session, meeting) = started(&recorder).await;
+
+        let out = recorder.record(&reassigned(session)).await;
+        assert_eq!(out.unwrap(), Some(meeting), "failure is logged, not raised");
+
+        recorder
+            .record(&TranscriptEvent::Stopped {
+                session_id: session,
+                total_segments: 0,
+                total_audio_ms: 1_000,
+            })
+            .await
+            .unwrap();
+        assert!(store.snapshot()[0].summary.ended_at.is_some());
     }
 }

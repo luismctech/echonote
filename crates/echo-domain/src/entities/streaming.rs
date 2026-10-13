@@ -9,7 +9,7 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::entities::segment::Segment;
+use crate::entities::segment::{Segment, SegmentId};
 use crate::entities::speaker::SpeakerId;
 use crate::ports::audio::AudioFormat;
 
@@ -200,6 +200,32 @@ pub enum TranscriptEvent {
         /// offline refinement pass.
         merges: Vec<SpeakerMerge>,
     },
+    /// Offline re-segmentation after the streaming loop ended (ADR 0001).
+    ///
+    /// Moves already-emitted segments between speakers, creates
+    /// speakers and retires speakers left without segments. Emitted
+    /// after the last [`Chunk`](Self::Chunk) and before
+    /// [`Stopped`](Self::Stopped), only when at least one segment
+    /// changes speaker.
+    ///
+    /// Every field is a set-to-value, never a delta, so applying the
+    /// event twice gives the same state. It carries ids, slots and
+    /// indices only: no embeddings, scores or text.
+    #[serde(rename_all = "camelCase")]
+    SpeakersReassigned {
+        /// Session id.
+        session_id: StreamingSessionId,
+        /// UUIDv7 of this plan; lets consumers detect a replay.
+        plan_id: Uuid,
+        /// Speakers the plan introduces. Persist them before `segments`.
+        created: Vec<SpeakerRef>,
+        /// Speakers left without segments.
+        retired: Vec<SpeakerRetirement>,
+        /// Segments whose speaker changed, with their new speaker.
+        segments: Vec<SegmentSpeaker>,
+        /// Chunks whose dominant speaker changed (live pane).
+        chunks: Vec<ChunkSpeaker>,
+    },
     /// The pipeline finished cleanly (caller stopped or stream EOF).
     #[serde(rename_all = "camelCase")]
     Stopped {
@@ -269,6 +295,28 @@ pub struct SpeakerRetirement {
     pub majority_recipient: Option<SpeakerId>,
 }
 
+/// New speaker of one already-emitted segment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct SegmentSpeaker {
+    /// Segment id, as emitted in a `Chunk` event.
+    pub segment_id: SegmentId,
+    /// Its speaker after the refine; `None` leaves it unattributed.
+    pub speaker_id: Option<SpeakerId>,
+}
+
+/// New dominant speaker of one already-emitted chunk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ChunkSpeaker {
+    /// Chunk index, as emitted in a `Chunk` event.
+    pub chunk_index: u32,
+    /// Dominant speaker after the refine.
+    pub speaker_id: Option<SpeakerId>,
+    /// Arrival-order slot of `speaker_id`.
+    pub speaker_slot: Option<u32>,
+}
+
 impl TranscriptEvent {
     /// Session id this event belongs to. Convenient for routing in the UI.
     #[must_use]
@@ -278,6 +326,7 @@ impl TranscriptEvent {
             | Self::Chunk { session_id, .. }
             | Self::Skipped { session_id, .. }
             | Self::SpeakersMerged { session_id, .. }
+            | Self::SpeakersReassigned { session_id, .. }
             | Self::Stopped { session_id, .. }
             | Self::Failed { session_id, .. }
             | Self::Paused { session_id, .. }
@@ -327,6 +376,62 @@ mod tests {
             !json.contains("\"sample_rate_hz\""),
             "AudioFormat leaked snake_case to the wire: {json}"
         );
+    }
+
+    fn reassigned_event() -> TranscriptEvent {
+        let (a, b) = (SpeakerId::new(), SpeakerId::new());
+        TranscriptEvent::SpeakersReassigned {
+            session_id: StreamingSessionId::new(),
+            plan_id: Uuid::now_v7(),
+            created: vec![SpeakerRef { id: b, slot: 4 }],
+            retired: vec![SpeakerRetirement {
+                speaker: SpeakerId::new(),
+                majority_recipient: Some(a),
+            }],
+            segments: vec![SegmentSpeaker {
+                segment_id: SegmentId::new(),
+                speaker_id: Some(b),
+            }],
+            chunks: vec![ChunkSpeaker {
+                chunk_index: 2,
+                speaker_id: Some(b),
+                speaker_slot: Some(4),
+            }],
+        }
+    }
+
+    #[test]
+    fn speakers_reassigned_round_trips_in_camel_case() {
+        let evt = reassigned_event();
+        let json = serde_json::to_string(&evt).unwrap();
+        for key in [
+            "\"type\":\"speakersReassigned\"",
+            "\"planId\"",
+            "\"majorityRecipient\"",
+            "\"segmentId\"",
+            "\"chunkIndex\":2",
+            "\"speakerSlot\":4",
+        ] {
+            assert!(json.contains(key), "missing {key}: {json}");
+        }
+        let back: TranscriptEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, evt);
+    }
+
+    #[test]
+    fn speakers_reassigned_carries_no_float_arrays() {
+        // Privacy (ADR 0001): ids, slots and indices only, never
+        // embeddings or scores.
+        let json = serde_json::to_value(reassigned_event()).unwrap();
+        fn has_float(v: &serde_json::Value) -> bool {
+            match v {
+                serde_json::Value::Number(n) => n.is_f64() && !n.is_u64() && !n.is_i64(),
+                serde_json::Value::Array(a) => a.iter().any(has_float),
+                serde_json::Value::Object(o) => o.values().any(has_float),
+                _ => false,
+            }
+        }
+        assert!(!has_float(&json), "float leaked: {json}");
     }
 
     #[test]

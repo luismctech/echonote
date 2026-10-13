@@ -569,6 +569,16 @@ export type ChatRole =
  */
 "assistant";
 
+/**  New dominant speaker of one already-emitted chunk. */
+export type ChunkSpeaker = {
+	/**  Chunk index, as emitted in a `Chunk` event. */
+	chunkIndex: number,
+	/**  Dominant speaker after the refine. */
+	speakerId: SpeakerId | null,
+	/**  Arrival-order slot of `speaker_id`. */
+	speakerSlot: number | null,
+};
+
 /**  A user-created summary prompt template. */
 export type CustomTemplate = {
 	/**  Stable identifier. */
@@ -1077,6 +1087,14 @@ export type Segment = {
  */
 export type SegmentId = string;
 
+/**  New speaker of one already-emitted segment. */
+export type SegmentSpeaker = {
+	/**  Segment id, as emitted in a `Chunk` event. */
+	segmentId: SegmentId,
+	/**  Its speaker after the refine; `None` leaves it unattributed. */
+	speakerId: SpeakerId | null,
+};
+
 /**
  *  One clustered voice within a meeting.
  * 
@@ -1130,6 +1148,18 @@ export type SpeakerRef = {
 	id: SpeakerId,
 	/**  Arrival-order slot (0-based) of the speaker. */
 	slot: number,
+};
+
+/**
+ *  A speaker the offline pass left without segments, and the speaker
+ *  that took most of its speech. The recipient may inherit its user
+ *  label (ADR 0001, Q1).
+ */
+export type SpeakerRetirement = {
+	/**  Retired speaker. */
+	speaker: SpeakerId,
+	/**  Speaker that received the majority of its duration, if any. */
+	majorityRecipient: SpeakerId | null,
 };
 
 /**
@@ -1564,7 +1594,7 @@ export type TranscriptEvent_Deserialize =
 /**  Session id this event belongs to. */
 sessionId: StreamingSessionId; 
 /**  Format actually negotiated with the device. */
-inputFormat: AudioFormat }) & { chunkIndex?: never; durationMs?: never; language?: never; merges?: never; message?: never; offsetMs?: never; rms?: never; rtf?: never; segments?: never; speakerId?: never; speakerSlot?: never; speakers?: never; totalAudioMs?: never; totalSegments?: never } | 
+inputFormat: AudioFormat }) & { chunkIndex?: never; chunks?: never; created?: never; durationMs?: never; language?: never; merges?: never; message?: never; offsetMs?: never; planId?: never; retired?: never; rms?: never; rtf?: never; segments?: never; speakerId?: never; speakerSlot?: never; speakers?: never; totalAudioMs?: never; totalSegments?: never } | 
 /**
  *  One transcribed chunk. Segments inside are timestamped relative
  *  to the start of the session (not the chunk).
@@ -1606,7 +1636,7 @@ speakerSlot?: number | null;
  *  before the segments. Defaults to empty so payloads from
  *  older producers still deserialise.
  */
-speakers?: SpeakerRef[] }) & { durationMs?: never; inputFormat?: never; merges?: never; message?: never; rms?: never; totalAudioMs?: never; totalSegments?: never } | 
+speakers?: SpeakerRef[] }) & { chunks?: never; created?: never; durationMs?: never; inputFormat?: never; merges?: never; message?: never; planId?: never; retired?: never; rms?: never; totalAudioMs?: never; totalSegments?: never } | 
 /**
  *  A chunk was discarded by the silence gate before being sent to
  *  the ASR backend. Useful for UI / metrics.
@@ -1621,7 +1651,7 @@ offsetMs: number;
 /**  Length of the skipped chunk in milliseconds. */
 durationMs: number; 
 /**  RMS of the skipped chunk (for diagnostics). */
-rms: number | null }) & { inputFormat?: never; language?: never; merges?: never; message?: never; rtf?: never; segments?: never; speakerId?: never; speakerSlot?: never; speakers?: never; totalAudioMs?: never; totalSegments?: never } | 
+rms: number | null }) & { chunks?: never; created?: never; inputFormat?: never; language?: never; merges?: never; message?: never; planId?: never; retired?: never; rtf?: never; segments?: never; speakerId?: never; speakerSlot?: never; speakers?: never; totalAudioMs?: never; totalSegments?: never } | 
 /**
  *  Offline diarization refinement after the streaming loop ended.
  * 
@@ -1640,7 +1670,33 @@ sessionId: StreamingSessionId;
  *  `(absorbed, surviving)` pairs produced by the diarizer's
  *  offline refinement pass.
  */
-merges: SpeakerMerge[] }) & { chunkIndex?: never; durationMs?: never; inputFormat?: never; language?: never; message?: never; offsetMs?: never; rms?: never; rtf?: never; segments?: never; speakerId?: never; speakerSlot?: never; speakers?: never; totalAudioMs?: never; totalSegments?: never } | 
+merges: SpeakerMerge[] }) & { chunkIndex?: never; chunks?: never; created?: never; durationMs?: never; inputFormat?: never; language?: never; message?: never; offsetMs?: never; planId?: never; retired?: never; rms?: never; rtf?: never; segments?: never; speakerId?: never; speakerSlot?: never; speakers?: never; totalAudioMs?: never; totalSegments?: never } | 
+/**
+ *  Offline re-segmentation after the streaming loop ended (ADR 0001).
+ * 
+ *  Moves already-emitted segments between speakers, creates
+ *  speakers and retires speakers left without segments. Emitted
+ *  after the last [`Chunk`](Self::Chunk) and before
+ *  [`Stopped`](Self::Stopped), only when at least one segment
+ *  changes speaker.
+ * 
+ *  Every field is a set-to-value, never a delta, so applying the
+ *  event twice gives the same state. It carries ids, slots and
+ *  indices only: no embeddings, scores or text.
+ */
+({ type: "speakersReassigned"; 
+/**  Session id. */
+sessionId: StreamingSessionId; 
+/**  UUIDv7 of this plan; lets consumers detect a replay. */
+planId: string; 
+/**  Speakers the plan introduces. Persist them before `segments`. */
+created: SpeakerRef[]; 
+/**  Speakers left without segments. */
+retired: SpeakerRetirement[]; 
+/**  Segments whose speaker changed, with their new speaker. */
+segments: SegmentSpeaker[]; 
+/**  Chunks whose dominant speaker changed (live pane). */
+chunks: ChunkSpeaker[] }) & { chunkIndex?: never; durationMs?: never; inputFormat?: never; language?: never; merges?: never; message?: never; offsetMs?: never; rms?: never; rtf?: never; speakerId?: never; speakerSlot?: never; speakers?: never; totalAudioMs?: never; totalSegments?: never } | 
 /**  The pipeline finished cleanly (caller stopped or stream EOF). */
 ({ type: "stopped"; 
 /**  Session id. */
@@ -1648,7 +1704,7 @@ sessionId: StreamingSessionId;
 /**  Total transcribed segments emitted across all chunks. */
 totalSegments: number; 
 /**  Total wall-clock audio captured, in milliseconds. */
-totalAudioMs: number }) & { chunkIndex?: never; durationMs?: never; inputFormat?: never; language?: never; merges?: never; message?: never; offsetMs?: never; rms?: never; rtf?: never; segments?: never; speakerId?: never; speakerSlot?: never; speakers?: never } | 
+totalAudioMs: number }) & { chunkIndex?: never; chunks?: never; created?: never; durationMs?: never; inputFormat?: never; language?: never; merges?: never; message?: never; offsetMs?: never; planId?: never; retired?: never; rms?: never; rtf?: never; segments?: never; speakerId?: never; speakerSlot?: never; speakers?: never } | 
 /**  The pipeline aborted with an error. No further events follow. */
 ({ type: "failed"; 
 /**  Session id. */
@@ -1657,15 +1713,15 @@ sessionId: StreamingSessionId;
  *  Human-readable error message. The structured cause is logged
  *  in the backend and not exposed across the wire.
  */
-message: string }) & { chunkIndex?: never; durationMs?: never; inputFormat?: never; language?: never; merges?: never; offsetMs?: never; rms?: never; rtf?: never; segments?: never; speakerId?: never; speakerSlot?: never; speakers?: never; totalAudioMs?: never; totalSegments?: never } | 
+message: string }) & { chunkIndex?: never; chunks?: never; created?: never; durationMs?: never; inputFormat?: never; language?: never; merges?: never; offsetMs?: never; planId?: never; retired?: never; rms?: never; rtf?: never; segments?: never; speakerId?: never; speakerSlot?: never; speakers?: never; totalAudioMs?: never; totalSegments?: never } | 
 /**  The pipeline was paused. Audio frames are discarded until resumed. */
 ({ type: "paused"; 
 /**  Session id. */
-sessionId: StreamingSessionId }) & { chunkIndex?: never; durationMs?: never; inputFormat?: never; language?: never; merges?: never; message?: never; offsetMs?: never; rms?: never; rtf?: never; segments?: never; speakerId?: never; speakerSlot?: never; speakers?: never; totalAudioMs?: never; totalSegments?: never } | 
+sessionId: StreamingSessionId }) & { chunkIndex?: never; chunks?: never; created?: never; durationMs?: never; inputFormat?: never; language?: never; merges?: never; message?: never; offsetMs?: never; planId?: never; retired?: never; rms?: never; rtf?: never; segments?: never; speakerId?: never; speakerSlot?: never; speakers?: never; totalAudioMs?: never; totalSegments?: never } | 
 /**  The pipeline was resumed after a pause. */
 ({ type: "resumed"; 
 /**  Session id. */
-sessionId: StreamingSessionId }) & { chunkIndex?: never; durationMs?: never; inputFormat?: never; language?: never; merges?: never; message?: never; offsetMs?: never; rms?: never; rtf?: never; segments?: never; speakerId?: never; speakerSlot?: never; speakers?: never; totalAudioMs?: never; totalSegments?: never };
+sessionId: StreamingSessionId }) & { chunkIndex?: never; chunks?: never; created?: never; durationMs?: never; inputFormat?: never; language?: never; merges?: never; message?: never; offsetMs?: never; planId?: never; retired?: never; rms?: never; rtf?: never; segments?: never; speakerId?: never; speakerSlot?: never; speakers?: never; totalAudioMs?: never; totalSegments?: never };
 
 /**
  *  One event emitted by the streaming pipeline.
@@ -1683,7 +1739,7 @@ export type TranscriptEvent_Serialize =
 /**  Session id this event belongs to. */
 sessionId: StreamingSessionId; 
 /**  Format actually negotiated with the device. */
-inputFormat: AudioFormat }) & { chunkIndex?: never; durationMs?: never; language?: never; merges?: never; message?: never; offsetMs?: never; rms?: never; rtf?: never; segments?: never; speakerId?: never; speakerSlot?: never; speakers?: never; totalAudioMs?: never; totalSegments?: never } | 
+inputFormat: AudioFormat }) & { chunkIndex?: never; chunks?: never; created?: never; durationMs?: never; language?: never; merges?: never; message?: never; offsetMs?: never; planId?: never; retired?: never; rms?: never; rtf?: never; segments?: never; speakerId?: never; speakerSlot?: never; speakers?: never; totalAudioMs?: never; totalSegments?: never } | 
 /**
  *  One transcribed chunk. Segments inside are timestamped relative
  *  to the start of the session (not the chunk).
@@ -1725,7 +1781,7 @@ speakerSlot?: number | null;
  *  before the segments. Defaults to empty so payloads from
  *  older producers still deserialise.
  */
-speakers: SpeakerRef[] }) & { durationMs?: never; inputFormat?: never; merges?: never; message?: never; rms?: never; totalAudioMs?: never; totalSegments?: never } | 
+speakers: SpeakerRef[] }) & { chunks?: never; created?: never; durationMs?: never; inputFormat?: never; merges?: never; message?: never; planId?: never; retired?: never; rms?: never; totalAudioMs?: never; totalSegments?: never } | 
 /**
  *  A chunk was discarded by the silence gate before being sent to
  *  the ASR backend. Useful for UI / metrics.
@@ -1740,7 +1796,7 @@ offsetMs: number;
 /**  Length of the skipped chunk in milliseconds. */
 durationMs: number; 
 /**  RMS of the skipped chunk (for diagnostics). */
-rms: number | null }) & { inputFormat?: never; language?: never; merges?: never; message?: never; rtf?: never; segments?: never; speakerId?: never; speakerSlot?: never; speakers?: never; totalAudioMs?: never; totalSegments?: never } | 
+rms: number | null }) & { chunks?: never; created?: never; inputFormat?: never; language?: never; merges?: never; message?: never; planId?: never; retired?: never; rtf?: never; segments?: never; speakerId?: never; speakerSlot?: never; speakers?: never; totalAudioMs?: never; totalSegments?: never } | 
 /**
  *  Offline diarization refinement after the streaming loop ended.
  * 
@@ -1759,7 +1815,33 @@ sessionId: StreamingSessionId;
  *  `(absorbed, surviving)` pairs produced by the diarizer's
  *  offline refinement pass.
  */
-merges: SpeakerMerge[] }) & { chunkIndex?: never; durationMs?: never; inputFormat?: never; language?: never; message?: never; offsetMs?: never; rms?: never; rtf?: never; segments?: never; speakerId?: never; speakerSlot?: never; speakers?: never; totalAudioMs?: never; totalSegments?: never } | 
+merges: SpeakerMerge[] }) & { chunkIndex?: never; chunks?: never; created?: never; durationMs?: never; inputFormat?: never; language?: never; message?: never; offsetMs?: never; planId?: never; retired?: never; rms?: never; rtf?: never; segments?: never; speakerId?: never; speakerSlot?: never; speakers?: never; totalAudioMs?: never; totalSegments?: never } | 
+/**
+ *  Offline re-segmentation after the streaming loop ended (ADR 0001).
+ * 
+ *  Moves already-emitted segments between speakers, creates
+ *  speakers and retires speakers left without segments. Emitted
+ *  after the last [`Chunk`](Self::Chunk) and before
+ *  [`Stopped`](Self::Stopped), only when at least one segment
+ *  changes speaker.
+ * 
+ *  Every field is a set-to-value, never a delta, so applying the
+ *  event twice gives the same state. It carries ids, slots and
+ *  indices only: no embeddings, scores or text.
+ */
+({ type: "speakersReassigned"; 
+/**  Session id. */
+sessionId: StreamingSessionId; 
+/**  UUIDv7 of this plan; lets consumers detect a replay. */
+planId: string; 
+/**  Speakers the plan introduces. Persist them before `segments`. */
+created: SpeakerRef[]; 
+/**  Speakers left without segments. */
+retired: SpeakerRetirement[]; 
+/**  Segments whose speaker changed, with their new speaker. */
+segments: SegmentSpeaker[]; 
+/**  Chunks whose dominant speaker changed (live pane). */
+chunks: ChunkSpeaker[] }) & { chunkIndex?: never; durationMs?: never; inputFormat?: never; language?: never; merges?: never; message?: never; offsetMs?: never; rms?: never; rtf?: never; speakerId?: never; speakerSlot?: never; speakers?: never; totalAudioMs?: never; totalSegments?: never } | 
 /**  The pipeline finished cleanly (caller stopped or stream EOF). */
 ({ type: "stopped"; 
 /**  Session id. */
@@ -1767,7 +1849,7 @@ sessionId: StreamingSessionId;
 /**  Total transcribed segments emitted across all chunks. */
 totalSegments: number; 
 /**  Total wall-clock audio captured, in milliseconds. */
-totalAudioMs: number }) & { chunkIndex?: never; durationMs?: never; inputFormat?: never; language?: never; merges?: never; message?: never; offsetMs?: never; rms?: never; rtf?: never; segments?: never; speakerId?: never; speakerSlot?: never; speakers?: never } | 
+totalAudioMs: number }) & { chunkIndex?: never; chunks?: never; created?: never; durationMs?: never; inputFormat?: never; language?: never; merges?: never; message?: never; offsetMs?: never; planId?: never; retired?: never; rms?: never; rtf?: never; segments?: never; speakerId?: never; speakerSlot?: never; speakers?: never } | 
 /**  The pipeline aborted with an error. No further events follow. */
 ({ type: "failed"; 
 /**  Session id. */
@@ -1776,15 +1858,15 @@ sessionId: StreamingSessionId;
  *  Human-readable error message. The structured cause is logged
  *  in the backend and not exposed across the wire.
  */
-message: string }) & { chunkIndex?: never; durationMs?: never; inputFormat?: never; language?: never; merges?: never; offsetMs?: never; rms?: never; rtf?: never; segments?: never; speakerId?: never; speakerSlot?: never; speakers?: never; totalAudioMs?: never; totalSegments?: never } | 
+message: string }) & { chunkIndex?: never; chunks?: never; created?: never; durationMs?: never; inputFormat?: never; language?: never; merges?: never; offsetMs?: never; planId?: never; retired?: never; rms?: never; rtf?: never; segments?: never; speakerId?: never; speakerSlot?: never; speakers?: never; totalAudioMs?: never; totalSegments?: never } | 
 /**  The pipeline was paused. Audio frames are discarded until resumed. */
 ({ type: "paused"; 
 /**  Session id. */
-sessionId: StreamingSessionId }) & { chunkIndex?: never; durationMs?: never; inputFormat?: never; language?: never; merges?: never; message?: never; offsetMs?: never; rms?: never; rtf?: never; segments?: never; speakerId?: never; speakerSlot?: never; speakers?: never; totalAudioMs?: never; totalSegments?: never } | 
+sessionId: StreamingSessionId }) & { chunkIndex?: never; chunks?: never; created?: never; durationMs?: never; inputFormat?: never; language?: never; merges?: never; message?: never; offsetMs?: never; planId?: never; retired?: never; rms?: never; rtf?: never; segments?: never; speakerId?: never; speakerSlot?: never; speakers?: never; totalAudioMs?: never; totalSegments?: never } | 
 /**  The pipeline was resumed after a pause. */
 ({ type: "resumed"; 
 /**  Session id. */
-sessionId: StreamingSessionId }) & { chunkIndex?: never; durationMs?: never; inputFormat?: never; language?: never; merges?: never; message?: never; offsetMs?: never; rms?: never; rtf?: never; segments?: never; speakerId?: never; speakerSlot?: never; speakers?: never; totalAudioMs?: never; totalSegments?: never };
+sessionId: StreamingSessionId }) & { chunkIndex?: never; chunks?: never; created?: never; durationMs?: never; inputFormat?: never; language?: never; merges?: never; message?: never; offsetMs?: never; planId?: never; retired?: never; rms?: never; rtf?: never; segments?: never; speakerId?: never; speakerSlot?: never; speakers?: never; totalAudioMs?: never; totalSegments?: never };
 
 /* Tauri Specta runtime */
 async function typedError<T, E>(result: Promise<T>): Promise<{ status: "ok"; data: T } | { status: "error"; error: E }> {

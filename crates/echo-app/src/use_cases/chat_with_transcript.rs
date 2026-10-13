@@ -955,6 +955,13 @@ mod tests {
         ) -> Result<bool, DomainError> {
             unreachable!()
         }
+        async fn reassign_speakers(
+            &self,
+            _: MeetingId,
+            _: &echo_domain::SpeakerReassignment,
+        ) -> Result<echo_domain::ReassignOutcome, DomainError> {
+            unreachable!()
+        }
         async fn merge_speakers(
             &self,
             _: MeetingId,

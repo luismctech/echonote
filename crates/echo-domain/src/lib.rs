@@ -45,10 +45,12 @@ pub use entities::note::{Note, NoteId};
 pub use entities::segment::{Segment, SegmentId};
 pub use entities::speaker::{Speaker, SpeakerId};
 pub use entities::streaming::{
-    SpeakerMerge, SpeakerRef, SpeakerRetirement, StreamingOptions, StreamingSessionId,
-    TranscriptEvent,
+    ChunkSpeaker, SegmentSpeaker, SpeakerMerge, SpeakerRef, SpeakerRetirement, StreamingOptions,
+    StreamingSessionId, TranscriptEvent,
 };
 pub use entities::summary::{
     ActionItem, Definition, InterviewQuote, Summary, SummaryContent, SummaryId, TEMPLATE_IDS,
 };
-pub use ports::storage::{CreateMeeting, FinalizeMeeting, MeetingStore};
+pub use ports::storage::{
+    CreateMeeting, FinalizeMeeting, MeetingStore, ReassignOutcome, SpeakerReassignment,
+};
