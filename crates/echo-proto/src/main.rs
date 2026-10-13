@@ -376,7 +376,7 @@ enum BenchKind {
         refine_threshold: Option<f32>,
         /// Skip the end-of-session offline refinement pass (same as
         /// `--refine-mode off`).
-        #[arg(long, default_value_t = false)]
+        #[arg(long, default_value_t = false, conflicts_with = "refine_mode")]
         no_refine: bool,
         /// End-of-session refinement: `off`, `merge-only` or `resegment`
         /// (default: the embedder preset).
@@ -1654,4 +1654,30 @@ fn load_wav_as_pcm(path: &Path) -> Result<(Vec<f32>, AudioFormat)> {
         channels: spec.channels,
     };
     Ok((samples, format))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bench_der(extra: &[&str]) -> Result<Cli, clap::Error> {
+        let base = [
+            "echo-proto",
+            "bench",
+            "der",
+            "--manifest",
+            "m.txt",
+            "--embedder",
+            "e.onnx",
+        ];
+        Cli::try_parse_from(base.iter().chain(extra))
+    }
+
+    #[test]
+    fn no_refine_and_refine_mode_conflict() {
+        let err = bench_der(&["--no-refine", "--refine-mode", "resegment"]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+        assert!(bench_der(&["--no-refine"]).is_ok());
+        assert!(bench_der(&["--refine-mode", "off"]).is_ok());
+    }
 }
