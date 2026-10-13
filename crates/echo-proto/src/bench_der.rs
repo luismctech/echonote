@@ -26,11 +26,12 @@ use anyhow::{bail, ensure, Context, Result};
 use async_trait::async_trait;
 use serde::Serialize;
 
+use echo_app::use_cases::streaming::DEFAULT_REFINE_TIMEOUT;
 use echo_app::StreamingPipeline;
 use echo_audio::{RubatoResamplerAdapter, SileroVad};
 use echo_diarize::{
     parse_rttm, score_der, write_rttm, DerConfig, DerReport, EmbedderFamily, OfflineRefineMode,
-    OnlineDiarizer, PyannoteSegmenter, RttmSegment,
+    OnlineDiarizer, Plda, PyannoteSegmenter, RttmSegment, VbxConfig,
 };
 use echo_domain::{
     AudioCapture, AudioFormat, AudioFrame, AudioSource, AudioStream, CaptureSpec, ChunkContext,
@@ -43,6 +44,8 @@ use echo_domain::{
 const SPAN_RATE_HZ: f64 = 16_000.0;
 /// Device frames per capture callback (20 ms at 16 kHz), like a live mic.
 const FRAME_MS: u32 = 20;
+/// Extra stop-time wait per `--vbx-grid` setting.
+const GRID_WAIT_PER_SPEC: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Options of `echo-proto bench der`.
 #[derive(Debug, Clone)]
@@ -64,6 +67,15 @@ pub(crate) struct DerArgs {
     pub refine_threshold: Option<f32>,
     /// End-of-session refinement; `None` uses the embedder preset.
     pub refine_mode: Option<OfflineRefineMode>,
+    /// Override of the preset VBx settings (a [`parse_vbx_spec`] string).
+    pub vbx: Option<String>,
+    /// Log dense window embeddings for the re-segmentation.
+    pub dense_windows: bool,
+    /// PLDA model file replacing the family's bundled one.
+    pub plda: Option<PathBuf>,
+    /// Extra VBx settings, one spec per line, each scored on the same
+    /// diarized sessions besides the main run (calibration grids).
+    pub vbx_grid: Option<PathBuf>,
     /// Silero VAD model; `None` runs fixed chunks behind the RMS gate.
     pub vad: Option<PathBuf>,
     /// Speech-aligned chunk bounds (ignored without a VAD).
@@ -97,6 +109,8 @@ struct FileReport {
     merges: usize,
     /// Spans whose speaker the re-segmenting refine changed.
     relabelled_spans: usize,
+    /// Wall time of the end-of-session refine, in milliseconds.
+    refine_ms: f64,
     elapsed_s: f64,
 }
 
@@ -119,6 +133,28 @@ struct Report {
     skip_overlap: bool,
     files: Vec<FileReport>,
     pooled: PooledReport,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    grid: Vec<GridReport>,
+}
+
+/// Pooled score of one `--vbx-grid` setting.
+#[derive(Debug, Serialize)]
+struct GridReport {
+    spec: String,
+    der: f64,
+    missed: f64,
+    false_alarm: f64,
+    confusion: f64,
+    scored_s: f64,
+    mean_hyp_speakers: f64,
+    mean_ref_speakers: f64,
+    exact_speaker_count: usize,
+    /// Files whose re-segmentation failed (scored with the online labels).
+    failed: usize,
+    /// Slowest re-segmentation of the setting, in milliseconds.
+    max_refine_ms: f64,
+    /// Per-file DER, in manifest order.
+    file_der: Vec<f64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -177,6 +213,83 @@ pub(crate) fn parse_cosine_threshold(raw: &str) -> Result<f32, String> {
     Ok(value)
 }
 
+/// One VBx setting: the configuration and the AHC cut of its
+/// initialisation.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct VbxSpec {
+    /// The spec string, as given.
+    pub label: String,
+    pub config: VbxConfig,
+    /// Fixed AHC cut (or the calibration fallback).
+    pub init_threshold: f32,
+}
+
+/// Parse a VBx spec on top of `base`: comma-separated `key=value` pairs
+/// with keys `fa`, `fb`, `loop` (loopP), `init` (`cal:<offset>` for the
+/// calibrated AHC cut, or a fixed cosine similarity), `lda`, `smooth`,
+/// `maxspk` and `iters`. An empty spec is `base` unchanged.
+///
+/// # Errors
+///
+/// Returns a message for unknown keys and out-of-range values.
+pub(crate) fn parse_vbx_spec(
+    base: VbxConfig,
+    base_threshold: f32,
+    spec: &str,
+) -> Result<VbxSpec, String> {
+    let mut config = base;
+    let mut init_threshold = base_threshold;
+    let num = |k: &str, v: &str| -> Result<f64, String> {
+        let x: f64 = v
+            .parse()
+            .map_err(|e| format!("`{k}={v}` is not a number: {e}"))?;
+        if x.is_finite() {
+            Ok(x)
+        } else {
+            Err(format!("`{k}={v}` must be finite"))
+        }
+    };
+    let count = |k: &str, v: &str| -> Result<usize, String> {
+        match v.parse::<usize>() {
+            Ok(n) if n > 0 => Ok(n),
+            _ => Err(format!("`{k}={v}` must be a positive integer")),
+        }
+    };
+    for pair in spec.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+        let (k, v) = pair
+            .split_once('=')
+            .ok_or_else(|| format!("`{pair}` is not key=value"))?;
+        match k.trim() {
+            "fa" => config.params.fa = num(k, v)?,
+            "fb" => config.params.fb = num(k, v)?,
+            "loop" => config.params.loop_p = num(k, v)?,
+            "smooth" => config.init_smoothing = num(k, v)?,
+            "lda" => config.lda_dim = count(k, v)?,
+            "maxspk" => config.max_speakers = count(k, v)?,
+            "iters" => config.params.max_iters = count(k, v)?,
+            "init" => match v.strip_prefix("cal:") {
+                Some(offset) => config.init_offset = Some(num(k, offset)? as f32),
+                None => {
+                    config.init_offset = None;
+                    init_threshold = parse_cosine_threshold(v)?;
+                }
+            },
+            other => return Err(format!("unknown VBx key `{other}`")),
+        }
+    }
+    if !(config.params.fa > 0.0 && config.params.fb > 0.0) {
+        return Err("fa and fb must be positive".to_string());
+    }
+    if !(0.0..=1.0).contains(&config.params.loop_p) {
+        return Err("loop must be within 0..=1".to_string());
+    }
+    Ok(VbxSpec {
+        label: spec.trim().to_string(),
+        config,
+        init_threshold,
+    })
+}
+
 /// Embedder family to benchmark: the catalog id when given (as the app
 /// dispatches), else the file-name fallback for `embedder`.
 fn embedder_family(embedder: &Path, embedder_id: Option<&str>) -> Result<EmbedderFamily> {
@@ -213,8 +326,40 @@ pub(crate) async fn run(args: DerArgs) -> Result<()> {
         refine.merge_threshold = threshold;
         resegment_threshold = threshold;
     }
+    let main_vbx = parse_vbx_spec(
+        family.vbx_config(),
+        resegment_threshold,
+        args.vbx.as_deref().unwrap_or(""),
+    )
+    .map_err(anyhow::Error::msg)?;
+    let grid: Vec<VbxSpec> = match &args.vbx_grid {
+        Some(path) => std::fs::read_to_string(path)
+            .with_context(|| format!("read {}", path.display()))?
+            .lines()
+            .map(|l| l.split('#').next().unwrap_or("").trim())
+            .filter(|l| !l.is_empty())
+            .map(|l| parse_vbx_spec(main_vbx.config, main_vbx.init_threshold, l))
+            .collect::<Result<_, _>>()
+            .map_err(anyhow::Error::msg)?,
+        None => Vec::new(),
+    };
+    let plda = match &args.plda {
+        Some(path) => Some(Arc::new(
+            Plda::from_bytes(
+                &std::fs::read(path).with_context(|| format!("read {}", path.display()))?,
+            )
+            .with_context(|| format!("parse {}", path.display()))?,
+        )),
+        None => family.plda(),
+    };
     let refine_mode = args.refine_mode.unwrap_or_else(|| family.refine_mode());
     let refine_on = refine_mode != OfflineRefineMode::Off;
+    ensure!(
+        grid.is_empty() || (refine_on && plda.is_some()),
+        "--vbx-grid needs a refine mode other than off and an embedder with a PLDA model"
+    );
+    let mut grid_pooled = vec![DerReport::default(); grid.len()];
+    let mut grid_stats = vec![(0_usize, 0_usize, 0.0_f64, Vec::new()); grid.len()];
     let der_config = DerConfig {
         collar: args.collar,
         skip_overlap: args.skip_overlap,
@@ -233,17 +378,37 @@ pub(crate) async fn run(args: DerArgs) -> Result<()> {
 
         let mut diarizer = OnlineDiarizer::new(family.load(&args.embedder)?, cluster)
             .with_offline_refinement_config(refine)
-            .with_resegment_threshold(resegment_threshold)
+            .with_resegment_threshold(main_vbx.init_threshold)
+            .with_vbx_config(main_vbx.config)
+            .with_dense_windows(args.dense_windows)
             .with_refine_mode(refine_mode);
+        if let Some(plda) = &plda {
+            diarizer = diarizer.with_plda(Arc::clone(plda));
+        }
         if let Some(seg) = &args.segmenter {
             diarizer = diarizer.with_segmenter(Box::new(
                 PyannoteSegmenter::new(seg).context("load pyannote segmenter")?,
             ));
         }
         let started = Instant::now();
-        let run = diarize_file(wav, Box::new(diarizer), &args).await?;
+        let run = diarize_file(wav, Box::new(diarizer), &grid, &args).await?;
         let elapsed_s = started.elapsed().as_secs_f64();
 
+        for (i, result) in run.grid.iter().enumerate() {
+            let (map, failed) = match &result.relabel {
+                Some(m) => (m.clone(), 0),
+                None => (HashMap::new(), 1),
+            };
+            let (chunks, _) = relabel_spans(run.chunks.clone(), &map);
+            let hyp = spans_to_segments(&name, &chunks, &HashMap::new());
+            let r = score_der(&reference, &hyp, &der_config);
+            grid_pooled[i] += r;
+            let stats = &mut grid_stats[i];
+            stats.0 += usize::from(r.hyp_speakers == r.ref_speakers);
+            stats.1 += failed;
+            stats.2 = stats.2.max(result.elapsed_ms);
+            stats.3.push(r.der());
+        }
         let (chunks, relabelled_spans) = relabel_spans(run.chunks, &run.relabel);
         let hypothesis = spans_to_segments(&name, &chunks, &resolve_merges(&run.merges));
         if let Some(dir) = &args.hyp_dir {
@@ -265,6 +430,7 @@ pub(crate) async fn run(args: DerArgs) -> Result<()> {
             chunks: chunks.len(),
             merges: run.merges.len(),
             relabelled_spans,
+            refine_ms: run.refine_ms,
             elapsed_s,
         };
         if !args.json {
@@ -311,6 +477,27 @@ pub(crate) async fn run(args: DerArgs) -> Result<()> {
             scored_s: pooled.total,
             mean_abs_speaker_count_error: count_err,
         },
+        grid: grid
+            .iter()
+            .zip(grid_pooled)
+            .zip(grid_stats)
+            .map(
+                |((spec, p), (exact, failed, max_ms, file_der))| GridReport {
+                    spec: spec.label.clone(),
+                    der: p.der(),
+                    missed: p.missed,
+                    false_alarm: p.false_alarm,
+                    confusion: p.confusion,
+                    scored_s: p.total,
+                    mean_hyp_speakers: p.hyp_speakers as f64 / files.len() as f64,
+                    mean_ref_speakers: p.ref_speakers as f64 / files.len() as f64,
+                    exact_speaker_count: exact,
+                    failed,
+                    max_refine_ms: max_ms,
+                    file_der,
+                },
+            )
+            .collect(),
         files,
     };
     if args.json {
@@ -327,6 +514,18 @@ pub(crate) async fn run(args: DerArgs) -> Result<()> {
             100.0 * p.confusion / p.scored_s.max(f64::MIN_POSITIVE),
             p.mean_abs_speaker_count_error
         );
+        for g in &report.grid {
+            println!(
+                "grid [{}]: DER {:.2}%  spk {:.2}/{:.2}  exact {}  failed {}  max refine {:.0} ms",
+                g.spec,
+                g.der * 100.0,
+                g.mean_hyp_speakers,
+                g.mean_ref_speakers,
+                g.exact_speaker_count,
+                g.failed,
+                g.max_refine_ms
+            );
+        }
     }
     Ok(())
 }
@@ -490,6 +689,7 @@ fn spans_to_segments(
 }
 
 /// One diarized chunk as the bench saw it.
+#[derive(Clone)]
 struct RecordedChunk {
     chunk_index: u32,
     offset_ms: u32,
@@ -503,9 +703,58 @@ struct FileRun {
     merges: Vec<(SpeakerId, SpeakerId)>,
     /// Span relabelling of a re-segmenting refine (empty otherwise).
     relabel: HashMap<SpanRef, SpeakerId>,
+    /// Wall time of the main refine, in milliseconds.
+    refine_ms: f64,
+    /// One result per `--vbx-grid` setting.
+    grid: Vec<GridResult>,
 }
 
-async fn diarize_file(wav: &Path, diarizer: Box<dyn Diarizer>, args: &DerArgs) -> Result<FileRun> {
+/// Re-segmentation of one session with one grid setting.
+#[derive(Clone)]
+struct GridResult {
+    /// Span relabelling (empty when unchanged); `None` when it failed.
+    relabel: Option<HashMap<SpanRef, SpeakerId>>,
+    elapsed_ms: f64,
+}
+
+/// A diarizer the bench can also re-segment with other VBx settings.
+trait GridDiarizer: Diarizer {
+    /// Re-segment the session once per spec. The default (a diarizer
+    /// without that ability) returns nothing.
+    fn resegment_grid(&self, _specs: &[VbxSpec]) -> Vec<GridResult> {
+        Vec::new()
+    }
+}
+
+impl GridDiarizer for OnlineDiarizer {
+    fn resegment_grid(&self, specs: &[VbxSpec]) -> Vec<GridResult> {
+        specs
+            .iter()
+            .map(|spec| {
+                let started = Instant::now();
+                let budget = RefineBudget {
+                    deadline: Instant::now() + std::time::Duration::from_secs(60),
+                };
+                let relabel = match self.resegment_with(spec.config, spec.init_threshold, budget) {
+                    Ok(RefineOutcome::Relabel(plan)) => Some(plan.spans.into_iter().collect()),
+                    Ok(_) => Some(HashMap::new()),
+                    Err(_) => None,
+                };
+                GridResult {
+                    relabel,
+                    elapsed_ms: started.elapsed().as_secs_f64() * 1_000.0,
+                }
+            })
+            .collect()
+    }
+}
+
+async fn diarize_file(
+    wav: &Path,
+    diarizer: Box<dyn GridDiarizer>,
+    grid: &[VbxSpec],
+    args: &DerArgs,
+) -> Result<FileRun> {
     let (samples, format) =
         super::load_wav_as_pcm(wav).with_context(|| format!("read {}", wav.display()))?;
     let audio_s = samples.len() as f64
@@ -513,16 +762,28 @@ async fn diarize_file(wav: &Path, diarizer: Box<dyn Diarizer>, args: &DerArgs) -
         / f64::from(format.sample_rate_hz.max(1));
     let span_log: SpanLog = Arc::default();
     let plan_slot: PlanSlot = Arc::default();
+    let refine_slot: RefineSlot = Arc::default();
     let capture: Arc<dyn AudioCapture> = Arc::new(FileCapture {
         samples: Arc::new(samples),
         format,
     });
     let resampler: Arc<dyn Resampler> = Arc::new(RubatoResamplerAdapter::new());
+    // A calibration grid re-segments the session once per setting inside
+    // the stop-time refine; the pipeline must wait for all of them. The
+    // main refine keeps the app's deadline (`RecordingDiarizer`).
+    let refine_wait = if grid.is_empty() {
+        DEFAULT_REFINE_TIMEOUT
+    } else {
+        DEFAULT_REFINE_TIMEOUT + GRID_WAIT_PER_SPEC * u32::try_from(grid.len()).unwrap_or(u32::MAX)
+    };
     let mut pipeline = StreamingPipeline::new(capture, resampler, Arc::new(NullTranscriber))
+        .with_refine_timeout(refine_wait)
         .with_diarizer(Box::new(RecordingDiarizer {
             inner: diarizer,
             log: Arc::clone(&span_log),
             plan: Arc::clone(&plan_slot),
+            grid: grid.to_vec(),
+            refine: Arc::clone(&refine_slot),
         }));
     if let Some(vad) = &args.vad {
         pipeline = pipeline.with_vad(Box::new(
@@ -578,11 +839,14 @@ async fn diarize_file(wav: &Path, diarizer: Box<dyn Diarizer>, args: &DerArgs) -
         .expect("plan slot poisoned")
         .take()
         .unwrap_or_default();
+    let (refine_ms, grid) = std::mem::take(&mut *refine_slot.lock().expect("refine slot poisoned"));
     Ok(FileRun {
         audio_s,
         chunks,
         merges,
         relabel,
+        refine_ms,
+        grid,
     })
 }
 
@@ -590,13 +854,18 @@ async fn diarize_file(wav: &Path, diarizer: Box<dyn Diarizer>, args: &DerArgs) -
 type SpanLog = Arc<Mutex<Vec<(u32, Vec<SpeakerSpan>)>>>;
 /// Span relabelling captured from the diarizer's refine plan.
 type PlanSlot = Arc<Mutex<Option<HashMap<SpanRef, SpeakerId>>>>;
+/// Main refine wall time (ms) and the grid re-segmentations.
+type RefineSlot = Arc<Mutex<(f64, Vec<GridResult>)>>;
 
 /// Forwards to the real diarizer, records each chunk's spans and keeps
 /// a copy of a re-segmenting refine plan returned within its deadline.
 struct RecordingDiarizer {
-    inner: Box<dyn Diarizer>,
+    inner: Box<dyn GridDiarizer>,
     log: SpanLog,
     plan: PlanSlot,
+    /// Extra VBx settings to re-segment the session with at stop.
+    grid: Vec<VbxSpec>,
+    refine: RefineSlot,
 }
 
 #[async_trait]
@@ -646,17 +915,28 @@ impl Diarizer for RecordingDiarizer {
     }
 
     fn refine_plan(&self, budget: RefineBudget) -> Result<RefineOutcome, DomainError> {
-        let outcome = self.inner.refine_plan(budget)?;
+        let started = Instant::now();
+        // With a grid the pipeline waits longer (see `diarize_file`), so
+        // the main refine gets the app's deadline back here.
+        let budget = RefineBudget {
+            deadline: budget.deadline.min(started + DEFAULT_REFINE_TIMEOUT),
+        };
+        let outcome = self.inner.refine_plan(budget);
+        let refine_ms = started.elapsed().as_secs_f64() * 1_000.0;
         // The port forbids a late plan. Enforce it here so the pipeline
         // discards a refine that missed its deadline (the online result
         // stands) and the bench never scores a plan the app would not
         // have applied.
-        budget.check()?;
-        if let RefineOutcome::Relabel(plan) = &outcome {
+        let outcome = outcome.and_then(|o| budget.check().map(|()| o));
+        if let Ok(RefineOutcome::Relabel(plan)) = &outcome {
             *self.plan.lock().expect("plan slot poisoned") =
                 Some(plan.spans.iter().copied().collect());
         }
-        Ok(outcome)
+        // Grid settings run after the main refine and outside its
+        // deadline: they only feed the calibration report.
+        let grid = self.inner.resegment_grid(&self.grid);
+        *self.refine.lock().expect("refine slot poisoned") = (refine_ms, grid);
+        outcome
     }
 }
 
@@ -943,11 +1223,14 @@ mod tests {
                 }))
             }
         }
+        impl GridDiarizer for Inner {}
         let (log, plan): (SpanLog, PlanSlot) = (Arc::default(), Arc::default());
         let mut d = RecordingDiarizer {
             inner: Box::new(Inner),
             log: Arc::clone(&log),
             plan: Arc::clone(&plan),
+            grid: Vec::new(),
+            refine: Arc::default(),
         };
         let ctx = ChunkContext {
             chunk_index: 4,
@@ -978,6 +1261,91 @@ mod tests {
         };
         assert!(d.refine_plan(late).is_err());
         assert!(plan.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn grid_runs_after_the_main_plan_and_never_spends_its_deadline() {
+        struct Slow;
+        #[async_trait]
+        impl Diarizer for Slow {
+            fn sample_rate_hz(&self) -> u32 {
+                16_000
+            }
+            async fn assign(&mut self, _: &[Sample]) -> Result<Option<SpeakerId>, DomainError> {
+                Ok(None)
+            }
+            fn speakers(&self) -> Vec<Speaker> {
+                vec![]
+            }
+            fn rename(&mut self, _: SpeakerId, _: &str) -> Result<bool, DomainError> {
+                Ok(false)
+            }
+            fn reset(&mut self) {}
+            fn refine_plan(&self, _: RefineBudget) -> Result<RefineOutcome, DomainError> {
+                Ok(RefineOutcome::Relabel(
+                    echo_domain::SpanRelabelPlan::default(),
+                ))
+            }
+        }
+        impl GridDiarizer for Slow {
+            fn resegment_grid(&self, specs: &[VbxSpec]) -> Vec<GridResult> {
+                std::thread::sleep(std::time::Duration::from_millis(80));
+                specs
+                    .iter()
+                    .map(|_| GridResult {
+                        relabel: Some(HashMap::new()),
+                        elapsed_ms: 80.0,
+                    })
+                    .collect()
+            }
+        }
+        let (plan, refine): (PlanSlot, RefineSlot) = (Arc::default(), Arc::default());
+        let d = RecordingDiarizer {
+            inner: Box::new(Slow),
+            log: Arc::default(),
+            plan: Arc::clone(&plan),
+            grid: vec![parse_vbx_spec(VbxConfig::default(), 0.5, "fa=0.4").unwrap()],
+            refine: Arc::clone(&refine),
+        };
+        let budget = RefineBudget {
+            deadline: std::time::Instant::now() + std::time::Duration::from_millis(40),
+        };
+        assert!(
+            d.refine_plan(budget).is_ok(),
+            "the grid ran past the deadline"
+        );
+        assert!(plan.lock().unwrap().is_some());
+        assert_eq!(refine.lock().unwrap().1.len(), 1);
+    }
+
+    #[test]
+    fn vbx_spec_overrides_only_the_named_keys() {
+        let base = VbxConfig::default();
+        let same = parse_vbx_spec(base, 0.5, "").unwrap();
+        assert_eq!((same.config, same.init_threshold), (base, 0.5));
+
+        let s = parse_vbx_spec(base, 0.5, "fa=0.4, fb=11,loop=0.7,lda=64,init=0.3").unwrap();
+        assert_eq!(s.config.params.fa, 0.4);
+        assert_eq!(s.config.params.fb, 11.0);
+        assert_eq!(s.config.params.loop_p, 0.7);
+        assert_eq!(s.config.lda_dim, 64);
+        assert_eq!(s.config.init_offset, None);
+        assert_eq!(s.init_threshold, 0.3);
+        assert_eq!(s.config.init_smoothing, base.init_smoothing);
+
+        let cal = parse_vbx_spec(base, 0.5, "init=cal:0.1").unwrap();
+        assert_eq!(cal.config.init_offset, Some(0.1));
+        assert_eq!(cal.init_threshold, 0.5, "fallback keeps the base cut");
+    }
+
+    #[test]
+    fn vbx_spec_rejects_bad_keys_and_values() {
+        let base = VbxConfig::default();
+        for bad in [
+            "nope=1", "fa", "fa=x", "fa=0", "loop=1.5", "lda=0", "init=2", "fb=inf",
+        ] {
+            assert!(parse_vbx_spec(base, 0.5, bad).is_err(), "{bad}");
+        }
     }
 
     #[test]

@@ -383,6 +383,24 @@ enum BenchKind {
         /// (default: the embedder preset).
         #[arg(long, value_parser = bench_der::parse_refine_mode)]
         refine_mode: Option<echo_diarize::OfflineRefineMode>,
+        /// Override the preset VBx settings of the re-segmentation:
+        /// comma-separated `fa=`, `fb=`, `loop=`, `init=` (`cal:<offset>`
+        /// or a fixed cosine cut), `lda=`, `smooth=`, `maxspk=`, `iters=`.
+        #[arg(long)]
+        vbx: Option<String>,
+        /// Also embed 1.5 s windows inside spans longer than 3 s for the
+        /// re-segmentation (off in the app; comparison only).
+        #[arg(long, default_value_t = false)]
+        dense_windows: bool,
+        /// PLDA model file (`scripts/fit-plda.py`) replacing the bundled
+        /// one of the embedder family.
+        #[arg(long)]
+        plda: Option<PathBuf>,
+        /// File with one VBx spec per line (same syntax as `--vbx`); each
+        /// re-segments every session at stop and gets its own pooled
+        /// score (calibration).
+        #[arg(long)]
+        vbx_grid: Option<PathBuf>,
         /// Silero VAD model for speech-aligned chunks.
         #[arg(long, env = "ECHO_VAD_MODEL")]
         vad: Option<PathBuf>,
@@ -534,6 +552,10 @@ async fn main() -> Result<()> {
                 refine_threshold,
                 no_refine,
                 refine_mode,
+                vbx,
+                dense_windows,
+                plda,
+                vbx_grid,
                 vad,
                 no_neural_vad,
                 min_chunk_ms,
@@ -563,6 +585,10 @@ async fn main() -> Result<()> {
                     } else {
                         refine_mode
                     },
+                    vbx,
+                    dense_windows,
+                    plda,
+                    vbx_grid,
                     vad: vad.filter(|_| !no_neural_vad),
                     min_chunk_ms,
                     max_chunk_ms,
