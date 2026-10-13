@@ -234,13 +234,36 @@ them as extra speakers in the transcript. The 0.40 / 6 point counts best (7/20 a
 for about the same test DER, but it sits on the edge of the merge cliff on dev. Reducing the
 over-count is a job for T10 (VBx), which can split and re-assign speakers, not only merge them.
 
+## T9 resegment (AHC) check
+
+T9 (ADR 0001) adds `--refine-mode off|merge-only|resegment` to `bench der`. `resegment` runs
+average-linkage AHC over the timestamped embedding log, one cluster per logged span, cut at the
+preset refine threshold (0.50), and maps clusters back to online speakers by Hungarian overlap.
+The bench applies the diarizer's span relabel plan to the recorded spans before scoring. One run
+per mode on the **dev** sets, multilingual CAM++ preset (0.45 / cap 8 / refine 0.50), segmenter
+on, Silero v6.2 speech-aligned chunks:
+
+| Set | Mode | DER % | miss % | FA % | conf % | est / true spk | exact | relabelled spans |
+|---|---|---|---|---|---|---|---|---|
+| `mls_es_dev` | merge-only | **5.85** | 0.63 | 0.98 | 4.24 | 4.75 / 3.45 | 5/20 | 0 (2 merges) |
+| `mls_es_dev` | resegment | 5.94 | 0.59 | 0.99 | 4.36 | 8.55 / 3.45 | 0/20 | 207 |
+| `voxconverse_dev` | merge-only | **16.26** | 7.20 | 1.45 | 7.61 | 5.42 / 3.67 | 0/12 | 0 |
+| `voxconverse_dev` | resegment | 17.59 | 6.70 | 1.45 | 9.44 | 9.33 / 3.67 | 0/12 | 138 |
+
+Weighted dev DER (2:1): merge-only **9.32**, resegment 9.82. Merge-only reproduces the T6b dev
+numbers exactly. Entry-level AHC at the speaker-level threshold leaves short, poorly embedded
+spans as their own clusters, so the plan creates new speakers and the over-count roughly doubles.
+The default stays `MergeOnly`. This check proves the plan end to end; it is not a candidate
+default. T10 (VBx with PLDA, AHC initialisation and a minimum-cluster prior) is the intended
+`Resegment` implementation. Raw JSON: scratchpad `der-eval/results/t9/`.
+
 ## Reproduce
 
 ```
 ECHO_LOG=warn echo-proto bench der --manifest <set>/manifest.txt \
   --embedder models/embedder/campplus_zh_en_common_advanced.onnx \
   --segmenter models/segmenter/pyannote_segmentation_3_tract.onnx \
-  --vad <silero v6.2 inlined>.onnx [--no-refine] [--threshold X] \
+  --vad <silero v6.2 inlined>.onnx [--refine-mode off|merge-only|resegment] [--threshold X] \
   [--max-speakers N] [--refine-threshold Y] [--hyp-dir out/] [--json]
 ```
 

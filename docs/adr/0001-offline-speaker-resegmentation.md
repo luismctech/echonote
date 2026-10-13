@@ -353,3 +353,36 @@ flowchart LR
 4. **Q4. Default flip criterion.** What DER gain on the held-out sets justifies making
    `Resegment` the default? For example, a weighted DER at least 0.5 points lower and an
    over-count no worse than today.
+
+## Implementation notes (T9)
+
+T9 implements the contract with the AHC reclusterer behind `OfflineRefineMode::Resegment`.
+The default stays `MergeOnly` for every embedder family. Where the code differs from the
+sketches above:
+
+- **Log entry.** `spans` is a `Vec<SpanRef>` instead of a `SmallVec`, to avoid a new
+  dependency. The log lives in `echo_diarize::embedding_log`; `EmbeddingLogEntry` has a manual
+  `Debug` that prints the dimension only, and no `Serialize`.
+- **Compaction fallback.** When the full log has no time-adjacent pair with the same online
+  speaker and epoch (speakers alternate on every span), each entry is coalesced with the next
+  entry of the same speaker and epoch instead, so the log still shrinks and no span is dropped.
+- **AHC.** `resegment::AhcReclusterer` runs average-linkage AHC over the log entries (one
+  cluster per entry, nearest-neighbour chain with Lance-Williams updates, one condensed f32
+  matrix), cut at the family's refine `merge_threshold`. Above 4 096 entries it runs on a strided
+  subsample and the other entries join the nearest centroid. It checks the deadline between
+  merges.
+- **Segment-level retirements.** The pipeline retires every speaker that the plan retired or
+  that lost its last segment after `dominant_span` is re-run, with the majority recipient taken
+  from where its segments went (the plan's recipient is the fallback). A recipient the store
+  does not know is dropped to `None`. Only created speakers that receive a segment or take over
+  a retired speaker are sent, so the store never rejects a plan for a row it never persisted.
+- **`merge_speakers`.** Fixed in T9 with the same label rule (`retire_speaker` in
+  `echo-storage`), so the merge-only path no longer destroys a user label.
+- **Timeout.** The pipeline waits the 20 s deadline plus a 1 s grace for the blocking task. A
+  refine that ignores its deadline is detached; its result is discarded.
+- **UI.** The live pane patches chunk slots for `speakersReassigned` and, now, `speakersMerged`,
+  and shows the Q2 notice. `MeetingDetail` does not refetch on `speakersReassigned`; the
+  refetch after `stopped` already shows the persisted result.
+- **Known limit (unchanged).** The merge-only refine still builds a full `n × n` similarity
+  matrix over the log. At the 16 384-entry cap that is about 1 GB; T10 should bound it the way
+  the AHC reclusterer is bounded.
