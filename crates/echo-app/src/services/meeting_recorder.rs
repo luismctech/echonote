@@ -34,6 +34,10 @@ use echo_domain::{
     SpeakerReassignment, SpeakerRef, StreamingSessionId, TranscriptEvent,
 };
 
+/// Pause before the single retry of a `reassign_speakers` call that
+/// failed with a storage error (a transient lock, for instance).
+const REASSIGN_RETRY_BACKOFF: std::time::Duration = std::time::Duration::from_millis(100);
+
 /// Stateful recorder. One instance per session is the simplest pattern,
 /// but the type also handles multiple interleaved sessions safely
 /// because state is keyed by [`StreamingSessionId`].
@@ -321,8 +325,19 @@ impl MeetingRecorder {
                 };
                 // One all-or-nothing call: on failure the store rolled
                 // back and the online attribution stays persisted, so the
-                // session still finalises normally.
-                match self.store.reassign_speakers(meeting_id, &plan).await {
+                // session still finalises normally. A storage error (for
+                // example SQLite busy) gets one retry after a short pause;
+                // an invalid plan does not.
+                let mut result = self.store.reassign_speakers(meeting_id, &plan).await;
+                if let Err(e @ DomainError::Storage(_)) = &result {
+                    warn!(
+                        %session_id, %meeting_id, %plan_id, error = %e,
+                        "recorder: reassign_speakers failed; retrying once"
+                    );
+                    tokio::time::sleep(REASSIGN_RETRY_BACKOFF).await;
+                    result = self.store.reassign_speakers(meeting_id, &plan).await;
+                }
+                match result {
                     Ok(out) => debug!(
                         %session_id, %meeting_id, %plan_id,
                         segments = out.segments_updated,
@@ -385,8 +400,11 @@ mod tests {
         meetings: Mutex<Vec<Meeting>>,
         /// Every plan passed to `reassign_speakers`.
         reassignments: Mutex<Vec<(MeetingId, echo_domain::SpeakerReassignment)>>,
-        /// Make `reassign_speakers` fail (rollback simulation).
-        fail_reassign: bool,
+        /// Errors `reassign_speakers` returns, in order, before it
+        /// succeeds (rollback simulation).
+        reassign_failures: Mutex<std::collections::VecDeque<DomainError>>,
+        /// Calls to `reassign_speakers`, failed ones included.
+        reassign_calls: std::sync::atomic::AtomicUsize,
     }
 
     impl FakeStore {
@@ -522,8 +540,10 @@ mod tests {
             meeting_id: MeetingId,
             plan: &echo_domain::SpeakerReassignment,
         ) -> Result<echo_domain::ReassignOutcome, DomainError> {
-            if self.fail_reassign {
-                return Err(DomainError::Storage("injected".into()));
+            self.reassign_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if let Some(e) = self.reassign_failures.lock().unwrap().pop_front() {
+                return Err(e);
             }
             self.reassignments
                 .lock()
@@ -951,17 +971,64 @@ mod tests {
         );
     }
 
+    fn failing_store(errors: Vec<DomainError>) -> Arc<FakeStore> {
+        Arc::new(FakeStore {
+            reassign_failures: Mutex::new(errors.into()),
+            ..FakeStore::default()
+        })
+    }
+
+    fn reassign_calls(store: &FakeStore) -> usize {
+        store
+            .reassign_calls
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    #[tokio::test]
+    async fn speakers_reassigned_for_an_unknown_session_is_ignored() {
+        let store = Arc::new(FakeStore::default());
+        let recorder = MeetingRecorder::with_default_title(store.clone());
+        let out = recorder
+            .record(&reassigned(StreamingSessionId::new()))
+            .await
+            .unwrap();
+        assert_eq!(out, None);
+        assert_eq!(reassign_calls(&store), 0);
+    }
+
+    #[tokio::test]
+    async fn a_transient_store_failure_is_retried_once() {
+        let store = failing_store(vec![DomainError::Storage("database is locked".into())]);
+        let recorder = MeetingRecorder::with_default_title(store.clone());
+        let (session, meeting) = started(&recorder).await;
+        let out = recorder.record(&reassigned(session)).await.unwrap();
+        assert_eq!(out, Some(meeting));
+        assert_eq!(reassign_calls(&store), 2);
+        assert_eq!(store.reassignments.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn an_invalid_plan_is_not_retried() {
+        let store = failing_store(vec![DomainError::Invariant("foreign id".into())]);
+        let recorder = MeetingRecorder::with_default_title(store.clone());
+        let (session, _) = started(&recorder).await;
+        recorder.record(&reassigned(session)).await.unwrap();
+        assert_eq!(reassign_calls(&store), 1);
+        assert!(store.reassignments.lock().unwrap().is_empty());
+    }
+
     #[tokio::test]
     async fn failed_reassignment_keeps_the_session_finalisable() {
-        let store = Arc::new(FakeStore {
-            fail_reassign: true,
-            ..FakeStore::default()
-        });
+        let store = failing_store(vec![
+            DomainError::Storage("injected".into()),
+            DomainError::Storage("injected".into()),
+        ]);
         let recorder = MeetingRecorder::with_default_title(store.clone());
         let (session, meeting) = started(&recorder).await;
 
         let out = recorder.record(&reassigned(session)).await;
         assert_eq!(out.unwrap(), Some(meeting), "failure is logged, not raised");
+        assert_eq!(reassign_calls(&store), 2, "one bounded retry");
 
         recorder
             .record(&TranscriptEvent::Stopped {
