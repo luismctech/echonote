@@ -8,14 +8,17 @@
 //!
 //! Output format (little-endian): the 8-byte magic `ECHOEMB1`, `u32` row
 //! count, `u32` dimension, then `rows x dim` `f32` values in row order. A
-//! sidecar `<out>.labels.txt` holds one class label per row. Files the
-//! embedder declines (shorter than its minimum) are skipped and counted.
+//! sidecar `<out>.labels.txt` holds one class label per row. Both files
+//! are written to a temporary name and renamed into place. Files that
+//! cannot be read or have the wrong format are skipped and listed; clips
+//! the embedder declines (shorter than its minimum) and non-finite
+//! embeddings are skipped and counted separately.
 
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, ensure, Context, Result};
 use echo_diarize::EmbedderFamily;
+use echo_domain::AudioFormat;
 
 /// Magic bytes at the start of an embedding dump.
 pub(crate) const MAGIC: &[u8; 8] = b"ECHOEMB1";
@@ -68,6 +71,81 @@ pub(crate) fn encode(rows: &[Vec<f32>], dim: usize) -> Result<Vec<u8>> {
     Ok(out)
 }
 
+/// Embeddings gathered from a list, with what was skipped.
+#[derive(Debug, Default)]
+struct Collected<'a> {
+    rows: Vec<Vec<f32>>,
+    labels: Vec<&'a str>,
+    /// Clips the embedder declined (too short).
+    declined: usize,
+    /// Clips whose embedding had a NaN or infinite value.
+    non_finite: usize,
+    /// Files that could not be read or have the wrong format, with why.
+    bad_files: Vec<(PathBuf, String)>,
+}
+
+/// Embed every listed file. `load` reads a wav, `embed` runs the
+/// embedder; both are parameters so the skip rules are testable without
+/// a model.
+///
+/// # Errors
+///
+/// An embedder error, or an embedding whose length is not `dim` (named
+/// with its file); a bad file is skipped, not an error.
+fn collect<'a>(
+    items: &'a [(PathBuf, String)],
+    rate: u32,
+    dim: usize,
+    mut load: impl FnMut(&Path) -> Result<(Vec<f32>, AudioFormat)>,
+    mut embed: impl FnMut(&[f32]) -> Result<Option<Vec<f32>>>,
+) -> Result<Collected<'a>> {
+    let mut c = Collected::default();
+    for (wav, label) in items {
+        let samples = match load(wav) {
+            Ok((s, f)) if f.channels == 1 && f.sample_rate_hz == rate => s,
+            Ok((_, f)) => {
+                let why = format!(
+                    "expected mono {rate} Hz, got {} ch {} Hz",
+                    f.channels, f.sample_rate_hz
+                );
+                c.bad_files.push((wav.clone(), why));
+                continue;
+            }
+            Err(e) => {
+                c.bad_files.push((wav.clone(), format!("{e:#}")));
+                continue;
+            }
+        };
+        match embed(&samples).with_context(|| format!("embed {}", wav.display()))? {
+            None => c.declined += 1,
+            Some(e) if e.len() != dim => bail!(
+                "{}: embedding has {} values, the embedder reports {dim}",
+                wav.display(),
+                e.len()
+            ),
+            Some(e) if !e.iter().all(|x| x.is_finite()) => c.non_finite += 1,
+            Some(e) => {
+                c.rows.push(e);
+                c.labels.push(label.as_str());
+            }
+        }
+    }
+    Ok(c)
+}
+
+/// Write `bytes` to a temporary file next to `path`, then rename it over
+/// `path`, so an interrupted run never leaves a truncated file behind.
+fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".tmp");
+    let tmp = PathBuf::from(tmp);
+    std::fs::write(&tmp, bytes).with_context(|| format!("write {}", tmp.display()))?;
+    std::fs::rename(&tmp, path).with_context(|| {
+        let _ = std::fs::remove_file(&tmp);
+        format!("rename {} to {}", tmp.display(), path.display())
+    })
+}
+
 /// Entry point of `echo-proto bench embed-dump`.
 pub(crate) fn run(args: &EmbedDumpArgs) -> Result<()> {
     let text = std::fs::read_to_string(&args.list)
@@ -79,38 +157,28 @@ pub(crate) fn run(args: &EmbedDumpArgs) -> Result<()> {
         None => EmbedderFamily::from_path(&args.embedder),
     };
     let mut embedder = family.load(&args.embedder)?;
-    let rate = embedder.sample_rate_hz();
-    let (mut rows, mut labels, mut skipped) = (Vec::new(), Vec::new(), 0_usize);
-    for (wav, label) in &items {
-        let (samples, format) =
-            super::load_wav_as_pcm(wav).with_context(|| format!("read {}", wav.display()))?;
-        ensure!(
-            format.channels == 1 && format.sample_rate_hz == rate,
-            "{}: expected mono {rate} Hz, got {} ch {} Hz",
-            wav.display(),
-            format.channels,
-            format.sample_rate_hz
-        );
-        match embedder.embed(&samples)? {
-            Some(e) if e.iter().all(|x| x.is_finite()) => {
-                rows.push(e);
-                labels.push(label.as_str());
-            }
-            _ => skipped += 1,
-        }
+    let (rate, dim) = (embedder.sample_rate_hz(), embedder.dim());
+    let c = collect(
+        &items,
+        rate,
+        dim,
+        |wav| super::load_wav_as_pcm(wav).with_context(|| format!("read {}", wav.display())),
+        |samples| Ok(embedder.embed(samples)?),
+    )?;
+    for (wav, why) in &c.bad_files {
+        eprintln!("skipped {}: {why}", wav.display());
     }
-    let dim = embedder.dim();
-    std::fs::write(&args.out, encode(&rows, dim)?)
-        .with_context(|| format!("write {}", args.out.display()))?;
     let mut sidecar = args.out.clone().into_os_string();
     sidecar.push(".labels.txt");
-    let mut f = std::fs::File::create(&sidecar)?;
-    for label in &labels {
-        writeln!(f, "{label}")?;
-    }
+    let labels: String = c.labels.iter().map(|l| format!("{l}\n")).collect();
+    write_atomic(Path::new(&sidecar), labels.as_bytes())?;
+    write_atomic(&args.out, &encode(&c.rows, dim)?)?;
     eprintln!(
-        "{} embeddings (dim {dim}) written, {skipped} files skipped",
-        rows.len()
+        "{} embeddings (dim {dim}) written; skipped: {} bad files, {} declined clips, {} non-finite embeddings",
+        c.rows.len(),
+        c.bad_files.len(),
+        c.declined,
+        c.non_finite
     );
     Ok(())
 }
@@ -137,6 +205,81 @@ mod tests {
     #[test]
     fn encode_rejects_ragged_rows() {
         assert!(encode(&[vec![1.0], vec![1.0, 2.0]], 1).is_err());
+    }
+
+    fn mono(rate: u32) -> AudioFormat {
+        AudioFormat {
+            sample_rate_hz: rate,
+            channels: 1,
+        }
+    }
+
+    #[test]
+    fn bad_files_are_skipped_and_non_finite_counted_apart_from_declined() {
+        let items: Vec<(PathBuf, String)> = ["ok", "broken", "stereo", "short", "nan", "ok2"]
+            .iter()
+            .map(|n| (PathBuf::from(format!("/d/{n}.wav")), format!("spk_{n}")))
+            .collect();
+        let load = |p: &Path| -> Result<(Vec<f32>, AudioFormat)> {
+            match p.file_stem().and_then(|s| s.to_str()) {
+                Some("broken") => bail!("not a wav"),
+                Some("stereo") => Ok((
+                    vec![0.0; 4],
+                    AudioFormat {
+                        channels: 2,
+                        ..mono(16_000)
+                    },
+                )),
+                Some("short") => Ok((vec![0.0; 1], mono(16_000))),
+                Some("nan") => Ok((vec![f32::NAN; 4], mono(16_000))),
+                _ => Ok((vec![0.5; 4], mono(16_000))),
+            }
+        };
+        let embed =
+            |x: &[f32]| -> Result<Option<Vec<f32>>> { Ok((x.len() > 1).then(|| vec![x[0], 1.0])) };
+        let c = collect(&items, 16_000, 2, load, embed).unwrap();
+        assert_eq!(c.rows, vec![vec![0.5, 1.0], vec![0.5, 1.0]]);
+        assert_eq!(c.labels, vec!["spk_ok", "spk_ok2"]);
+        assert_eq!(c.declined, 1);
+        assert_eq!(c.non_finite, 1);
+        let bad: Vec<&Path> = c.bad_files.iter().map(|(p, _)| p.as_path()).collect();
+        assert_eq!(
+            bad,
+            vec![Path::new("/d/broken.wav"), Path::new("/d/stereo.wav")]
+        );
+    }
+
+    #[test]
+    fn an_embedding_of_the_wrong_dimension_is_an_error_naming_the_file() {
+        let items = vec![(PathBuf::from("/d/a.wav"), "x".to_string())];
+        let load =
+            |_: &Path| -> Result<(Vec<f32>, AudioFormat)> { Ok((vec![0.1; 4], mono(16_000))) };
+        let embed = |_: &[f32]| -> Result<Option<Vec<f32>>> { Ok(Some(vec![1.0; 3])) };
+        let err = collect(&items, 16_000, 2, load, embed)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("/d/a.wav"), "{err}");
+    }
+
+    #[test]
+    fn atomic_write_replaces_the_file_and_leaves_no_temporary() {
+        let dir = std::env::temp_dir().join(format!("echo-embed-dump-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join("dump.bin");
+        std::fs::write(&out, b"old").unwrap();
+        write_atomic(&out, b"new").unwrap();
+        assert_eq!(std::fs::read(&out).unwrap(), b"new");
+        let names: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, vec![std::ffi::OsString::from("dump.bin")]);
+        std::fs::remove_file(&out).unwrap();
+        std::fs::remove_dir(&dir).unwrap();
+
+        let missing = dir.join("no-such-dir").join("dump.bin");
+        let err = write_atomic(&missing, b"x").unwrap_err();
+        assert!(format!("{err:#}").contains("no-such-dir"), "{err:#}");
     }
 
     #[test]

@@ -701,7 +701,7 @@ struct FileRun {
 }
 
 /// Re-segmentation of one session with one grid setting.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 struct GridResult {
     /// Span relabelling (empty when unchanged); `None` when it failed.
     relabel: Option<HashMap<SpanRef, SpeakerId>>,
@@ -830,7 +830,9 @@ async fn diarize_file(
         .expect("plan slot poisoned")
         .take()
         .unwrap_or_default();
-    let (refine_ms, grid) = std::mem::take(&mut *refine_slot.lock().expect("refine slot poisoned"));
+    let (refine_ms, grid_run) =
+        std::mem::take(&mut *refine_slot.lock().expect("refine slot poisoned"));
+    let grid = grid_results(grid.len(), grid_run, wav)?;
     Ok(FileRun {
         audio_s,
         chunks,
@@ -839,6 +841,20 @@ async fn diarize_file(
         refine_ms,
         grid,
     })
+}
+
+/// The grid results of one file, which must hold one per setting. The
+/// pipeline stops waiting for the stop-time refine after its timeout; if
+/// the grid had not finished by then, its slot is still empty, and the
+/// file would silently drop out of every grid score.
+fn grid_results(expected: usize, got: Vec<GridResult>, wav: &Path) -> Result<Vec<GridResult>> {
+    ensure!(
+        got.len() == expected,
+        "{}: {} of {expected} --vbx-grid results; the refine wait expired before the grid finished",
+        wav.display(),
+        got.len()
+    );
+    Ok(got)
 }
 
 /// `(chunk index, spans)` per diarizer call, in call order.
@@ -1308,6 +1324,25 @@ mod tests {
         );
         assert!(plan.lock().unwrap().is_some());
         assert_eq!(refine.lock().unwrap().1.len(), 1);
+    }
+
+    #[test]
+    fn missing_grid_results_are_an_error_not_an_empty_slot() {
+        let result = || GridResult {
+            relabel: Some(HashMap::new()),
+            elapsed_ms: 1.0,
+        };
+        let wav = Path::new("/d/rec.wav");
+        assert_eq!(
+            grid_results(2, vec![result(), result()], wav)
+                .unwrap()
+                .len(),
+            2
+        );
+        assert!(grid_results(0, Vec::new(), wav).unwrap().is_empty());
+        // The refine wait expired before the grid wrote its results.
+        let err = grid_results(2, Vec::new(), wav).unwrap_err().to_string();
+        assert!(err.contains("rec.wav") && err.contains("0 of 2"), "{err}");
     }
 
     #[test]
