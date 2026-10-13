@@ -853,6 +853,25 @@ mod tests {
     }
 
     #[test]
+    fn every_catalog_embedder_dispatches_by_its_id() {
+        // A catalog embedder must name its own family: without one it
+        // would silently load through the file-name fallback.
+        let embedders: Vec<String> = model_catalog(std::path::Path::new("/nonexistent"))
+            .into_iter()
+            .filter(|(info, _, _)| info.kind == "embedder")
+            .map(|(info, _, _)| info.id)
+            .collect();
+        assert!(!embedders.is_empty());
+        for id in &embedders {
+            let family = echo_diarize::EmbedderFamily::from_model_id(id)
+                .unwrap_or_else(|| panic!("catalog embedder {id} has no family"));
+            let rel = model_dest_path(id).unwrap_or_else(|| panic!("no dest for {id}"));
+            let path = std::path::Path::new("/data").join(rel);
+            assert_eq!(super::super::embedder_family(&path), family, "{id}");
+        }
+    }
+
+    #[test]
     fn catalog_ids_are_unique() {
         let ids: Vec<String> = model_catalog(std::path::Path::new("/nonexistent"))
             .into_iter()

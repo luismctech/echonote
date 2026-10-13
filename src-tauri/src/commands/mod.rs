@@ -438,8 +438,8 @@ impl AppState {
     /// Build a fresh diarizer for the upcoming session.
     ///
     /// The embedder family, its adapter and its clustering thresholds
-    /// follow the model file name through [`EmbedderFamily`] (see
-    /// [`diarizer_preset`]). The pyannote segmenter is attached
+    /// follow the model's catalog id through [`EmbedderFamily`] (see
+    /// [`embedder_family`] and [`diarizer_preset`]). The pyannote segmenter is attached
     /// automatically when its model file is present on disk.
     pub(crate) fn build_diarizer(
         &self,
@@ -654,6 +654,29 @@ fn preferred_llm_model(root: &Path) -> &'static str {
     "models/llm/Qwen3-14B-Q4_K_M.gguf"
 }
 
+/// Embedder family of the model at `path`, dispatched by its catalog id.
+///
+/// Catalog models are recognised by their exact destination file name
+/// ([`path_to_catalog_id`]) and load the family that id names, so the
+/// adapter and preset follow the model identity, not a substring of its
+/// name. The file-name heuristic remains only for files outside the
+/// catalog: `ECHO_EMBED_MODEL` and the per-session override path accept
+/// any user-supplied ONNX, and refusing those would break existing dev
+/// setups; such loads are logged so a wrong guess is visible.
+fn embedder_family(path: &Path) -> EmbedderFamily {
+    if let Some(family) = path_to_catalog_id(path).and_then(|id| EmbedderFamily::from_model_id(&id))
+    {
+        return family;
+    }
+    let family = EmbedderFamily::from_path(path);
+    tracing::warn!(
+        model = %path.display(),
+        family = ?family,
+        "embedder is not a catalog model; family guessed from its file name"
+    );
+    family
+}
+
 /// Diarizer configuration for the embedder at `path`: the shared
 /// [`EmbedderFamily`] preset, with `similarity_override` (the dev-only
 /// `ECHO_DIAR_SIM_THRESHOLD`) replacing the online similarity threshold.
@@ -661,7 +684,7 @@ fn diarizer_preset(
     path: &Path,
     similarity_override: Option<f32>,
 ) -> (EmbedderFamily, OnlineClusterConfig, OfflineRefineConfig) {
-    let family = EmbedderFamily::from_path(path);
+    let family = embedder_family(path);
     (
         family,
         family.cluster_config(similarity_override),
@@ -977,10 +1000,26 @@ mod embedder_selection_tests {
     }
 
     #[test]
+    fn files_outside_the_catalog_fall_back_to_the_name_heuristic() {
+        for (name, family) in [
+            (
+                "my_campplus_multi.onnx",
+                EmbedderFamily::CamPlusPlusMultilingual,
+            ),
+            ("custom_campplus.onnx", EmbedderFamily::CamPlusPlus),
+            ("something_else.onnx", EmbedderFamily::Eres2Net),
+        ] {
+            let path = Path::new("/elsewhere").join(name);
+            assert_eq!(path_to_catalog_id(&path), None, "{name}");
+            assert_eq!(embedder_family(&path), family, "{name}");
+        }
+    }
+
+    #[test]
     fn diarizer_config_comes_from_the_shared_presets() {
         for rel in [MULTI, CAM_EN, ERES2NET] {
             let path = Path::new("/data").join(rel);
-            let family = EmbedderFamily::from_path(&path);
+            let family = embedder_family(&path);
             let (got_family, cluster, refine) = diarizer_preset(&path, None);
             assert_eq!(got_family, family, "{rel}");
             assert_eq!(cluster, family.cluster_config(None), "{rel}");

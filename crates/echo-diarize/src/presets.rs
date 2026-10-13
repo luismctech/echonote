@@ -1,11 +1,14 @@
 //! Per-embedder diarization presets shared by the desktop shell and the
 //! offline benchmarks.
 //!
-//! The embedder family is chosen from the model file name and decides
-//! the adapter to load, the online clustering thresholds and the offline
-//! refinement threshold. `build_diarizer` in `src-tauri` and
-//! `echo-proto bench der` both build their diarizer from here, so a
-//! benchmark run scores exactly the configuration the app builds.
+//! The embedder family decides the adapter to load, the online
+//! clustering thresholds and the offline refinement threshold. It is
+//! keyed by the model catalog id ([`EmbedderFamily::from_model_id`]);
+//! the file-name heuristic ([`EmbedderFamily::from_file_name`]) is only
+//! the fallback for user-supplied model files the catalog does not know.
+//! `build_diarizer` in `src-tauri` and `echo-proto bench der` both build
+//! their diarizer from here, so a benchmark run scores exactly the
+//! configuration the app builds.
 
 use std::path::Path;
 
@@ -30,10 +33,38 @@ pub enum EmbedderFamily {
 }
 
 impl EmbedderFamily {
-    /// Family implied by a model file name: CAM++ names (`camplusplus`
-    /// or `campplus`) that also contain `zh_en` or `multi` are the
-    /// multilingual CAM++, other CAM++ names the EN CAM++, everything
-    /// else ERes2Net.
+    /// Every family, in catalog order.
+    pub const ALL: [Self; 3] = [
+        Self::CamPlusPlusMultilingual,
+        Self::CamPlusPlus,
+        Self::Eres2Net,
+    ];
+
+    /// Model catalog id of this family's model (the `embedder-*` ids of
+    /// the desktop model catalog).
+    #[must_use]
+    pub const fn model_id(self) -> &'static str {
+        match self {
+            Self::CamPlusPlusMultilingual => "embedder-campplus-multi",
+            Self::CamPlusPlus => "embedder-camplusplus",
+            Self::Eres2Net => "embedder-eres2net",
+        }
+    }
+
+    /// Family of the catalog model `model_id`, or `None` for an id no
+    /// family claims. This is the primary dispatch: a catalog model
+    /// always loads the adapter and preset it was calibrated with,
+    /// whatever its file is called.
+    #[must_use]
+    pub fn from_model_id(model_id: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|f| f.model_id() == model_id)
+    }
+
+    /// Fallback family for a model file outside the catalog, guessed
+    /// from its name: CAM++ names (`camplusplus` or `campplus`) that
+    /// also contain `zh_en` or `multi` are the multilingual CAM++, other
+    /// CAM++ names the EN CAM++, everything else ERes2Net. Prefer
+    /// [`Self::from_model_id`] whenever the catalog id is known.
     #[must_use]
     pub fn from_file_name(file_name: &str) -> Self {
         let cam = file_name.contains("camplusplus") || file_name.contains("campplus");
@@ -46,7 +77,7 @@ impl EmbedderFamily {
         }
     }
 
-    /// Family implied by the file name component of `path`.
+    /// [`Self::from_file_name`] applied to the file name of `path`.
     #[must_use]
     pub fn from_path(path: &Path) -> Self {
         Self::from_file_name(path.file_name().and_then(|n| n.to_str()).unwrap_or(""))
@@ -134,6 +165,35 @@ impl EmbedderFamily {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn catalog_model_ids_dispatch_to_their_family() {
+        assert_eq!(
+            EmbedderFamily::from_model_id("embedder-campplus-multi"),
+            Some(EmbedderFamily::CamPlusPlusMultilingual)
+        );
+        assert_eq!(
+            EmbedderFamily::from_model_id("embedder-camplusplus"),
+            Some(EmbedderFamily::CamPlusPlus)
+        );
+        assert_eq!(
+            EmbedderFamily::from_model_id("embedder-eres2net"),
+            Some(EmbedderFamily::Eres2Net)
+        );
+        for unknown in ["", "embedder-", "embedder-wespeaker", "asr-small"] {
+            assert_eq!(EmbedderFamily::from_model_id(unknown), None, "{unknown}");
+        }
+    }
+
+    #[test]
+    fn every_family_round_trips_through_its_model_id() {
+        for family in EmbedderFamily::ALL {
+            assert_eq!(
+                EmbedderFamily::from_model_id(family.model_id()),
+                Some(family)
+            );
+        }
+    }
 
     #[test]
     fn family_follows_the_file_name() {
