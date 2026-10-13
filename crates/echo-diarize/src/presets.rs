@@ -20,6 +20,10 @@ use crate::embedding::SpeakerEmbedder;
 use crate::eres2net::Eres2NetEmbedder;
 use crate::offline_refine::OfflineRefineConfig;
 
+/// Re-segmentation AHC cut for families without a calibrated value. Equal
+/// to the conservative [`OfflineRefineConfig::default`] merge threshold.
+pub const DEFAULT_RESEGMENT_THRESHOLD: f32 = 0.85;
+
 /// End-of-session refinement the diarizer runs (ADR 0001, D6).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum OfflineRefineMode {
@@ -36,8 +40,9 @@ pub enum OfflineRefineMode {
 }
 
 impl OfflineRefineMode {
-    /// Parse a CLI or environment value: `off`, `merge` / `merge-only`,
-    /// `reseg` / `resegment` (case-insensitive). `None` otherwise.
+    /// Parse a CLI or environment value: `off`, `merge` / `merge-only` /
+    /// `merge_only`, `reseg` / `resegment` (case-insensitive). `None`
+    /// otherwise.
     #[must_use]
     pub fn parse(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
@@ -176,12 +181,28 @@ impl EmbedderFamily {
         }
     }
 
-    /// End-of-session refinement mode for this family. `MergeOnly` for
-    /// every family until re-segmentation is shown to lower DER on the
-    /// held-out sets (ADR 0001, D6).
+    /// End-of-session refinement mode for this family: the
+    /// [`OfflineRefineMode::default`] for every family until
+    /// re-segmentation is shown to lower DER on the held-out sets
+    /// (ADR 0001, D6).
     #[must_use]
     pub fn refine_mode(self) -> OfflineRefineMode {
-        OfflineRefineMode::MergeOnly
+        OfflineRefineMode::default()
+    }
+
+    /// Cosine similarity at which the re-segmenting AHC
+    /// ([`OfflineRefineMode::Resegment`]) stops merging.
+    ///
+    /// Kept apart from the merge-only threshold of
+    /// [`Self::refine_config`] so the two passes can be calibrated
+    /// independently; the values start equal to it (multilingual
+    /// CAM++ 0.50, others [`DEFAULT_RESEGMENT_THRESHOLD`]).
+    #[must_use]
+    pub fn resegment_threshold(self) -> f32 {
+        match self {
+            Self::CamPlusPlusMultilingual => 0.50,
+            Self::CamPlusPlus | Self::Eres2Net => DEFAULT_RESEGMENT_THRESHOLD,
+        }
     }
 
     /// Load the embedder adapter for this family from `path`.
@@ -322,11 +343,27 @@ mod tests {
     }
 
     #[test]
+    fn resegment_threshold_starts_equal_to_the_merge_threshold() {
+        for family in EmbedderFamily::ALL {
+            assert_eq!(
+                family.resegment_threshold(),
+                family.refine_config().merge_threshold,
+                "{family:?}"
+            );
+        }
+        assert_eq!(
+            DEFAULT_RESEGMENT_THRESHOLD,
+            OfflineRefineConfig::default().merge_threshold
+        );
+    }
+
+    #[test]
     fn refine_mode_parses_cli_and_env_spellings() {
         for (text, mode) in [
             ("off", OfflineRefineMode::Off),
             ("merge", OfflineRefineMode::MergeOnly),
             ("merge-only", OfflineRefineMode::MergeOnly),
+            ("Merge_Only", OfflineRefineMode::MergeOnly),
             ("RESEG", OfflineRefineMode::Resegment),
             ("resegment", OfflineRefineMode::Resegment),
         ] {

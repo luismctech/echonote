@@ -22,24 +22,31 @@ use crate::cluster::{OnlineCluster, OnlineClusterConfig};
 use crate::embedding::SpeakerEmbedder;
 use crate::embedding_log::{EmbeddingLog, EmbeddingLogEntry};
 use crate::offline_refine::{refine_speakers, OfflineRefineConfig};
-use crate::presets::OfflineRefineMode;
+use crate::presets::{OfflineRefineMode, DEFAULT_RESEGMENT_THRESHOLD};
 use crate::resegment::{relabel_plan, too_short, AhcReclusterer, OfflineReclusterer};
 
 /// Streaming diarizer backed by a swappable embedder + online cluster.
 ///
 /// In addition to real-time assignment, the diarizer optionally
-/// accumulates every embedding it computes so that an offline AHC
+/// accumulates every embedding it computes so that an offline
 /// refinement pass can be run after the session ends (see
-/// [`OnlineDiarizer::refine_offline`]).  Accumulation is disabled by
-/// default to avoid a memory cost on long recordings when the caller
-/// does not intend to use the offline pass.
+/// [`Diarizer::refine_plan`]). Accumulation is disabled by default to
+/// avoid a memory cost on long recordings when the caller does not
+/// intend to use the offline pass.
+///
+/// The end-of-session pass is chosen by one setting, the effective
+/// [`OfflineRefineMode`] ([`Self::refine_mode`]): the embedding log is
+/// kept exactly when it is not [`OfflineRefineMode::Off`]. The builder
+/// methods only record what was asked, so their call order does not
+/// matter.
 pub struct OnlineDiarizer {
     embedder: Box<dyn SpeakerEmbedder>,
     cluster: OnlineCluster,
-    /// When `Some`, every embedding computed by `assign` is appended
-    /// here with its session time and online-assigned [`SpeakerId`].
-    /// RAM only; never serialised or logged (ADR 0001, D1).
-    embedding_log: Option<EmbeddingLog>,
+    /// Every finite embedding computed by `assign` is appended here with
+    /// its session time and online-assigned [`SpeakerId`] while the
+    /// effective refine mode is not `Off`. RAM only; never serialised
+    /// or logged (ADR 0001, D1).
+    embedding_log: EmbeddingLog,
     /// Optional sub-chunk speaker boundary detector. When present,
     /// each audio chunk is split into speaker-homogeneous segments
     /// before embedding, improving accuracy when multiple speakers
@@ -48,8 +55,13 @@ pub struct OnlineDiarizer {
     /// Configuration [`Diarizer::refine_offline`] runs the offline pass
     /// with. Set by [`Self::with_offline_refinement_config`].
     refine_config: OfflineRefineConfig,
-    /// Which end-of-session pass [`Diarizer::refine_plan`] runs.
-    refine_mode: OfflineRefineMode,
+    /// Mode set with [`Self::with_refine_mode`]; it always wins.
+    explicit_refine_mode: Option<OfflineRefineMode>,
+    /// Legacy opt-in ([`Self::with_offline_refinement`]): selects
+    /// [`OfflineRefineMode::MergeOnly`] when no mode was set.
+    refinement_requested: bool,
+    /// Cosine similarity at which the re-segmenting AHC stops merging.
+    resegment_threshold: f32,
     /// Context the next plain [`Diarizer::assign_spans`] call is logged
     /// under: callers that do not pass a [`ChunkContext`] get
     /// consecutive chunk indices and back-to-back session times.
@@ -66,10 +78,12 @@ impl OnlineDiarizer {
         Self {
             embedder,
             cluster: OnlineCluster::new(cluster_config),
-            embedding_log: None,
+            embedding_log: EmbeddingLog::default(),
             segmenter: None,
             refine_config: OfflineRefineConfig::default(),
-            refine_mode: OfflineRefineMode::default(),
+            explicit_refine_mode: None,
+            refinement_requested: false,
+            resegment_threshold: DEFAULT_RESEGMENT_THRESHOLD,
             next_ctx: ChunkContext::default(),
         }
     }
@@ -92,45 +106,41 @@ impl OnlineDiarizer {
         self
     }
 
-    /// Enable embedding accumulation for the offline refinement pass.
+    /// Request the offline refinement pass: unless
+    /// [`Self::with_refine_mode`] picks another mode (before or after
+    /// this call), the diarizer runs [`OfflineRefineMode::MergeOnly`].
     ///
-    /// When called before the session starts, every embedding computed
-    /// by [`Diarizer::assign`] is stored in memory alongside its
-    /// online-assigned speaker ID.  Call [`Self::refine_offline`] after
-    /// the session ends to re-cluster the accumulated embeddings and
-    /// obtain a merge map.
-    ///
-    /// Not enabled by default because long meetings can accumulate
-    /// several hundred embeddings (192 floats each), adding a modest
-    /// but non-zero memory cost.
+    /// Every embedding computed by [`Diarizer::assign`] is then stored in
+    /// memory alongside its online-assigned speaker ID. Not enabled by
+    /// default because long meetings can accumulate thousands of
+    /// embeddings (192 floats each), adding a modest but non-zero memory
+    /// cost.
     #[must_use]
     pub fn with_offline_refinement(mut self) -> Self {
-        self.embedding_log = Some(EmbeddingLog::default());
+        self.refinement_requested = true;
         self
     }
 
-    /// Choose the end-of-session pass. [`OfflineRefineMode::Off`] also
-    /// stops keeping the embedding log; the other modes enable it (the
-    /// merge threshold comes from [`Self::with_offline_refinement_config`]
-    /// and also cuts the re-segmenting AHC).
+    /// Choose the end-of-session pass. This is the single source of
+    /// truth: [`OfflineRefineMode::Off`] keeps no embedding log even if
+    /// [`Self::with_offline_refinement`] is called later, and the other
+    /// modes keep one.
     #[must_use]
     pub fn with_refine_mode(mut self, mode: OfflineRefineMode) -> Self {
-        self.refine_mode = mode;
-        match mode {
-            OfflineRefineMode::Off => self.embedding_log = None,
-            OfflineRefineMode::MergeOnly | OfflineRefineMode::Resegment => {
-                if self.embedding_log.is_none() {
-                    self.embedding_log = Some(EmbeddingLog::default());
-                }
-            }
-        }
+        self.explicit_refine_mode = Some(mode);
         self
     }
 
-    /// Mode [`Diarizer::refine_plan`] runs (for logs and tests).
+    /// Effective end-of-session mode [`Diarizer::refine_plan`] runs: the
+    /// mode from [`Self::with_refine_mode`], else `MergeOnly` after
+    /// [`Self::with_offline_refinement`], else `Off`.
     #[must_use]
     pub fn refine_mode(&self) -> OfflineRefineMode {
-        self.refine_mode
+        match (self.explicit_refine_mode, self.refinement_requested) {
+            (Some(mode), _) => mode,
+            (None, true) => OfflineRefineMode::MergeOnly,
+            (None, false) => OfflineRefineMode::Off,
+        }
     }
 
     /// Like [`Self::with_offline_refinement`], but the end-of-session
@@ -141,6 +151,20 @@ impl OnlineDiarizer {
     pub fn with_offline_refinement_config(mut self, config: OfflineRefineConfig) -> Self {
         self.refine_config = config;
         self.with_offline_refinement()
+    }
+
+    /// Cosine similarity at which the re-segmenting AHC
+    /// ([`OfflineRefineMode::Resegment`]) stops merging. Independent of
+    /// the merge-only threshold in [`OfflineRefineConfig`]; per-embedder
+    /// values live in [`crate::EmbedderFamily::resegment_threshold`].
+    #[must_use]
+    pub fn with_resegment_threshold(mut self, threshold: f32) -> Self {
+        self.resegment_threshold = threshold;
+        self
+    }
+
+    fn keeps_log(&self) -> bool {
+        self.refine_mode() != OfflineRefineMode::Off
     }
 
     /// Run the offline AHC refinement pass over all accumulated
@@ -156,10 +180,11 @@ impl OnlineDiarizer {
     /// the stored segment records (typically in the stop-recording use
     /// case, before persisting to the database).
     pub fn refine_offline(&self, config: OfflineRefineConfig) -> Vec<(SpeakerId, SpeakerId)> {
-        let Some(ref log) = self.embedding_log else {
+        if !self.keeps_log() {
             return Vec::new();
-        };
-        let records: Vec<(&[f32], SpeakerId)> = log
+        }
+        let records: Vec<(&[f32], SpeakerId)> = self
+            .embedding_log
             .entries()
             .iter()
             .map(|e| (&*e.embedding, e.online_speaker))
@@ -181,7 +206,7 @@ impl OnlineDiarizer {
 
     #[cfg(test)]
     fn log(&self) -> &[EmbeddingLogEntry] {
-        self.embedding_log.as_ref().map_or(&[], |log| log.entries())
+        self.embedding_log.entries()
     }
 
     fn samples_to_ms(&self, samples: usize) -> u32 {
@@ -206,17 +231,19 @@ impl OnlineDiarizer {
             .offset_ms
             .saturating_add(self.samples_to_ms(range.start));
         let end_ms = ctx.offset_ms.saturating_add(self.samples_to_ms(range.end));
-        let id = if let Some(ref mut log) = self.embedding_log {
+        // A non-finite vector (broken model output) is still assigned
+        // online as before, but never logged: it would poison the
+        // end-of-session clustering.
+        let id = if self.keeps_log() && embedding.iter().all(|x| x.is_finite()) {
             let id = self.cluster.assign(embedding.clone());
-            log.push(EmbeddingLogEntry {
-                spans: vec![span],
-                start_ms,
-                end_ms,
-                epoch: ctx.epoch,
+            self.embedding_log.push(EmbeddingLogEntry::new(
+                vec![span],
+                start_ms..end_ms,
+                ctx.epoch,
                 local_speaker,
-                online_speaker: id,
-                embedding: embedding.into_boxed_slice(),
-            });
+                id,
+                embedding.into_boxed_slice(),
+            ));
             id
         } else {
             self.cluster.assign(embedding)
@@ -343,26 +370,22 @@ impl Diarizer for OnlineDiarizer {
     fn reset(&mut self) {
         self.cluster.reset();
         self.next_ctx = ChunkContext::default();
-        if let Some(ref mut log) = self.embedding_log {
-            log.clear();
-        }
+        self.embedding_log.clear();
     }
 
     fn refine_offline(&self) -> Vec<(SpeakerId, SpeakerId)> {
-        // Forward to the inherent helper, which checks whether
-        // [`with_offline_refinement`] was opted into. When it wasn't
-        // (embedding_log is None) the helper returns an empty vec.
+        // Forward to the inherent helper, which returns an empty vec when
+        // the effective refine mode is `Off` (no log is kept).
         self.refine_offline(self.refine_config)
     }
 
     fn refine_plan(&self, budget: RefineBudget) -> Result<RefineOutcome, DomainError> {
-        let Some(ref log) = self.embedding_log else {
-            return Ok(RefineOutcome::Unchanged);
-        };
-        match self.refine_mode {
+        match self.refine_mode() {
             OfflineRefineMode::Off => Ok(RefineOutcome::Unchanged),
             OfflineRefineMode::MergeOnly => {
+                budget.check()?;
                 let merges = self.refine_offline(self.refine_config);
+                budget.check()?;
                 Ok(if merges.is_empty() {
                     RefineOutcome::Unchanged
                 } else {
@@ -370,12 +393,12 @@ impl Diarizer for OnlineDiarizer {
                 })
             }
             OfflineRefineMode::Resegment => {
-                let entries = log.entries();
+                let entries = self.embedding_log.entries();
                 if too_short(entries) {
                     return Ok(RefineOutcome::Unchanged);
                 }
                 let labels = AhcReclusterer {
-                    merge_threshold: self.refine_config.merge_threshold,
+                    threshold: self.resegment_threshold,
                 }
                 .recluster(entries, budget)?;
                 Ok(relabel_plan(entries, &self.cluster.speakers(), &labels))
@@ -543,12 +566,13 @@ mod tests {
         }
     }
 
-    fn diarizer(mode: OfflineRefineMode, merge_threshold: f32) -> OnlineDiarizer {
+    fn diarizer(mode: OfflineRefineMode, threshold: f32) -> OnlineDiarizer {
         OnlineDiarizer::with_defaults(Box::new(StubEmbedder::new()))
             .with_offline_refinement_config(OfflineRefineConfig {
-                merge_threshold,
+                merge_threshold: threshold,
                 ..OfflineRefineConfig::default()
             })
+            .with_resegment_threshold(threshold)
             .with_refine_mode(mode)
     }
 
@@ -588,6 +612,29 @@ mod tests {
         assert_eq!(e.online_speaker, spans[0].speaker_id);
     }
 
+    /// Embedder whose model is broken: every vector is NaN.
+    struct NanEmbedder;
+
+    impl SpeakerEmbedder for NanEmbedder {
+        fn sample_rate_hz(&self) -> u32 {
+            16_000
+        }
+        fn dim(&self) -> usize {
+            4
+        }
+        fn embed(&mut self, _: &[Sample]) -> Result<Option<Vec<f32>>, DomainError> {
+            Ok(Some(vec![f32::NAN; 4]))
+        }
+    }
+
+    #[tokio::test]
+    async fn non_finite_embeddings_are_never_logged() {
+        let mut d = OnlineDiarizer::with_defaults(Box::new(NanEmbedder))
+            .with_refine_mode(OfflineRefineMode::Resegment);
+        d.assign_spans(&long_chunk(0.001)).await.unwrap();
+        assert!(d.log().is_empty());
+    }
+
     #[tokio::test]
     async fn plain_assign_spans_logs_back_to_back_chunks() {
         let mut d = diarizer(OfflineRefineMode::MergeOnly, 0.5);
@@ -608,6 +655,45 @@ mod tests {
         assert!(d.log().is_empty());
         assert_eq!(d.refine_plan(budget()).unwrap(), RefineOutcome::Unchanged);
         assert!(Diarizer::refine_offline(&d).is_empty());
+    }
+
+    #[tokio::test]
+    async fn off_mode_wins_whatever_the_builder_order() {
+        let mut d = OnlineDiarizer::with_defaults(Box::new(StubEmbedder::new()))
+            .with_refine_mode(OfflineRefineMode::Off)
+            .with_offline_refinement_config(OfflineRefineConfig {
+                merge_threshold: -0.5,
+                ..OfflineRefineConfig::default()
+            })
+            .with_offline_refinement();
+        assert_eq!(d.refine_mode(), OfflineRefineMode::Off);
+        feed(&mut d, &[0.001, 0.002, 0.001, 0.002]).await;
+        assert!(d.log().is_empty());
+        assert!(Diarizer::refine_offline(&d).is_empty());
+    }
+
+    #[test]
+    fn refine_mode_is_off_until_requested_and_merge_only_by_opt_in() {
+        let plain = OnlineDiarizer::with_defaults(Box::new(StubEmbedder::new()));
+        assert_eq!(plain.refine_mode(), OfflineRefineMode::Off);
+        let opted =
+            OnlineDiarizer::with_defaults(Box::new(StubEmbedder::new())).with_offline_refinement();
+        assert_eq!(opted.refine_mode(), OfflineRefineMode::MergeOnly);
+    }
+
+    #[tokio::test]
+    async fn resegment_cut_is_independent_of_the_merge_threshold() {
+        // The merge-only threshold would merge everything; the
+        // re-segmenting cut keeps the orthogonal speakers apart.
+        let mut d = OnlineDiarizer::with_defaults(Box::new(StubEmbedder::new()))
+            .with_offline_refinement_config(OfflineRefineConfig {
+                merge_threshold: -0.5,
+                ..OfflineRefineConfig::default()
+            })
+            .with_resegment_threshold(0.5)
+            .with_refine_mode(OfflineRefineMode::Resegment);
+        feed(&mut d, &[0.001, 0.002, 0.001, 0.002, 0.001]).await;
+        assert_eq!(d.refine_plan(budget()).unwrap(), RefineOutcome::Unchanged);
     }
 
     #[tokio::test]

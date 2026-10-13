@@ -208,8 +208,10 @@ pub(crate) async fn run(args: DerArgs) -> Result<()> {
         cluster.max_speakers = max_speakers;
     }
     let mut refine = family.refine_config();
+    let mut resegment_threshold = family.resegment_threshold();
     if let Some(threshold) = args.refine_threshold {
         refine.merge_threshold = threshold;
+        resegment_threshold = threshold;
     }
     let refine_mode = args.refine_mode.unwrap_or_else(|| family.refine_mode());
     let refine_on = refine_mode != OfflineRefineMode::Off;
@@ -231,6 +233,7 @@ pub(crate) async fn run(args: DerArgs) -> Result<()> {
 
         let mut diarizer = OnlineDiarizer::new(family.load(&args.embedder)?, cluster)
             .with_offline_refinement_config(refine)
+            .with_resegment_threshold(resegment_threshold)
             .with_refine_mode(refine_mode);
         if let Some(seg) = &args.segmenter {
             diarizer = diarizer.with_segmenter(Box::new(

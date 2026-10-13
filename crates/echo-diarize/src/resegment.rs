@@ -7,9 +7,15 @@
 //! so a matched speaker keeps its id, slot, colour and user label. Only
 //! unmatched clusters get a fresh id.
 //!
-//! The clustering itself sits behind [`OfflineReclusterer`]. T9 ships
-//! [`AhcReclusterer`] (average-linkage AHC over the log entries); VBx is
-//! the planned second implementation.
+//! The clustering itself sits behind [`OfflineReclusterer`].
+//! [`AhcReclusterer`] (average-linkage AHC over the log entries) is the
+//! current implementation; a VB-HMM (VBx) reclusterer is the planned
+//! second one.
+//!
+//! Non-finite embeddings (a broken model) are not logged in the first
+//! place; as a second line of defence, any non-finite distance counts as
+//! the largest possible one, so such an entry never merges and never
+//! panics the clustering.
 
 use std::time::Instant;
 
@@ -24,11 +30,13 @@ use crate::metrics::max_weight_assignment;
 
 /// Fewer logged entries than this: the session is too short to
 /// re-segment and the refine returns [`RefineOutcome::Unchanged`].
-/// Initial value from ADR 0001 (D7); T10 calibrates it.
+/// Initial value from ADR 0001 (D7), still to be calibrated together
+/// with the VBx reclusterer.
 pub const RESEGMENT_MIN_ENTRIES: usize = 4;
 
 /// Less logged speech than this (milliseconds): too short to
-/// re-segment. Initial value from ADR 0001 (D7); T10 calibrates it.
+/// re-segment. Initial value from ADR 0001 (D7), still to be calibrated
+/// together with the VBx reclusterer.
 pub const RESEGMENT_MIN_SPEECH_MS: u64 = 10_000;
 
 /// At most this many entries take part in the AHC itself (a condensed
@@ -53,8 +61,15 @@ pub(crate) trait OfflineReclusterer {
 pub(crate) struct AhcReclusterer {
     /// Two clusters merge while their average-linkage cosine similarity
     /// is at least this value.
-    pub merge_threshold: f32,
+    pub threshold: f32,
 }
+
+/// Cosine distance of the largest possible value (opposite vectors);
+/// stands in for any non-finite distance.
+const MAX_COSINE_DISTANCE: f32 = 2.0;
+
+/// Deadline checks in per-entry loops happen once every this many entries.
+const DEADLINE_CHECK_EVERY: usize = 256;
 
 impl OfflineReclusterer for AhcReclusterer {
     fn recluster(
@@ -69,7 +84,7 @@ impl OfflineReclusterer for AhcReclusterer {
         let stride = n.div_ceil(AHC_MAX_REPRESENTATIVES);
         let reps: Vec<usize> = (0..n).step_by(stride).collect();
         let rep_emb: Vec<&[f32]> = reps.iter().map(|&i| &*entries[i].embedding).collect();
-        let rep_labels = average_linkage_labels(&rep_emb, self.merge_threshold, budget.deadline)?;
+        let rep_labels = average_linkage_labels(&rep_emb, self.threshold, budget.deadline)?;
         if stride == 1 {
             return Ok(rep_labels);
         }
@@ -86,12 +101,14 @@ impl OfflineReclusterer for AhcReclusterer {
         for c in &mut centroids {
             l2_normalize(c);
         }
-        check_deadline(budget.deadline)?;
         let mut labels = vec![0_usize; n];
         for (r, &i) in reps.iter().enumerate() {
             labels[i] = rep_labels[r];
         }
         for (i, label) in labels.iter_mut().enumerate() {
+            if i % DEADLINE_CHECK_EVERY == 0 {
+                budget.check()?;
+            }
             if i % stride != 0 {
                 *label = nearest(&centroids, &entries[i].embedding);
             }
@@ -100,22 +117,30 @@ impl OfflineReclusterer for AhcReclusterer {
     }
 }
 
+/// Index of the centroid most similar to `v`. A non-finite similarity
+/// ranks below every finite one.
 fn nearest(centroids: &[Vec<f32>], v: &[f32]) -> usize {
     centroids
         .iter()
         .enumerate()
-        .map(|(i, c)| (i, cosine_similarity(c, v)))
+        .map(|(i, c)| (i, 1.0 - cosine_distance(c, v)))
         .max_by(|a, b| a.1.total_cmp(&b.1))
         .map_or(0, |(i, _)| i)
 }
 
-fn check_deadline(deadline: Instant) -> Result<(), DomainError> {
-    if Instant::now() >= deadline {
-        return Err(DomainError::DiarizationFailed(
-            "offline refine deadline exceeded".into(),
-        ));
+/// Cosine distance, with any non-finite value mapped to
+/// [`MAX_COSINE_DISTANCE`] so it never wins a comparison.
+fn cosine_distance(a: &[f32], b: &[f32]) -> f32 {
+    let d = 1.0 - cosine_similarity(a, b);
+    if d.is_finite() {
+        d
+    } else {
+        MAX_COSINE_DISTANCE
     }
-    Ok(())
+}
+
+fn check_deadline(deadline: Instant) -> Result<(), DomainError> {
+    RefineBudget { deadline }.check()
 }
 
 /// Index into a condensed upper-triangular matrix, `i != j`.
@@ -144,9 +169,9 @@ fn average_linkage_labels(
     let mut dist = vec![0.0_f32; n * (n - 1) / 2];
     for i in 0..n {
         for j in (i + 1)..n {
-            dist[tri(n, i, j)] = 1.0 - cosine_similarity(emb[i], emb[j]);
+            dist[tri(n, i, j)] = cosine_distance(emb[i], emb[j]);
         }
-        if i % 256 == 0 {
+        if i % DEADLINE_CHECK_EVERY == 0 {
             check_deadline(deadline)?;
         }
     }
@@ -178,7 +203,13 @@ fn average_linkage_labels(
                     }
                 }
             }
-            let b = best.expect("at least two active clusters");
+            // Unreachable while two clusters are active and every
+            // distance is finite; fail safe instead of panicking.
+            let Some(b) = best else {
+                return Err(DomainError::DiarizationFailed(
+                    "AHC found no merge candidate".into(),
+                ));
+            };
             if Some(b) == prev {
                 break (a, b);
             }
@@ -333,18 +364,17 @@ mod tests {
     }
 
     fn entry(i: u32, speaker: SpeakerId, angle: f32) -> EmbeddingLogEntry {
-        EmbeddingLogEntry {
-            spans: vec![SpanRef {
+        EmbeddingLogEntry::new(
+            vec![SpanRef {
                 chunk_index: i,
                 span_index: 0,
             }],
-            start_ms: i * 3_000,
-            end_ms: (i + 1) * 3_000,
-            epoch: 0,
-            local_speaker: None,
-            online_speaker: speaker,
-            embedding: unit(angle).into_boxed_slice(),
-        }
+            i * 3_000..(i + 1) * 3_000,
+            0,
+            None,
+            speaker,
+            unit(angle).into_boxed_slice(),
+        )
     }
 
     fn far_budget() -> RefineBudget {
@@ -370,15 +400,26 @@ mod tests {
     }
 
     #[test]
+    fn ahc_treats_a_non_finite_embedding_as_its_own_cluster() {
+        let emb = [unit(0.0), vec![f32::NAN, f32::NAN], unit(5.0)];
+        let refs: Vec<&[f32]> = emb.iter().map(Vec::as_slice).collect();
+        let labels = average_linkage_labels(&refs, 0.5, far_budget().deadline).unwrap();
+        assert_eq!(labels, vec![0, 1, 0]);
+    }
+
+    #[test]
+    fn nearest_centroid_never_picks_a_non_finite_centroid() {
+        let centroids = vec![vec![f32::NAN, f32::NAN], unit(0.0), unit(90.0)];
+        assert_eq!(nearest(&centroids, &unit(80.0)), 2);
+    }
+
+    #[test]
     fn expired_deadline_is_an_error_not_a_partial_result() {
         let entries: Vec<_> = (0..8).map(|i| entry(i, SpeakerId::new(), 0.0)).collect();
         let past = RefineBudget {
             deadline: Instant::now() - Duration::from_millis(1),
         };
-        let r = AhcReclusterer {
-            merge_threshold: 0.5,
-        }
-        .recluster(&entries, past);
+        let r = AhcReclusterer { threshold: 0.5 }.recluster(&entries, past);
         assert!(matches!(r, Err(DomainError::DiarizationFailed(_))));
     }
 
@@ -395,11 +436,9 @@ mod tests {
                 }
             })
             .collect();
-        let labels = AhcReclusterer {
-            merge_threshold: 0.5,
-        }
-        .recluster(&entries, far_budget())
-        .unwrap();
+        let labels = AhcReclusterer { threshold: 0.5 }
+            .recluster(&entries, far_budget())
+            .unwrap();
         for (e, &l) in entries.iter().zip(&labels) {
             let expected = if e.online_speaker == a {
                 labels[0]
@@ -495,7 +534,7 @@ mod tests {
         let mut four: Vec<_> = (0..4).map(|i| entry(i, a, 0.0)).collect();
         assert!(!too_short(&four), "4 x 3 s = 12 s of speech");
         for e in &mut four {
-            e.end_ms = e.start_ms + 2_000;
+            e.speech_ms = 2_000;
         }
         assert!(too_short(&four), "4 x 2 s = 8 s < 10 s");
     }

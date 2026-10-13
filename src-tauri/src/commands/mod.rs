@@ -489,6 +489,7 @@ impl AppState {
             similarity_threshold = cluster_cfg.similarity_threshold,
             max_speakers = cluster_cfg.max_speakers,
             refine_threshold = refine_cfg.merge_threshold,
+            resegment_threshold = family.resegment_threshold(),
             refine_mode = ?refine_mode,
             load_ms = started.elapsed().as_millis() as u64,
             "speaker embedder ready"
@@ -498,6 +499,7 @@ impl AppState {
         // (merge-only) or SpeakersReassigned (re-segmentation).
         let mut diarizer = OnlineDiarizer::new(embedder, cluster_cfg)
             .with_offline_refinement_config(refine_cfg)
+            .with_resegment_threshold(family.resegment_threshold())
             .with_refine_mode(refine_mode);
 
         // Attach pyannote segmenter if the model file is installed.

@@ -369,8 +369,9 @@ enum BenchKind {
         /// Override the preset online speaker cap (at least 1).
         #[arg(long, value_parser = bench_der::parse_max_speakers)]
         max_speakers: Option<usize>,
-        /// Override the preset offline refinement merge threshold (a
-        /// cosine similarity in -1..=1).
+        /// Override the preset offline refinement threshold (a cosine
+        /// similarity in -1..=1): the merge-only threshold and the
+        /// re-segmentation AHC cut alike.
         #[arg(long, value_parser = bench_der::parse_cosine_threshold)]
         refine_threshold: Option<f32>,
         /// Skip the end-of-session offline refinement pass (same as

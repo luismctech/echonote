@@ -9,16 +9,18 @@
 //! event or logged: the entry type has no `Serialize` impl and its
 //! `Debug` impl prints the vector's dimension, never its values.
 
+use std::collections::HashMap;
+
 use echo_domain::{SpanRef, SpeakerId};
 
 use crate::embedding::l2_normalize;
 
 /// Hard cap on the number of entries (ADR 0001, D1: about 14 MB at 192
-/// dims). Reaching it compacts the log instead of dropping entries.
+/// dims). The log never holds more; reaching it compacts the log.
 pub const EMBEDDING_LOG_CAP: usize = 16_384;
 
-/// One embedded span (or, after compaction, several adjacent spans of
-/// the same online speaker).
+/// One embedded span (or, after compaction, several spans of the same
+/// online speaker and epoch).
 #[derive(Clone, PartialEq)]
 pub struct EmbeddingLogEntry {
     /// Spans this entry covers, in time order. More than one only after
@@ -28,6 +30,11 @@ pub struct EmbeddingLogEntry {
     pub start_ms: u32,
     /// Session time just past the last sample, in milliseconds.
     pub end_ms: u32,
+    /// Speech the entry's spans hold, in milliseconds. Equal to
+    /// `end_ms - start_ms` for one span; after coalescing entries that
+    /// were not adjacent, the time range also covers other speakers'
+    /// turns, so this sum is what weights the entry.
+    pub speech_ms: u32,
     /// Capture run: 0 at start, +1 after every resume.
     pub epoch: u16,
     /// Window-local segmenter speaker hint; `None` on the whole-chunk
@@ -40,10 +47,35 @@ pub struct EmbeddingLogEntry {
 }
 
 impl EmbeddingLogEntry {
-    /// Logged speech duration in milliseconds.
+    /// Entry for spans covering the session-time range `time` (ms); its
+    /// speech duration is the length of that range.
+    #[must_use]
+    pub fn new(
+        spans: Vec<SpanRef>,
+        time: std::ops::Range<u32>,
+        epoch: u16,
+        local_speaker: Option<u8>,
+        online_speaker: SpeakerId,
+        embedding: Box<[f32]>,
+    ) -> Self {
+        Self {
+            spans,
+            start_ms: time.start,
+            end_ms: time.end,
+            speech_ms: time.end.saturating_sub(time.start),
+            epoch,
+            local_speaker,
+            online_speaker,
+            embedding,
+        }
+    }
+
+    /// Logged speech duration in milliseconds ([`Self::speech_ms`]), not
+    /// the time range: the weight of this entry in every duration-based
+    /// decision of the refine.
     #[must_use]
     pub fn duration_ms(&self) -> u32 {
-        self.end_ms.saturating_sub(self.start_ms)
+        self.speech_ms
     }
 }
 
@@ -54,6 +86,7 @@ impl std::fmt::Debug for EmbeddingLogEntry {
             .field("spans", &self.spans)
             .field("start_ms", &self.start_ms)
             .field("end_ms", &self.end_ms)
+            .field("speech_ms", &self.speech_ms)
             .field("epoch", &self.epoch)
             .field("local_speaker", &self.local_speaker)
             .field("online_speaker", &self.online_speaker)
@@ -76,7 +109,7 @@ impl Default for EmbeddingLog {
 }
 
 impl EmbeddingLog {
-    /// Empty log that compacts when it holds `cap` entries (`cap >= 2`).
+    /// Empty log that never holds more than `cap` entries (`cap >= 2`).
     #[must_use]
     pub fn with_cap(cap: usize) -> Self {
         Self {
@@ -116,24 +149,38 @@ impl EmbeddingLog {
         self.entries.push(entry);
     }
 
-    /// Coalesce entries so the log has room again; no span is dropped.
+    /// Make room for at least one entry. Runs on the streaming assign
+    /// path, so every pass is O(n):
     ///
-    /// First pass: each pair of time-adjacent entries with the same
-    /// online speaker and epoch becomes one entry. When no such pair
-    /// exists (speakers alternate on every span), each entry is paired
-    /// with the next entry of the same speaker and epoch instead, so the
-    /// log still shrinks. A coalesced entry has the duration-weighted
-    /// mean embedding (renormalised), the union of the time ranges and
-    /// the concatenated spans.
+    /// 1. Coalesce each pair of time-adjacent entries with the same
+    ///    online speaker and epoch.
+    /// 2. If the log is still above three quarters of the cap (speakers
+    ///    alternate), pair each remaining entry with the next unpaired
+    ///    entry of the same speaker and epoch, in one pass.
+    /// 3. If nothing could be coalesced (every entry has its own speaker
+    ///    and epoch), drop the oldest entry. Its spans keep their online
+    ///    speaker.
+    ///
+    /// Passes 1 and 2 usually shrink the log by a large fraction, so the
+    /// compaction cost is amortised over many pushes. A coalesced entry
+    /// has the speech-weighted mean embedding (renormalised), the union
+    /// of the time ranges, the summed speech duration and the
+    /// concatenated spans.
     fn compact(&mut self) {
         let before = self.entries.len();
         self.entries = coalesce_adjacent(std::mem::take(&mut self.entries));
-        if self.entries.len() == before {
-            self.entries = coalesce_same_speaker(std::mem::take(&mut self.entries));
+        if self.entries.len() > self.cap / 4 * 3 {
+            self.entries = coalesce_same_run(std::mem::take(&mut self.entries));
+        }
+        let mut dropped = 0_usize;
+        if self.entries.len() >= self.cap {
+            dropped = self.entries.len() + 1 - self.cap;
+            self.entries.drain(..dropped);
         }
         tracing::debug!(
             before,
             after = self.entries.len(),
+            dropped,
             "embedding log compacted"
         );
     }
@@ -155,23 +202,34 @@ fn coalesce_adjacent(entries: Vec<EmbeddingLogEntry>) -> Vec<EmbeddingLogEntry> 
     out
 }
 
-fn coalesce_same_speaker(entries: Vec<EmbeddingLogEntry>) -> Vec<EmbeddingLogEntry> {
-    let mut slots: Vec<Option<EmbeddingLogEntry>> = entries.into_iter().map(Some).collect();
-    let mut out = Vec::with_capacity(slots.len());
-    for i in 0..slots.len() {
-        let Some(a) = slots[i].take() else { continue };
-        let partner =
-            (i + 1..slots.len()).find(|&j| slots[j].as_ref().is_some_and(|b| same_run(&a, b)));
-        match partner.and_then(|j| slots[j].take()) {
-            Some(b) => out.push(coalesce(a, b)),
-            None => out.push(a),
+/// Pair every entry with the next unpaired entry of the same speaker and
+/// epoch. One pass with a map from run to the output position of its
+/// pending (unpaired) entry; a coalesced entry stays at the earlier
+/// entry's position, so the output keeps the order of the first spans.
+fn coalesce_same_run(entries: Vec<EmbeddingLogEntry>) -> Vec<EmbeddingLogEntry> {
+    let mut out: Vec<Option<EmbeddingLogEntry>> = Vec::with_capacity(entries.len());
+    let mut pending: HashMap<(SpeakerId, u16), usize> = HashMap::new();
+    for entry in entries {
+        let key = (entry.online_speaker, entry.epoch);
+        match pending.remove(&key) {
+            Some(at) => {
+                let merged = match out[at].take() {
+                    Some(earlier) => coalesce(earlier, entry),
+                    None => entry,
+                };
+                out[at] = Some(merged);
+            }
+            None => {
+                pending.insert(key, out.len());
+                out.push(Some(entry));
+            }
         }
     }
-    out
+    out.into_iter().flatten().collect()
 }
 
 fn coalesce(a: EmbeddingLogEntry, b: EmbeddingLogEntry) -> EmbeddingLogEntry {
-    let (wa, wb) = (a.duration_ms().max(1) as f32, b.duration_ms().max(1) as f32);
+    let (wa, wb) = (a.speech_ms.max(1) as f32, b.speech_ms.max(1) as f32);
     let mut embedding: Vec<f32> = a
         .embedding
         .iter()
@@ -185,6 +243,7 @@ fn coalesce(a: EmbeddingLogEntry, b: EmbeddingLogEntry) -> EmbeddingLogEntry {
         spans,
         start_ms: a.start_ms.min(b.start_ms),
         end_ms: a.end_ms.max(b.end_ms),
+        speech_ms: a.speech_ms.saturating_add(b.speech_ms),
         epoch: a.epoch,
         local_speaker: if a.local_speaker == b.local_speaker {
             a.local_speaker
@@ -208,18 +267,17 @@ mod tests {
         speaker: SpeakerId,
         v: [f32; 2],
     ) -> EmbeddingLogEntry {
-        EmbeddingLogEntry {
-            spans: vec![SpanRef {
+        EmbeddingLogEntry::new(
+            vec![SpanRef {
                 chunk_index: chunk,
                 span_index: 0,
             }],
-            start_ms,
-            end_ms,
-            epoch: 0,
-            local_speaker: None,
-            online_speaker: speaker,
-            embedding: Box::new(v),
-        }
+            start_ms..end_ms,
+            0,
+            None,
+            speaker,
+            Box::new(v),
+        )
     }
 
     fn chunks(log: &EmbeddingLog) -> Vec<Vec<u32>> {
@@ -258,15 +316,45 @@ mod tests {
     }
 
     #[test]
-    fn entries_of_different_epochs_are_never_coalesced() {
+    fn entries_of_different_epochs_are_never_coalesced_and_the_cap_holds() {
         let a = SpeakerId::new();
         let mut log = EmbeddingLog::with_cap(2);
-        log.push(entry(0, 0, 1_000, a, [1.0, 0.0]));
-        let mut resumed = entry(1, 1_000, 2_000, a, [1.0, 0.0]);
-        resumed.epoch = 1;
-        log.push(resumed);
-        log.push(entry(2, 2_000, 3_000, a, [1.0, 0.0]));
-        assert_eq!(log.len(), 3, "different epochs stay apart");
+        for epoch in 0..3_u16 {
+            let t = u32::from(epoch) * 1_000;
+            let mut e = entry(u32::from(epoch), t, t + 1_000, a, [1.0, 0.0]);
+            e.epoch = epoch;
+            log.push(e);
+        }
+        // Nothing can be coalesced: the oldest entry makes room.
+        let epochs: Vec<_> = log.entries().iter().map(|e| e.epoch).collect();
+        assert_eq!(epochs, vec![1, 2]);
+    }
+
+    #[test]
+    fn the_log_never_exceeds_its_cap() {
+        let speakers: Vec<_> = (0..5).map(|_| SpeakerId::new()).collect();
+        let mut log = EmbeddingLog::with_cap(8);
+        for i in 0..200_u32 {
+            let t = i * 1_000;
+            log.push(entry(i, t, t + 1_000, speakers[i as usize % 5], [1.0, 0.0]));
+            assert!(log.len() <= 8, "len {} after push {i}", log.len());
+        }
+        let spans: usize = log.entries().iter().map(|e| e.spans.len()).sum();
+        assert!(spans > 8, "compaction coalesced instead of dropping");
+    }
+
+    #[test]
+    fn coalescing_non_adjacent_entries_keeps_the_speech_duration() {
+        let (a, b) = (SpeakerId::new(), SpeakerId::new());
+        let mut log = EmbeddingLog::with_cap(4);
+        for (i, s) in [a, b, a, b].into_iter().enumerate() {
+            let t = i as u32 * 1_000;
+            log.push(entry(i as u32, t, t + 1_000, s, [1.0, 0.0]));
+        }
+        log.push(entry(4, 4_000, 5_000, a, [1.0, 0.0]));
+        let first = &log.entries()[0];
+        assert_eq!((first.start_ms, first.end_ms), (0, 3_000), "time span");
+        assert_eq!(first.duration_ms(), 2_000, "speech excludes b's turn");
     }
 
     #[test]
