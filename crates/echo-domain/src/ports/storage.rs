@@ -136,7 +136,11 @@ pub trait MeetingStore: Send + Sync {
     /// `surviving`, then retires the `absorbed` row without ever losing a
     /// user label (ADR 0001, Q1): an unlabelled row is deleted; a labelled
     /// row hands its label to `surviving` when that row has none, and is
-    /// otherwise kept with zero segments. Used by the
+    /// otherwise kept with zero segments. Such a labelled, segment-less
+    /// row stays in [`MeetingStore::list_speakers`] and in the meeting's
+    /// speakers, so consumers must tolerate a speaker that owns no
+    /// segment (the desktop speakers panel shows it at 0 % talk time,
+    /// where it can still be renamed). Used by the
     /// offline diarization refinement pass invoked at the end of a
     /// streaming session to fix online over-splits.
     ///
@@ -163,9 +167,9 @@ pub trait MeetingStore: Send + Sync {
     /// overwritten or destroyed.
     ///
     /// Returns [`DomainError::NotFound`] when the meeting does not
-    /// exist and [`DomainError::Invariant`] when a listed segment or a
-    /// referenced speaker belongs to another meeting; nothing is written
-    /// in either case. Applying the same plan twice leaves the same
+    /// exist and [`DomainError::Invariant`] when a listed segment, a
+    /// referenced speaker, a retired speaker or a created speaker id
+    /// belongs to another meeting; nothing is written in either case. Applying the same plan twice leaves the same
     /// state.
     async fn reassign_speakers(
         &self,
