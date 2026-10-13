@@ -65,6 +65,23 @@ pub struct RefineBudget {
     pub deadline: Instant,
 }
 
+impl RefineBudget {
+    /// `Ok` while the deadline is still ahead.
+    ///
+    /// # Errors
+    ///
+    /// [`DomainError::DiarizationFailed`] once `deadline` has passed: the
+    /// error every refine returns instead of a late or partial plan.
+    pub fn check(&self) -> Result<(), DomainError> {
+        if Instant::now() >= self.deadline {
+            return Err(DomainError::DiarizationFailed(
+                "offline refine deadline exceeded".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Result of the end-of-session refinement.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RefineOutcome {
@@ -243,9 +260,12 @@ pub trait Diarizer: Send + Sync {
     /// when it passes, never a partial plan. Default impl wraps
     /// [`Diarizer::refine_offline`]: [`RefineOutcome::Merges`], or
     /// [`RefineOutcome::Unchanged`] when it found nothing to merge.
+    /// `refine_offline` cannot be interrupted, so the default checks the
+    /// budget before and after it ([`RefineBudget::check`]).
     fn refine_plan(&self, budget: RefineBudget) -> Result<RefineOutcome, DomainError> {
-        let _ = budget;
+        budget.check()?;
         let merges = self.refine_offline();
+        budget.check()?;
         Ok(if merges.is_empty() {
             RefineOutcome::Unchanged
         } else {
@@ -314,6 +334,33 @@ mod tests {
             merges: vec![],
         };
         assert_eq!(d.refine_plan(budget()).unwrap(), RefineOutcome::Unchanged);
+    }
+
+    #[test]
+    fn default_refine_plan_fails_once_the_deadline_has_passed() {
+        let d = OneSpeaker {
+            speaker: Speaker::anonymous(0),
+            merges: vec![(SpeakerId::new(), SpeakerId::new())],
+        };
+        let past = RefineBudget {
+            deadline: Instant::now() - Duration::from_millis(1),
+        };
+        assert!(matches!(
+            d.refine_plan(past),
+            Err(DomainError::DiarizationFailed(_))
+        ));
+    }
+
+    #[test]
+    fn budget_check_passes_before_the_deadline_only() {
+        assert!(budget().check().is_ok());
+        let past = RefineBudget {
+            deadline: Instant::now() - Duration::from_millis(1),
+        };
+        assert!(matches!(
+            past.check(),
+            Err(DomainError::DiarizationFailed(_))
+        ));
     }
 
     #[test]
