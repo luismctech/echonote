@@ -54,7 +54,7 @@
 use echo_domain::{Speaker, SpeakerId};
 use tracing::info;
 
-use crate::embedding::cosine_similarity;
+use crate::embedding::l2_normalize;
 
 /// Configuration for [`refine_speakers`].
 #[derive(Debug, Clone, Copy)]
@@ -88,29 +88,30 @@ impl Default for OfflineRefineConfig {
 
 /// A group of segment-level embeddings the AHC pass treats as one
 /// speaker. Starts as a single online speaker and accretes members as
-/// groups merge. Similarity is computed from the members directly
-/// (average-linkage), so a skewed mean can't drag a merge the way a
-/// centroid-only comparison could.
+/// groups merge.
+///
+/// The group keeps the sum of its members' unit vectors instead of the
+/// members themselves: for unit vectors the mean cosine over every
+/// cross-group pair (average linkage) is `dot(sum_a, sum_b) / (n_a * n_b)`,
+/// so the pass needs O(groups x dim) memory and no pairwise matrix,
+/// whatever the log length (ADR 0001, Q3).
 #[derive(Debug)]
 struct SegmentGroup {
     /// Surviving speaker id — the representative that absorbed ids fold
     /// into.
     id: SpeakerId,
-    /// Compact indices into the participating-embeddings array.
-    members: Vec<usize>,
+    /// Sum of the members' L2-normalised embeddings, in f64 so thousands
+    /// of members add up without visible rounding.
+    sum: Vec<f64>,
+    /// Number of members.
+    count: usize,
 }
 
 /// Mean cosine over every cross-group segment pair (average-linkage).
-/// `sim` is a flat `n × n` symmetric matrix of pairwise cosines.
-fn average_linkage(sim: &[f32], n: usize, a: &[usize], b: &[usize]) -> f32 {
-    debug_assert!(!a.is_empty() && !b.is_empty());
-    let mut total = 0.0_f32;
-    for &x in a {
-        for &y in b {
-            total += sim[x * n + y];
-        }
-    }
-    total / (a.len() * b.len()) as f32
+fn average_linkage(a: &SegmentGroup, b: &SegmentGroup) -> f32 {
+    debug_assert!(a.count > 0 && b.count > 0);
+    let dot: f64 = a.sum.iter().zip(&b.sum).map(|(x, y)| x * y).sum();
+    (dot / (a.count as f64 * b.count as f64)) as f32
 }
 
 /// Re-cluster the accumulated streaming embeddings and return a list
@@ -140,43 +141,37 @@ pub fn refine_speakers<E: AsRef<[f32]>>(
         return Vec::new();
     }
 
-    // Gather the participating embeddings (those whose online speaker
-    // cleared `min_embeddings`) into one compact array, and build one
-    // group per qualifying speaker in slot order so tie-breaks are
-    // deterministic.
-    let mut emb: Vec<&[f32]> = Vec::new();
+    // One group per speaker that cleared `min_embeddings`, in slot order
+    // so tie-breaks are deterministic. Members enter as unit vectors, as
+    // `cosine_similarity` would see them.
     let mut groups: Vec<SegmentGroup> = Vec::new();
     for s in speakers {
-        let start = emb.len();
+        let mut group = SegmentGroup {
+            id: s.id,
+            sum: Vec::new(),
+            count: 0,
+        };
         for (e, sid) in records {
-            if *sid == s.id {
-                emb.push(e.as_ref());
+            if *sid != s.id {
+                continue;
             }
+            let mut unit = e.as_ref().to_vec();
+            l2_normalize(&mut unit);
+            if group.sum.is_empty() {
+                group.sum = vec![0.0; unit.len()];
+            }
+            for (acc, x) in group.sum.iter_mut().zip(&unit) {
+                *acc += f64::from(*x);
+            }
+            group.count += 1;
         }
-        if emb.len() - start >= config.min_embeddings {
-            groups.push(SegmentGroup {
-                id: s.id,
-                members: (start..emb.len()).collect(),
-            });
+        if group.count >= config.min_embeddings && group.count > 0 {
+            groups.push(group);
         }
-        // Speakers below the floor keep the embeddings we pushed in the
-        // array (harmless — they're simply never referenced by a group).
     }
 
     if groups.len() < 2 {
         return Vec::new();
-    }
-
-    // Precompute the symmetric pairwise-cosine matrix once so the AHC
-    // loop only sums cached values.
-    let n = emb.len();
-    let mut sim = vec![0.0_f32; n * n];
-    for i in 0..n {
-        for j in (i + 1)..n {
-            let s = cosine_similarity(emb[i], emb[j]);
-            sim[i * n + j] = s;
-            sim[j * n + i] = s;
-        }
     }
 
     // AHC: greedily merge the highest average-linkage pair above the
@@ -188,7 +183,7 @@ pub fn refine_speakers<E: AsRef<[f32]>>(
         let mut best: Option<(usize, usize, f32)> = None;
         for i in 0..groups.len() {
             for j in (i + 1)..groups.len() {
-                let link = average_linkage(&sim, n, &groups[i].members, &groups[j].members);
+                let link = average_linkage(&groups[i], &groups[j]);
                 if link >= config.merge_threshold && best.as_ref().is_none_or(|&(_, _, b)| link > b)
                 {
                     best = Some((i, j, link));
@@ -199,7 +194,7 @@ pub fn refine_speakers<E: AsRef<[f32]>>(
         let Some((i, j, link)) = best else { break };
 
         // Keep the larger group (earlier slot on tie, since i < j).
-        let (keep, absorb) = if groups[i].members.len() >= groups[j].members.len() {
+        let (keep, absorb) = if groups[i].count >= groups[j].count {
             (i, j)
         } else {
             (j, i)
@@ -208,9 +203,12 @@ pub fn refine_speakers<E: AsRef<[f32]>>(
         let absorbed_id = groups[absorb].id;
         let surviving_id = groups[keep].id;
 
-        let absorbed_members = std::mem::take(&mut groups[absorb].members);
-        groups[keep].members.extend(absorbed_members);
-        groups.remove(absorb);
+        let absorbed = groups.remove(absorb);
+        let keep = if absorb < keep { keep - 1 } else { keep };
+        for (acc, x) in groups[keep].sum.iter_mut().zip(&absorbed.sum) {
+            *acc += x;
+        }
+        groups[keep].count += absorbed.count;
 
         info!(
             absorbed = %absorbed_id,

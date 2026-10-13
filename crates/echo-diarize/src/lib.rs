@@ -46,6 +46,7 @@ pub use cam_plus_plus::{
 };
 pub use cluster::{OnlineCluster, OnlineClusterConfig};
 pub use embedding::{cosine_similarity, l2_normalize, SpeakerEmbedder};
+pub use embedding_log::EMBEDDING_LOG_CAP;
 pub use eres2net::{
     Eres2NetConfig, Eres2NetEmbedder, ERES2NET_EMBED_DIM, ERES2NET_FBANK_DIM, ERES2NET_MIN_SAMPLES,
     ERES2NET_SAMPLE_RATE, ERES2NET_TARGET_FRAMES,
