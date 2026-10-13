@@ -75,14 +75,12 @@ pub struct OfflineRefineConfig {
 impl Default for OfflineRefineConfig {
     fn default() -> Self {
         Self {
-            // 0.85 matches the online `similarity_threshold` used for
-            // CAM++ in production. Lower values (we used 0.75 originally)
-            // collapse distinct speakers when their full-session means
-            // run close — typical of video-style input where every
-            // voice shares the same mic/room/codec path and cosines
-            // pile up in the 0.80+ band. Real in-room speakers
-            // typically have means far apart (~0.50 cross), so this
-            // doesn't hurt them either.
+            // Conservative fallback for embedders without a calibrated
+            // preset (EN CAM++, ERes2Net): it matches the EN CAM++ online
+            // threshold and rarely merges. Calibrated families override
+            // it in `echo_diarize::presets` (multilingual CAM++: 0.50,
+            // DER-calibrated on held-out data; at 0.85 the pass never
+            // merged anything in the T6 benchmark).
             merge_threshold: 0.85,
             min_embeddings: 2,
         }
