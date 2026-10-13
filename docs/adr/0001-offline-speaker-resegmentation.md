@@ -346,9 +346,11 @@ flowchart LR
 2. **Q2. Show the user a diff?** Resolved 2026-10-13: show a one-line notice after stop
    ("speaker attribution refined: N segments moved, M speakers merged") without undo. Nothing
    extra is persisted; the notice is built from the `SpeakersReassigned` payload.
-3. **Q3. Extra window embeddings.** Should T10 be allowed to compute extra embeddings (for
-   example 1.5 s windows inside spans longer than 3 s) during the session, roughly doubling the
-   embed cost (CAM++ about 75 ms per window), to give VBx a denser sequence?
+3. **Q3. Extra window embeddings.** Resolved 2026-10-13: allowed. T10 may compute extra
+   embeddings (for example 1.5 s windows inside spans longer than 3 s) during the session, at
+   roughly twice the embed cost. Condition: T10 must also bound the merge-only refine to at most
+   4 096 representatives, like the AHC/VBx path, so peak memory stays at about 35 MB for the log
+   plus about 35 MB transient at stop, regardless of meeting length or window density.
 4. **Q4. Default flip criterion.** What DER gain on the held-out sets justifies making
    `Resegment` the default? For example, a weighted DER at least 0.5 points lower and an
    over-count no worse than today.
