@@ -36,6 +36,7 @@ Sources:
 The VoxBlink2 models are **no-go for shipping**. They were not downloaded or benchmarked: the
 NC licence allows non-commercial use only, and an evaluation to choose a model for this product
 is not clearly non-commercial. Whether the project counts as non-commercial is the user's call.
+(The user later authorized a local, evaluation-only run; see "VoxBlink2 local evaluation" below.)
 
 Instead, two permissive WeSpeaker models were measured: ResNet34-LM (6.6 M parameters, about the
 size of CAM++) and ResNet293-LM (Vox1-O EER 0.447 %, close to VoxBlink2).
@@ -143,9 +144,116 @@ If a WeSpeaker model is added later (for T11 hosting): ResNet34-LM is
 SHA-256 `7bb2f06e9df17cdf1ef14ee8a15ab08ed28e8d0ef5054ee135741560df2ec068`, 26,530,309 B, CC BY
 4.0 (attribution required).
 
+## VoxBlink2 local evaluation (evaluation only, not shippable)
+
+Date: 2026-10-13. The user authorized a local, evaluation-only benchmark of the VoxBlink2 models,
+as a reference for how much DER a stronger embedder could gain. It changes nothing in the
+verdict above.
+
+**Licence.** The weights follow the VoxBlink2 dataset licence, **CC BY-NC-SA 4.0**
+(non-commercial, share-alike). They were evaluated locally with the user's authorization only.
+The weights are not redistributed, committed, added to the model catalog or shipped, and no
+adapter or preset was added. They stay in the session scratchpad (`t7b-voxblink2-dl/`).
+
+### Sources
+
+The official WeSpeaker ONNX exports, listed in
+<https://github.com/wenet-e2e/wespeaker/blob/master/docs/pretrained.md> (VoxBlink2 rows). The
+`wenet.org.cn/downloads` links in that table failed TLS verification (expired certificate), so
+the files came from the same official store that WeSpeaker's own `wespeaker/cli/hub.py` uses: the
+ModelScope dataset `wenet/wespeaker_pretrained_models`
+(`https://modelscope.cn/api/v1/datasets/wenet/wespeaker_pretrained_models/oss/tree`, Aliyun OSS).
+No SHA-256 is published. Each download matched the listed size and the server's
+`x-oss-hash-crc64ecma` checksum (recomputed locally).
+
+| File | Training | Size | SHA-256 |
+|---|---|---|---|
+| `voxblink2_samresnet34.onnx` | VoxBlink2 | 100,914,998 B | `1564bb8490c7f7759e293bbc2b2d326b5dc2b79f24e47a0d57f4a24064a58ad9` |
+| `voxblink2_samresnet34_ft.onnx` | VoxBlink2, then fine-tuned on VoxCeleb2 | 100,865,597 B | `33af8affe6191b1ebd196d2b56e22c2934104cd2764abfdbdd954d3a934eb2a1` |
+
+Both are opset 14 with input `feats [B, T, 80]` (dynamic T) and output `embs [B, 256]` (SimAM
+attention, ASP pooling). Both load and run unmodified in tract 0.22.4 through the CAM++ adapter
+(300 frames, centre crop). The training config uses the same Kaldi fbank as the other WeSpeaker
+models, so the runs used the ×32768 waveform scale through the same throw-away spike build as
+above (`ECHO_SPIKE_WAVE_SCALE=32768`).
+
+### Dev grid (cap 8)
+
+Same harness, dev sets and objective as the ResNet34-LM grid: online 0.40-0.65 at refine 0.40,
+then refine 0.30 and 0.50 at online 0.45-0.60 (plus 0.65 / 0.50 for the pretrained model, whose
+best sat on the grid edge). 15 configurations for the pretrained model and 14 for `_ft`, both
+sets each. Best rows:
+
+| Model | Online | Refine | ES DER | ES est. / true spk | Vox DER | Vox est. / true spk | Weighted |
+|---|---|---|---|---|---|---|---|
+| SimAM-R34 `_ft` | **0.55** | **0.40** | **4.02** | 6.80 / 3.45 | **12.83** | 7.17 / 3.67 | **6.96** |
+| SimAM-R34 `_ft` | 0.55 | 0.50 | 4.03 | 6.85 / 3.45 | 12.86 | 7.25 / 3.67 | 6.97 |
+| SimAM-R34 `_ft` | 0.50 | 0.50 | 5.12 | 6.25 / 3.45 | 12.86 | 7.00 / 3.67 | 7.70 |
+| SimAM-R34 pretrained | **0.65** | **0.50** | 4.97 | 6.75 / 3.45 | 13.15 | 6.92 / 3.67 | 7.70 |
+| SimAM-R34 pretrained | 0.60 | 0.50 | 5.57 | 6.65 / 3.45 | 13.12 | 6.50 / 3.67 | 8.09 |
+| SimAM-R34 pretrained | 0.45 | 0.50 | 5.30 | 4.30 / 3.45 | 14.57 | 4.83 / 3.67 | 8.39 |
+| ResNet34-LM (reference) | 0.55 | 0.40 | 4.45 | 7.20 / 3.45 | 14.23 | 7.00 / 3.67 | 7.71 |
+| Multilingual CAM++ preset (reference) | 0.45 | 0.50 | 5.85 | 4.75 / 3.45 | 16.26 | 5.42 / 3.67 | 9.32 |
+
+Refine 0.30 over-merges on both models (weighted 13.7-17.8). The pretrained model's best is on
+the edge of the authorized range (0.65); it was not extended further.
+
+### Test (untouched T6 sets, one run each)
+
+| Embedder (online / cap / refine) | Set | DER % | Miss % | FA % | Conf % | Est. / true spk | Count exact | Median file DER % |
+|---|---|---|---|---|---|---|---|---|
+| Multilingual CAM++ (0.45 / 8 / 0.50) | `mls_es` | 7.31 | 2.94 | 0.70 | 3.67 | 4.15 / 2.80 | 3/20 | 6.30 |
+| ResNet34-LM (0.55 / 8 / 0.40) | `mls_es` | 6.31 | 2.94 | 0.70 | 2.68 | 7.30 / 2.80 | 0/20 | 7.16 |
+| SimAM-R34 pretrained (0.65 / 8 / 0.50) | `mls_es` | 6.15 | 2.93 | 0.71 | 2.50 | 7.05 / 2.80 | 0/20 | 6.57 |
+| SimAM-R34 `_ft` (0.55 / 8 / 0.40) | `mls_es` | **5.92** | 2.95 | 0.71 | 2.25 | 6.85 / 2.80 | 0/20 | 6.53 |
+| Multilingual CAM++ (0.45 / 8 / 0.50) | `voxconverse` | **5.56** | 2.53 | 0.92 | 2.11 | 4.67 / 3.33 | 2/12 | 1.80 |
+| ResNet34-LM (0.55 / 8 / 0.40) | `voxconverse` | 7.65 | 2.58 | 0.87 | 4.21 | 5.75 / 3.33 | 1/12 | 1.95 |
+| SimAM-R34 pretrained (0.65 / 8 / 0.50) | `voxconverse` | 8.61 | 2.70 | 0.79 | 5.12 | 5.67 / 3.33 | 1/12 | 4.91 |
+| SimAM-R34 `_ft` (0.55 / 8 / 0.40) | `voxconverse` | 7.50 | 2.62 | 0.85 | 4.04 | 5.83 / 3.33 | 1/12 | 2.00 |
+
+Weighted test DER, (2 × ES + Vox) / 3:
+
+| Embedder | Weighted test DER |
+|---|---|
+| SimAM-R34 `_ft` | **6.45** |
+| Multilingual CAM++ | 6.73 |
+| ResNet34-LM | 6.76 |
+| SimAM-R34 pretrained | 6.97 |
+
+The ResNet34-LM test runs were re-scored with the same script and reproduce the numbers above.
+
+### Cost
+
+Same method as the cost table above (isolated, Apple M1 Pro, `mls_esdev_conv00` + `conv01`,
+642 s, 227 embeddings of 3 s windows, `ECHO_SPIKE_TIMING`):
+
+| Embedder | Embed latency mean / p95 | Embed RTF | Whole pipeline RTF |
+|---|---|---|---|
+| Multilingual CAM++ | 75.1 / 80.7 ms | 0.027 | 0.040 |
+| ResNet34-LM | 59.8 / 65.6 ms | 0.021 | 0.034 |
+| SimAM-R34 pretrained | 160.9 / 182.1 ms | 0.057 | 0.071 |
+| SimAM-R34 `_ft` | 156.9 / 181.7 ms | 0.055 | 0.069 |
+
+### What the numbers imply
+
+- The ceiling from a stronger embedder alone is small. The best VoxBlink2 model (`_ft`) gains
+  0.28 points of weighted test DER over the calibrated CAM++ (6.45 vs 6.73): 1.4 points better on
+  Spanish, 1.9 points worse on VoxConverse. The pretrained model (without VoxCeleb2 fine-tuning)
+  is no better than CAM++.
+- The Vox1-O EER gap (0.415 % vs 0.803 %) does not carry over to DER in this pipeline. Confusion
+  falls on Spanish (3.67 → 2.25) but rises on VoxConverse (2.11 → 4.04), and miss + false alarm
+  (about 3.6 % on Spanish) do not depend on the embedder.
+- Like ResNet34-LM, the VoxBlink2 models only win at online thresholds that inflate the speaker
+  count (6.85 estimated vs 2.80 true on Spanish, 0/20 exact; CAM++ 4.15, 3/20). The DER gain comes
+  with more spurious short speakers in the transcript.
+- They cost about twice CAM++ per window (157 vs 75 ms), affordable for live use but not free.
+- Even if the licence allowed it, the gain would not justify the swap. Clustering (T10 VBx +
+  PLDA, speaker-count control) remains the larger lever. This result also gives T10 a reference:
+  a strong embedder alone reaches about 6.45 weighted test DER on these sets.
+
 ## Next
 
 - T10 (VBx + PLDA) remains the lever for the speaker over-count. The calibrated CAM++ already
   over-counts by about 1.3 speakers; both ResNets over-count more.
-- If the user decides the project may evaluate NC models, VoxBlink2 SimAM-ResNet34 could be
-  measured locally with this harness for reference, still without shipping it.
+- The VoxBlink2 reference was measured locally (section above); it does not reopen the
+  embedder choice.
