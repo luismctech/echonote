@@ -508,11 +508,12 @@ impl AppState {
         }
 
         // Attach pyannote segmenter if the model file is installed.
-        if self.seg_model_path.exists() {
-            match PyannoteSegmenter::new(&self.seg_model_path) {
+        let seg_path = session_segmenter_path(&self.data_root, &self.seg_model_path);
+        if seg_path.exists() {
+            match PyannoteSegmenter::new(&seg_path) {
                 Ok(seg) => {
                     tracing::info!(
-                        model = %self.seg_model_path.display(),
+                        model = %seg_path.display(),
                         "pyannote segmenter attached — sub-chunk speaker boundaries enabled"
                     );
                     diarizer = diarizer.with_segmenter(Box::new(seg));
@@ -520,7 +521,7 @@ impl AppState {
                 Err(e) => {
                     tracing::warn!(
                         error = %e,
-                        model = %self.seg_model_path.display(),
+                        model = %seg_path.display(),
                         "failed to load pyannote segmenter; continuing without sub-chunk segmentation"
                     );
                 }
@@ -543,8 +544,16 @@ impl AppState {
             );
             return Ok(None);
         }
+        let current = models::is_current_silero_vad(&self.vad_model_path);
+        if !current {
+            tracing::warn!(
+                vad_model = %self.vad_model_path.display(),
+                "Silero VAD file is not the v6.2 build this version expects; \
+                 using it anyway. Download the update from the Models panel."
+            );
+        }
         let vad_path = self.vad_model_path.clone();
-        let arc = self
+        let loaded = self
             .vad
             .get_or_init(|| async move {
                 let started = std::time::Instant::now();
@@ -565,8 +574,8 @@ impl AppState {
                 );
                 Ok::<SileroVad, IpcError>(loaded)
             })
-            .await?;
-        Ok(Some(arc))
+            .await;
+        vad_load_outcome(current, loaded, &self.vad_model_path)
     }
 
     /// Lazily load the whisper transcriber.
@@ -754,19 +763,64 @@ fn preferred_embed_model(root: &Path) -> &'static str {
     "models/embedder/eres2net_en_voxceleb.onnx"
 }
 
-/// Prefer the tract-compatible (InstanceNorm-decomposed) pyannote
-/// segmenter export when present, falling back to the upstream sherpa
-/// export. The upstream file does NOT load in tract 0.22
-/// (`InstanceNormalization` fails `into_optimized()`), so with only the
-/// upstream file installed `build_diarizer` logs a warning and runs the
+/// Tract-compatible (InstanceNorm-decomposed) pyannote segmenter: what the
+/// catalog downloads and `scripts/download-models.sh` produces.
+const SEGMENTER_TRACT: &str = "models/segmenter/pyannote_segmentation_3_tract.onnx";
+/// Upstream sherpa export. It does NOT load in tract 0.22
+/// (`InstanceNormalization` fails `into_optimized()`), so with only this
+/// file installed `build_diarizer` logs a warning and runs the
 /// whole-chunk path. See `scripts/patch-pyannote-segmenter.py`.
+const SEGMENTER_UPSTREAM: &str = "models/segmenter/pyannote_segmentation_3.onnx";
+
+/// Prefer the tract-compatible pyannote segmenter, fall back to the
+/// upstream export when it is the only file installed, and otherwise
+/// expect the tract file at the catalog destination so a download made
+/// after startup is used by the next session.
 fn preferred_segmenter_model(root: &Path) -> &'static str {
-    const TRACT: &str = "models/segmenter/pyannote_segmentation_3_tract.onnx";
-    const UPSTREAM: &str = "models/segmenter/pyannote_segmentation_3.onnx";
-    if root.join(TRACT).exists() {
-        TRACT
+    if !root.join(SEGMENTER_TRACT).exists() && root.join(SEGMENTER_UPSTREAM).exists() {
+        SEGMENTER_UPSTREAM
     } else {
-        UPSTREAM
+        SEGMENTER_TRACT
+    }
+}
+
+/// Segmenter path for a new session. The startup path is kept, except
+/// when it is the default upstream export and the tract file has been
+/// installed since (e.g. downloaded from the Models panel): then the
+/// tract file wins. An explicit `ECHO_SEG_MODEL` path is never replaced.
+fn session_segmenter_path(root: &Path, configured: &Path) -> PathBuf {
+    let tract = root.join(SEGMENTER_TRACT);
+    if configured == root.join(SEGMENTER_UPSTREAM) && tract.exists() {
+        tract
+    } else {
+        configured.to_path_buf()
+    }
+}
+
+/// Decide what a VAD load result means for the session.
+///
+/// `current` says whether the file is the pinned Silero v6.2 build
+/// ([`models::is_current_silero_vad`]). An outdated file that fails to
+/// load (e.g. an old export with a baked 512-sample input) must not block
+/// recording: it degrades to the RMS gate with a warning. A failing
+/// current build stays an error.
+fn vad_load_outcome<T>(
+    current: bool,
+    loaded: Result<T, IpcError>,
+    path: &Path,
+) -> Result<Option<T>, IpcError> {
+    match loaded {
+        Ok(model) => Ok(Some(model)),
+        Err(e) if !current => {
+            tracing::warn!(
+                vad_model = %path.display(),
+                error = %e.message,
+                "outdated Silero VAD failed to load; falling back to RMS gate. \
+                 Download the update from the Models panel."
+            );
+            Ok(None)
+        }
+        Err(e) => Err(e),
     }
 }
 
@@ -1086,5 +1140,65 @@ mod embedder_selection_tests {
                 "src-tauri/src/commands/mod.rs builds `{needle}` by hand"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod model_upgrade_tests {
+    use super::llm_selection_tests::Root;
+    use super::*;
+
+    const TRACT: &str = "models/segmenter/pyannote_segmentation_3_tract.onnx";
+    const UPSTREAM: &str = "models/segmenter/pyannote_segmentation_3.onnx";
+
+    #[test]
+    fn a_fresh_install_expects_the_tract_segmenter_the_catalog_downloads() {
+        // Resolved at startup: with nothing installed the path must be the
+        // catalog destination, so a download is picked up without restart.
+        let root = Root::new("seg-none");
+        assert_eq!(preferred_segmenter_model(&root.0), TRACT);
+    }
+
+    #[test]
+    fn the_upstream_segmenter_is_used_only_when_it_is_all_there_is() {
+        let root = Root::new("seg-upstream");
+        root.install(UPSTREAM);
+        assert_eq!(preferred_segmenter_model(&root.0), UPSTREAM);
+        root.install(TRACT);
+        assert_eq!(preferred_segmenter_model(&root.0), TRACT);
+    }
+
+    #[test]
+    fn a_tract_segmenter_downloaded_after_startup_replaces_the_upstream_one() {
+        let root = Root::new("seg-late");
+        root.install(UPSTREAM);
+        let configured = root.0.join(UPSTREAM);
+        assert_eq!(session_segmenter_path(&root.0, &configured), configured);
+        root.install(TRACT);
+        assert_eq!(
+            session_segmenter_path(&root.0, &configured),
+            root.0.join(TRACT)
+        );
+        // An explicit override (ECHO_SEG_MODEL) is never replaced.
+        let custom = root.0.join("custom.onnx");
+        assert_eq!(session_segmenter_path(&root.0, &custom), custom);
+    }
+
+    #[test]
+    fn an_outdated_vad_that_fails_to_load_falls_back_to_the_rms_gate() {
+        let path = Path::new("/data/models/vad/silero_vad.onnx");
+        let failed = || Err::<u8, _>(IpcError::new(ErrorCode::Vad, "optimize: shape"));
+        assert!(matches!(vad_load_outcome(false, failed(), path), Ok(None)));
+        // A pinned v6.2 build that fails is a real error, not an upgrade gap.
+        assert!(vad_load_outcome(true, failed(), path).is_err());
+        // An outdated build that still loads keeps working.
+        assert!(matches!(
+            vad_load_outcome(false, Ok(7_u8), path),
+            Ok(Some(7))
+        ));
+        assert!(matches!(
+            vad_load_outcome(true, Ok(7_u8), path),
+            Ok(Some(7))
+        ));
     }
 }

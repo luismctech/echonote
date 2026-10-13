@@ -140,11 +140,11 @@ All processing happens locally using open-source models:
 | [Qwen 3](https://huggingface.co/Qwen) | Summaries & chat | 2.6 – 9.2 GB |
 | [Silero VAD](https://github.com/snakers4/silero-vad) v6.2 | Voice activity detection | ~1.5 MB |
 | [3D-Speaker](https://github.com/modelscope/3D-Speaker) | Speaker embeddings (ERes2Net / CAM++) | ~26 MB |
-| [pyannote](https://github.com/pyannote/pyannote-audio) | Speaker segmentation | ~17 MB |
+| [pyannote](https://github.com/pyannote/pyannote-audio) segmentation 3.0 | Speaker segmentation | ~6 MB |
 
 Models are downloaded on-demand from the built-in model manager (**Settings → Models**).
 
-**Third-party models.** Silero VAD is © Silero Team, released under the [MIT License](https://github.com/snakers4/silero-vad/blob/master/LICENSE); `scripts/inline-silero-vad.py` inlines its 16 kHz branch for tract ONNX inference.
+**Third-party models.** Silero VAD is © Silero Team, released under the [MIT License](https://github.com/snakers4/silero-vad/blob/master/LICENSE); `scripts/inline-silero-vad.py` inlines its 16 kHz branch for tract ONNX inference. The [pyannote segmentation-3.0](https://huggingface.co/pyannote/segmentation-3.0) model is released under the MIT License; EchoNote distributes a tract-compatible rewrite of its [sherpa-onnx export](https://huggingface.co/csukuangfj/sherpa-onnx-pyannote-segmentation-3-0) produced by `scripts/patch-pyannote-segmenter.py`. Both rewritten files are assets of release v0.6.0 (see `docs/releases/v0.6.0-model-assets.md`).
 
 **Third-party code.** The VBx speaker re-segmentation (`crates/echo-diarize/src/vbx.rs`) is a Rust port of [BUTSpeechFIT VBx](https://github.com/BUTSpeechFIT/VBx), © Lukas Burget and Mireia Diez, released under the [Apache License 2.0](crates/echo-diarize/third_party/VBx-LICENSE).
 

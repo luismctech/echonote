@@ -28,12 +28,55 @@ pub struct ModelInfo {
     pub size_bytes: u64,
 }
 
+/// SHA-256 of the Silero VAD v6.2.3 build the adapter expects
+/// (`scripts/inline-silero-vad.py` over upstream commit `5cd79456`).
+pub(crate) const SILERO_VAD_V6_2_SHA256: &str =
+    "76d1667a4962c0eac51c41ba440b188bb4726293f356ec9bec780f7d1a6f08b8";
+
+/// Byte size of that build; checked before hashing.
+pub(crate) const SILERO_VAD_V6_2_BYTES: u64 = 1_557_280;
+
+/// Whether `path` holds exactly `bytes` bytes whose SHA-256 is `sha`.
+///
+/// The size is compared first, so a file of another size is rejected
+/// without being read. Any I/O error counts as a mismatch.
+pub(crate) fn file_matches_pin(path: &std::path::Path, bytes: u64, sha: &str) -> bool {
+    use sha2::{Digest, Sha256};
+    match std::fs::metadata(path) {
+        Ok(meta) if meta.is_file() && meta.len() == bytes => {}
+        _ => return false,
+    }
+    let Ok(data) = std::fs::read(path) else {
+        return false;
+    };
+    let digest = Sha256::digest(&data);
+    let actual = digest
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>();
+    actual == sha
+}
+
+/// Whether the Silero VAD file at `path` is the pinned v6.2 build.
+///
+/// The VAD keeps the same on-disk name across versions, so presence
+/// alone cannot tell the v5 file of earlier releases from v6.2. The
+/// catalog reports an outdated file as not installed (the Models panel
+/// then offers the update) and the shell warns when it has to load one.
+pub(crate) fn is_current_silero_vad(path: &std::path::Path) -> bool {
+    file_matches_pin(path, SILERO_VAD_V6_2_BYTES, SILERO_VAD_V6_2_SHA256)
+}
+
 /// Catalog of models the app can download, with their HF URLs and
 /// expected sizes. Only includes models the priority resolvers know.
 ///
 /// Each entry carries an optional SHA-256 hex digest. When present,
 /// downloads are verified after completion and rejected on mismatch.
 /// Populate hashes by running `shasum -a 256 <model_file>`.
+///
+/// Model builds EchoNote produces itself (inlined Silero VAD,
+/// tract-compatible segmenter) are assets of release v0.6.0; see
+/// `docs/releases/v0.6.0-model-assets.md` for provenance and upload steps.
 fn model_catalog(root: &std::path::Path) -> Vec<(ModelInfo, &'static str, Option<&'static str>)> {
     let present = |rel: &str| root.join(rel).exists();
 
@@ -180,13 +223,15 @@ fn model_catalog(root: &std::path::Path) -> Vec<(ModelInfo, &'static str, Option
                 label: "Silero VAD".into(),
                 description: "Detects when someone is speaking".into(),
                 kind: "vad".into(),
-                present: present("models/vad/silero_vad.onnx"),
-                size_bytes: 1_200_000,
+                present: is_current_silero_vad(&root.join("models/vad/silero_vad.onnx")),
+                size_bytes: SILERO_VAD_V6_2_BYTES,
             },
-            // Pre-simplified ONNX (If nodes inlined for 16 kHz, BASIC-optimised).
-            // The upstream file has ONNX `If` ops that tract cannot execute.
-            "https://github.com/luismctech/echonote/releases/download/v0.2.1/silero_vad.onnx",
-            Some("d224cf508fbaf8bb1a49f333120b536dbaa1ed2b0ab49bed059d6e44a4f8305c"),
+            // Silero VAD v6.2.3 with its 16 kHz branch inlined: the upstream
+            // file dispatches through an ONNX `If` that tract cannot execute.
+            // Presence is pinned to this build so v5 files from earlier
+            // releases show up as an available update.
+            "https://github.com/luismctech/echonote/releases/download/v0.6.0/silero_vad_v6_2.onnx",
+            Some(SILERO_VAD_V6_2_SHA256),
         ),
         (
             ModelInfo {
@@ -230,11 +275,14 @@ fn model_catalog(root: &std::path::Path) -> Vec<(ModelInfo, &'static str, Option
                 label: "pyannote 3.0".into(),
                 description: "Detects speaker changes in conversation".into(),
                 kind: "segmenter".into(),
-                present: present("models/segmenter/pyannote_segmentation_3.onnx"),
-                size_bytes: 5_992_913,
+                present: present("models/segmenter/pyannote_segmentation_3_tract.onnx"),
+                size_bytes: 5_988_123,
             },
-            "https://huggingface.co/csukuangfj/sherpa-onnx-pyannote-segmentation-3-0/resolve/main/model.onnx",
-            Some("220ad67ca923bef2fa91f2390c786097bf305bceb5e261d4af67b38e938e1079"),
+            // InstanceNorm-decomposed build of the sherpa-onnx export
+            // (`scripts/patch-pyannote-segmenter.py`): the upstream file does
+            // not load in tract 0.22, so it never enabled segmentation.
+            "https://github.com/luismctech/echonote/releases/download/v0.6.0/pyannote_segmentation_3_tract.onnx",
+            Some("f7e21b2898bf772836ac5784b91663d7cb869f8899e5c501e42ad747fb5a7b78"),
         ),
     ]
 }
@@ -257,7 +305,7 @@ fn model_dest_path(id: &str) -> Option<&'static str> {
         "embedder-eres2net" => Some("models/embedder/eres2net_en_voxceleb.onnx"),
         "embedder-camplusplus" => Some("models/embedder/campplus_en_voxceleb.onnx"),
         "embedder-campplus-multi" => Some("models/embedder/campplus_zh_en_common_advanced.onnx"),
-        "segmenter-pyannote" => Some("models/segmenter/pyannote_segmentation_3.onnx"),
+        "segmenter-pyannote" => Some("models/segmenter/pyannote_segmentation_3_tract.onnx"),
         _ => None,
     }
 }
@@ -482,6 +530,11 @@ pub async fn download_model(
 
     match result {
         Ok(()) => {
+            // A cached VAD still holds the replaced file; drop it so the next
+            // session loads the new build without an app restart.
+            if model_id.starts_with("vad-") {
+                state.vad.unload().await;
+            }
             let _ = on_event.send(DownloadEvent::Finished);
             Ok(())
         }
@@ -843,7 +896,9 @@ mod tests {
                 .into_iter()
                 .find(|(info, _, _)| &info.id == id)
                 .unwrap();
-            assert!(after.0.present, "{id}");
+            // ...except for the Silero VAD, whose presence is pinned to
+            // the exact v6.2 build (see `is_current_silero_vad`).
+            assert_eq!(after.0.present, id != "vad-silero", "{id}");
             // ...and the active-model getters can name it again.
             assert_eq!(
                 super::super::path_to_catalog_id(&path).as_deref(),
@@ -893,5 +948,95 @@ mod tests {
         sorted.sort();
         sorted.dedup();
         assert_eq!(sorted.len(), ids.len(), "{ids:?}");
+    }
+
+    #[test]
+    fn vad_silero_points_at_the_v6_2_asset_of_release_v0_6_0() {
+        let (info, url, sha) = entry("vad-silero");
+        assert_eq!(info.kind, "vad");
+        assert_eq!(info.size_bytes, SILERO_VAD_V6_2_BYTES);
+        assert_eq!(info.size_bytes, 1_557_280);
+        assert_eq!(
+            url,
+            "https://github.com/luismctech/echonote/releases/download/v0.6.0/silero_vad_v6_2.onnx"
+        );
+        assert_eq!(sha, Some(SILERO_VAD_V6_2_SHA256));
+        assert_eq!(
+            SILERO_VAD_V6_2_SHA256,
+            "76d1667a4962c0eac51c41ba440b188bb4726293f356ec9bec780f7d1a6f08b8"
+        );
+        assert_eq!(
+            model_dest_path("vad-silero"),
+            Some("models/vad/silero_vad.onnx")
+        );
+    }
+
+    #[test]
+    fn segmenter_points_at_the_tract_compatible_asset_of_release_v0_6_0() {
+        // The upstream sherpa export does not load in tract 0.22, so the
+        // catalog ships the InstanceNorm-decomposed file the shell prefers.
+        let (info, url, sha) = entry("segmenter-pyannote");
+        assert_eq!(info.kind, "segmenter");
+        assert_eq!(info.size_bytes, 5_988_123);
+        assert_eq!(
+            url,
+            "https://github.com/luismctech/echonote/releases/download/v0.6.0/pyannote_segmentation_3_tract.onnx"
+        );
+        assert_eq!(
+            sha,
+            Some("f7e21b2898bf772836ac5784b91663d7cb869f8899e5c501e42ad747fb5a7b78")
+        );
+        assert_eq!(
+            model_dest_path("segmenter-pyannote"),
+            Some("models/segmenter/pyannote_segmentation_3_tract.onnx")
+        );
+    }
+
+    #[test]
+    fn an_upstream_only_segmenter_install_is_not_reported_present() {
+        // Users who downloaded the upstream export before v0.6.0 never had
+        // a working segmenter: the catalog must offer the tract file.
+        let root = TempRoot::new("seg-upstream");
+        let upstream = root.0.join("models/segmenter/pyannote_segmentation_3.onnx");
+        std::fs::create_dir_all(upstream.parent().unwrap()).unwrap();
+        std::fs::write(&upstream, b"x").unwrap();
+        let (info, _, _) = model_catalog(&root.0)
+            .into_iter()
+            .find(|(info, _, _)| info.id == "segmenter-pyannote")
+            .unwrap();
+        assert!(!info.present);
+    }
+
+    #[test]
+    fn file_matches_pin_needs_the_exact_size_and_digest() {
+        let root = TempRoot::new("pin");
+        let path = root.0.join("abc.bin");
+        std::fs::write(&path, b"abc").unwrap();
+        const ABC: &str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+        assert!(file_matches_pin(&path, 3, ABC));
+        assert!(!file_matches_pin(&path, 4, ABC), "size mismatch");
+        assert!(
+            !file_matches_pin(&path, 3, SILERO_VAD_V6_2_SHA256),
+            "digest mismatch"
+        );
+        assert!(!file_matches_pin(&root.0.join("missing"), 3, ABC));
+    }
+
+    #[test]
+    fn an_older_silero_build_at_the_vad_path_is_outdated() {
+        // The v5 file of release v0.2.1 (1,251,310 B) and any other build
+        // with the v6.2 size but different bytes are not the pinned v6.2.
+        let root = TempRoot::new("vad-old");
+        let path = root.0.join("models/vad/silero_vad.onnx");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        for len in [1_251_310_usize, SILERO_VAD_V6_2_BYTES as usize] {
+            std::fs::write(&path, vec![0_u8; len]).unwrap();
+            assert!(!is_current_silero_vad(&path), "{len}");
+            let (info, _, _) = model_catalog(&root.0)
+                .into_iter()
+                .find(|(info, _, _)| info.id == "vad-silero")
+                .unwrap();
+            assert!(!info.present, "{len}");
+        }
     }
 }

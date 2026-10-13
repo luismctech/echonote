@@ -24,7 +24,7 @@
 #   scripts/download-models.sh embed          # 3D-Speaker ERes2Net (~26 MB)
 #   scripts/download-models.sh cam-plus-plus  # CAM++ EN-VoxCeleb embedder (~28 MB)
 #   scripts/download-models.sh embed-multi    # CAM++ multilingual zh_en embedder (~27 MB, better on Spanish)
-#   scripts/download-models.sh segmenter      # pyannote-segmentation-3.0 (~17 MB)
+#   scripts/download-models.sh segmenter      # pyannote-segmentation-3.0 (~6 MB + tract rewrite)
 #   scripts/download-models.sh llm            # Qwen 3 14B Instruct Q4_K_M (~9 GB)
 #   scripts/download-models.sh llm-small      # Qwen 3 8B Instruct Q4_K_M (~5 GB)
 #   scripts/download-models.sh llm-lite       # Qwen 3 4B Q4_K_M (~2.5 GB, <8 GB RAM)
