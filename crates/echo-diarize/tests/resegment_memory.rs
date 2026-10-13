@@ -104,7 +104,6 @@ async fn resegment_at_the_log_caps_stays_within_the_transient_budget() {
     )
     .with_plda(family.plda().expect("bundled PLDA"))
     .with_vbx_config(family.vbx_config())
-    .with_resegment_threshold(family.resegment_threshold())
     .with_dense_windows(true)
     .with_refine_mode(OfflineRefineMode::Resegment);
 

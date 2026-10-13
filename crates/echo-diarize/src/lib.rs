@@ -62,9 +62,9 @@ pub use metrics::{
 pub use offline_refine::{refine_speakers, OfflineRefineConfig};
 pub use online_diarizer::OnlineDiarizer;
 pub use plda::Plda;
-pub use presets::{EmbedderFamily, OfflineRefineMode, DEFAULT_RESEGMENT_THRESHOLD};
+pub use presets::{EmbedderFamily, OfflineRefineMode};
 pub use pyannote_segmenter::{
     PyannoteSegmenter, PyannoteSegmenterConfig, PYANNOTE_CHUNK_SAMPLES, PYANNOTE_HOP_SAMPLES,
     PYANNOTE_MAX_LOCAL_SPEAKERS, PYANNOTE_SAMPLE_RATE,
 };
-pub use vbx::{VbxConfig, VbxParams};
+pub use vbx::{VbxConfig, VbxInit, VbxParams};

@@ -400,16 +400,35 @@ pub fn two_gmm_threshold(scores: &[f32]) -> Option<f64> {
     threshold.is_finite().then_some(threshold)
 }
 
+/// How the VBx responsibilities are initialised.
+///
+/// Every threshold here is a cosine similarity between PLDA-transformed
+/// embeddings, `y` in [`crate::plda`]: the length-normalised LDA space
+/// where the AHC runs. It is not comparable with the raw-embedding
+/// cosine thresholds of the online clustering or the merge-only refine.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum VbxInit {
+    /// AHC cut at the per-recording two-Gaussian threshold of the
+    /// pairwise LDA-space similarities plus `offset` (the VBx recipe).
+    /// `fallback` is the cut when the scores cannot be calibrated (fewer
+    /// than two distinct values).
+    Calibrated {
+        /// Added to the calibrated threshold.
+        offset: f32,
+        /// LDA-space cut when the calibration is impossible.
+        fallback: f32,
+    },
+    /// AHC cut at a fixed LDA-space similarity.
+    Fixed(f32),
+}
+
 /// Settings of the VBx re-segmentation ([`VbxReclusterer`]).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct VbxConfig {
     /// VB-HMM hyper-parameters.
     pub params: VbxParams,
-    /// AHC initialisation cut: `Some(offset)` uses the per-recording
-    /// two-Gaussian threshold plus `offset` (the VBx recipe), `None` a
-    /// fixed similarity (the diarizer's re-segmentation threshold). Both
-    /// cut cosine similarities in the PLDA's LDA space.
-    pub init_offset: Option<f32>,
+    /// Initial clustering VBx starts from.
+    pub init: VbxInit,
     /// Sharpness of the initial responsibilities: each frame starts with
     /// `softmax(smoothing * one_hot(ahc_label))`.
     pub init_smoothing: f64,
@@ -420,6 +439,12 @@ pub struct VbxConfig {
     /// matrices.
     pub max_speakers: usize,
 }
+
+/// LDA-space AHC cut used when the two-Gaussian calibration of
+/// [`VbxInit::Calibrated`] is impossible in the default configuration.
+/// It sits in the flat region of the fixed-cut grid of the multilingual
+/// CAM++ dev sets (`docs/spikes/2026-10-vbx.md`, T10b).
+pub const DEFAULT_INIT_FALLBACK: f32 = 0.45;
 
 impl Default for VbxConfig {
     /// The BUTSpeechFIT example recipe (`run_example.sh`): Fa 0.3, Fb 17,
@@ -433,7 +458,10 @@ impl Default for VbxConfig {
                 max_iters: 40,
                 epsilon: 1e-6,
             },
-            init_offset: Some(-0.015),
+            init: VbxInit::Calibrated {
+                offset: -0.015,
+                fallback: DEFAULT_INIT_FALLBACK,
+            },
             init_smoothing: 5.0,
             lda_dim: 128,
             max_speakers: 20,
@@ -460,9 +488,6 @@ pub(crate) struct VbxReclusterer {
     pub plda: Arc<Plda>,
     /// VBx settings.
     pub config: VbxConfig,
-    /// Fixed AHC cut when [`VbxConfig::init_offset`] is `None`, and the
-    /// fallback when the calibration is impossible.
-    pub init_threshold: f32,
 }
 
 /// One VBx frame: an embedding and the log entry it votes for.
@@ -521,14 +546,20 @@ impl OfflineReclusterer for VbxReclusterer {
             .map(|f| self.plda.transform(f.embedding))
             .collect::<Result<_, _>>()?;
         let refs: Vec<&[f32]> = y.iter().map(Vec::as_slice).collect();
-        let cut = match self.config.init_offset {
-            Some(offset) => AhcCut::Calibrated {
-                offset,
-                fallback: self.init_threshold,
-            },
-            None => AhcCut::Similarity(self.init_threshold),
+        let init = match self.config.init {
+            VbxInit::Calibrated { offset, fallback } => strided_ahc(
+                &refs,
+                AhcCut::Calibrated { offset, fallback },
+                VBX_INIT_MAX_REPRESENTATIVES,
+                budget,
+            )?,
+            VbxInit::Fixed(cut) => strided_ahc(
+                &refs,
+                AhcCut::Similarity(cut),
+                VBX_INIT_MAX_REPRESENTATIVES,
+                budget,
+            )?,
         };
-        let init = strided_ahc(&refs, cut, VBX_INIT_MAX_REPRESENTATIVES, budget)?;
         let (init, s) = keep_largest(init, &refs, self.config.max_speakers.max(1));
 
         let t_len = frames.len();
@@ -820,10 +851,9 @@ mod tests {
                     max_iters: 10,
                     epsilon: 1e-6,
                 },
-                init_offset: None,
+                init: VbxInit::Fixed(0.5),
                 ..VbxConfig::default()
             },
-            init_threshold: 0.5,
         }
     }
 

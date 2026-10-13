@@ -25,7 +25,7 @@ use crate::embedding::SpeakerEmbedder;
 use crate::embedding_log::{EmbeddingLog, EmbeddingLogEntry};
 use crate::offline_refine::{refine_speakers, OfflineRefineConfig};
 use crate::plda::Plda;
-use crate::presets::{OfflineRefineMode, DEFAULT_RESEGMENT_THRESHOLD};
+use crate::presets::OfflineRefineMode;
 use crate::resegment::{relabel_plan, too_short, OfflineReclusterer};
 use crate::vbx::{VbxConfig, VbxReclusterer};
 
@@ -70,9 +70,6 @@ pub struct OnlineDiarizer {
     /// Legacy opt-in ([`Self::with_offline_refinement`]): selects
     /// [`OfflineRefineMode::MergeOnly`] when no mode was set.
     refinement_requested: bool,
-    /// AHC cut of the re-segmentation's VBx initialisation (fixed cut, or
-    /// fallback of the calibrated one).
-    resegment_threshold: f32,
     /// PLDA model of the embedder; re-segmentation needs it (VBx) and
     /// falls back to the merge-only refine without it.
     plda: Option<Arc<Plda>>,
@@ -101,7 +98,6 @@ impl OnlineDiarizer {
             refine_config: OfflineRefineConfig::default(),
             explicit_refine_mode: None,
             refinement_requested: false,
-            resegment_threshold: DEFAULT_RESEGMENT_THRESHOLD,
             plda: None,
             vbx_config: VbxConfig::default(),
             dense_windows: false,
@@ -174,16 +170,6 @@ impl OnlineDiarizer {
         self.with_offline_refinement()
     }
 
-    /// Cosine similarity at which the re-segmenting AHC
-    /// ([`OfflineRefineMode::Resegment`]) stops merging. Independent of
-    /// the merge-only threshold in [`OfflineRefineConfig`]; per-embedder
-    /// values live in [`crate::EmbedderFamily::resegment_threshold`].
-    #[must_use]
-    pub fn with_resegment_threshold(mut self, threshold: f32) -> Self {
-        self.resegment_threshold = threshold;
-        self
-    }
-
     /// PLDA model of this embedder, which
     /// [`OfflineRefineMode::Resegment`] (VBx) requires. Per-embedder
     /// models come from [`crate::EmbedderFamily::plda`].
@@ -193,8 +179,9 @@ impl OnlineDiarizer {
         self
     }
 
-    /// VBx settings of the re-segmentation; per-embedder values live in
-    /// [`crate::EmbedderFamily::vbx_config`].
+    /// VBx settings of the re-segmentation, including its initialisation
+    /// cut in the PLDA's LDA space ([`crate::VbxInit`]); per-embedder
+    /// values live in [`crate::EmbedderFamily::vbx_config`].
     #[must_use]
     pub fn with_vbx_config(mut self, config: VbxConfig) -> Self {
         self.vbx_config = config;
@@ -244,8 +231,8 @@ impl OnlineDiarizer {
         Ok(out)
     }
 
-    /// Re-segment the log with other VBx settings and AHC cut, whatever
-    /// the configured mode. Benchmarks use it to score several settings
+    /// Re-segment the log with other VBx settings, whatever the
+    /// configured mode. Benchmarks use it to score several settings
     /// on one session; the app calls [`Diarizer::refine_plan`].
     ///
     /// # Errors
@@ -255,7 +242,6 @@ impl OnlineDiarizer {
     pub fn resegment_with(
         &self,
         config: VbxConfig,
-        init_threshold: f32,
         budget: RefineBudget,
     ) -> Result<RefineOutcome, DomainError> {
         let Some(plda) = &self.plda else {
@@ -270,7 +256,6 @@ impl OnlineDiarizer {
         let labels = VbxReclusterer {
             plda: Arc::clone(plda),
             config,
-            init_threshold,
         }
         .recluster(entries, budget)?;
         budget.check()?;
@@ -518,7 +503,7 @@ impl Diarizer for OnlineDiarizer {
                     .as_ref()
                     .is_some_and(|p| p.dim() == self.embedder.dim())
                 {
-                    self.resegment_with(self.vbx_config, self.resegment_threshold, budget)
+                    self.resegment_with(self.vbx_config, budget)
                 } else {
                     tracing::info!(
                         "no PLDA model for this embedder; re-segmentation falls back to merge-only"
@@ -700,8 +685,16 @@ mod tests {
                 max_iters: 10,
                 epsilon: 1e-6,
             },
-            init_offset: None,
+            init: crate::vbx::VbxInit::Fixed(0.5),
             ..VbxConfig::default()
+        }
+    }
+
+    /// [`test_vbx`] with another fixed LDA-space initialisation cut.
+    fn test_vbx_cut(cut: f32) -> VbxConfig {
+        VbxConfig {
+            init: crate::vbx::VbxInit::Fixed(cut),
+            ..test_vbx()
         }
     }
 
@@ -711,9 +704,8 @@ mod tests {
                 merge_threshold: threshold,
                 ..OfflineRefineConfig::default()
             })
-            .with_resegment_threshold(threshold)
             .with_plda(Arc::new(crate::plda::tests::identity(4, 25.0)))
-            .with_vbx_config(test_vbx())
+            .with_vbx_config(test_vbx_cut(threshold))
             .with_refine_mode(mode)
     }
 
@@ -831,7 +823,6 @@ mod tests {
                 merge_threshold: -0.5,
                 ..OfflineRefineConfig::default()
             })
-            .with_resegment_threshold(0.5)
             .with_plda(Arc::new(crate::plda::tests::identity(4, 25.0)))
             .with_vbx_config(test_vbx())
             .with_refine_mode(OfflineRefineMode::Resegment);
@@ -846,7 +837,7 @@ mod tests {
                 merge_threshold: -0.5,
                 ..OfflineRefineConfig::default()
             })
-            .with_resegment_threshold(-0.5)
+            .with_vbx_config(test_vbx_cut(-0.5))
             .with_refine_mode(OfflineRefineMode::Resegment);
         feed(&mut d, &[0.001, 0.002, 0.001, 0.002, 0.001]).await;
         assert!(matches!(
@@ -879,7 +870,6 @@ mod tests {
         )
         .with_plda(Arc::new(crate::plda::tests::identity(4, 25.0)))
         .with_vbx_config(test_vbx())
-        .with_resegment_threshold(0.5)
         .with_refine_mode(OfflineRefineMode::Resegment);
         feed(&mut d, &[0.001, 0.001, 0.002, 0.002, 0.001, 0.002]).await;
         assert_eq!(d.speakers().len(), 1, "online put every chunk together");

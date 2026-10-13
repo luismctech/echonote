@@ -489,7 +489,6 @@ impl AppState {
             similarity_threshold = cluster_cfg.similarity_threshold,
             max_speakers = cluster_cfg.max_speakers,
             refine_threshold = refine_cfg.merge_threshold,
-            resegment_threshold = family.resegment_threshold(),
             refine_mode = ?refine_mode,
             plda = family.plda().is_some(),
             load_ms = started.elapsed().as_millis() as u64,
@@ -502,7 +501,6 @@ impl AppState {
         // one it falls back to the merge-only refine.
         let mut diarizer = OnlineDiarizer::new(embedder, cluster_cfg)
             .with_offline_refinement_config(refine_cfg)
-            .with_resegment_threshold(family.resegment_threshold())
             .with_vbx_config(family.vbx_config())
             .with_refine_mode(refine_mode);
         if let Some(plda) = family.plda() {

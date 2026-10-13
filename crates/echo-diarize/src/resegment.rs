@@ -201,7 +201,16 @@ fn average_linkage_labels(
                 .map(|d| 1.0 - d)
                 .collect();
             check_deadline(deadline)?;
-            two_gmm_threshold(&scores).map_or(fallback, |t| t as f32 + offset)
+            let calibrated = two_gmm_threshold(&scores);
+            let threshold = calibrated.map_or(fallback, |t| t as f32 + offset);
+            // Scalars only: never an embedding.
+            tracing::debug!(
+                n,
+                calibrated = calibrated.is_some(),
+                threshold,
+                "AHC initialisation cut"
+            );
+            threshold
         }
     };
     let cut = 1.0 - threshold;
@@ -419,6 +428,51 @@ mod tests {
         let labels =
             average_linkage_labels(&refs, AhcCut::Similarity(0.5), far_budget().deadline).unwrap();
         assert_eq!(labels, vec![0, 0, 1, 0, 1]);
+    }
+
+    #[test]
+    fn calibrated_cut_adapts_to_the_recording_and_applies_the_offset() {
+        // Two voices 45 degrees apart: within-voice similarity about
+        // 0.99, across about 0.7. A fixed cut at the 0.5 fallback would
+        // merge them; the calibrated threshold falls between the modes.
+        let emb = [0.0, 2.0, 4.0, 6.0, 45.0, 47.0, 49.0, 51.0].map(unit);
+        let refs: Vec<&[f32]> = emb.iter().map(Vec::as_slice).collect();
+        let cut = |offset| AhcCut::Calibrated {
+            offset,
+            fallback: 0.5,
+        };
+        let labels = average_linkage_labels(&refs, cut(0.0), far_budget().deadline).unwrap();
+        assert_eq!(labels, vec![0, 0, 0, 0, 1, 1, 1, 1]);
+        let fixed =
+            average_linkage_labels(&refs, AhcCut::Similarity(0.5), far_budget().deadline).unwrap();
+        assert_eq!(fixed, vec![0; 8], "the fallback alone would merge them");
+        // The offset moves the calibrated cut: far above every score
+        // nothing merges, far below everything does.
+        let apart = average_linkage_labels(&refs, cut(2.0), far_budget().deadline).unwrap();
+        assert_eq!(apart, (0..8).collect::<Vec<_>>());
+        let merged = average_linkage_labels(&refs, cut(-2.0), far_budget().deadline).unwrap();
+        assert_eq!(merged, vec![0; 8]);
+    }
+
+    #[test]
+    fn calibrated_cut_falls_back_when_the_scores_cannot_be_calibrated() {
+        // Identical vectors: every score is the same, so the two-Gaussian
+        // fit is impossible and the fallback decides.
+        let emb = [unit(10.0), unit(10.0), unit(10.0)];
+        let refs: Vec<&[f32]> = emb.iter().map(Vec::as_slice).collect();
+        let cut = |fallback| AhcCut::Calibrated {
+            offset: 0.0,
+            fallback,
+        };
+        let deadline = far_budget().deadline;
+        assert_eq!(
+            average_linkage_labels(&refs, cut(0.5), deadline).unwrap(),
+            vec![0, 0, 0]
+        );
+        assert_eq!(
+            average_linkage_labels(&refs, cut(1.5), deadline).unwrap(),
+            vec![0, 1, 2]
+        );
     }
 
     #[test]

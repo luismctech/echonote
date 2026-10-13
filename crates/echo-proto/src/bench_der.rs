@@ -31,7 +31,7 @@ use echo_app::StreamingPipeline;
 use echo_audio::{RubatoResamplerAdapter, SileroVad};
 use echo_diarize::{
     parse_rttm, score_der, write_rttm, DerConfig, DerReport, EmbedderFamily, OfflineRefineMode,
-    OnlineDiarizer, Plda, PyannoteSegmenter, RttmSegment, VbxConfig,
+    OnlineDiarizer, Plda, PyannoteSegmenter, RttmSegment, VbxConfig, VbxInit,
 };
 use echo_domain::{
     AudioCapture, AudioFormat, AudioFrame, AudioSource, AudioStream, CaptureSpec, ChunkContext,
@@ -213,32 +213,25 @@ pub(crate) fn parse_cosine_threshold(raw: &str) -> Result<f32, String> {
     Ok(value)
 }
 
-/// One VBx setting: the configuration and the AHC cut of its
-/// initialisation.
+/// One VBx setting.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct VbxSpec {
     /// The spec string, as given.
     pub label: String,
     pub config: VbxConfig,
-    /// Fixed AHC cut (or the calibration fallback).
-    pub init_threshold: f32,
 }
 
 /// Parse a VBx spec on top of `base`: comma-separated `key=value` pairs
-/// with keys `fa`, `fb`, `loop` (loopP), `init` (`cal:<offset>` for the
-/// calibrated AHC cut, or a fixed cosine similarity), `lda`, `smooth`,
-/// `maxspk` and `iters`. An empty spec is `base` unchanged.
+/// with keys `fa`, `fb`, `loop` (loopP), `init`, `lda`, `smooth`,
+/// `maxspk` and `iters`. `init` is `cal:<offset>` (calibrated AHC cut,
+/// keeping the base fallback cut) or a fixed cosine similarity; both are
+/// in the PLDA's LDA space. An empty spec is `base` unchanged.
 ///
 /// # Errors
 ///
 /// Returns a message for unknown keys and out-of-range values.
-pub(crate) fn parse_vbx_spec(
-    base: VbxConfig,
-    base_threshold: f32,
-    spec: &str,
-) -> Result<VbxSpec, String> {
+pub(crate) fn parse_vbx_spec(base: VbxConfig, spec: &str) -> Result<VbxSpec, String> {
     let mut config = base;
-    let mut init_threshold = base_threshold;
     let num = |k: &str, v: &str| -> Result<f64, String> {
         let x: f64 = v
             .parse()
@@ -267,13 +260,19 @@ pub(crate) fn parse_vbx_spec(
             "lda" => config.lda_dim = count(k, v)?,
             "maxspk" => config.max_speakers = count(k, v)?,
             "iters" => config.params.max_iters = count(k, v)?,
-            "init" => match v.strip_prefix("cal:") {
-                Some(offset) => config.init_offset = Some(num(k, offset)? as f32),
-                None => {
-                    config.init_offset = None;
-                    init_threshold = parse_cosine_threshold(v)?;
+            "init" => {
+                config.init = match v.strip_prefix("cal:") {
+                    Some(offset) => VbxInit::Calibrated {
+                        offset: num(k, offset)? as f32,
+                        fallback: match base.init {
+                            VbxInit::Calibrated { fallback, .. } | VbxInit::Fixed(fallback) => {
+                                fallback
+                            }
+                        },
+                    },
+                    None => VbxInit::Fixed(parse_cosine_threshold(v)?),
                 }
-            },
+            }
             other => return Err(format!("unknown VBx key `{other}`")),
         }
     }
@@ -286,7 +285,6 @@ pub(crate) fn parse_vbx_spec(
     Ok(VbxSpec {
         label: spec.trim().to_string(),
         config,
-        init_threshold,
     })
 }
 
@@ -321,24 +319,18 @@ pub(crate) async fn run(args: DerArgs) -> Result<()> {
         cluster.max_speakers = max_speakers;
     }
     let mut refine = family.refine_config();
-    let mut resegment_threshold = family.resegment_threshold();
     if let Some(threshold) = args.refine_threshold {
         refine.merge_threshold = threshold;
-        resegment_threshold = threshold;
     }
-    let main_vbx = parse_vbx_spec(
-        family.vbx_config(),
-        resegment_threshold,
-        args.vbx.as_deref().unwrap_or(""),
-    )
-    .map_err(anyhow::Error::msg)?;
+    let main_vbx = parse_vbx_spec(family.vbx_config(), args.vbx.as_deref().unwrap_or(""))
+        .map_err(anyhow::Error::msg)?;
     let grid: Vec<VbxSpec> = match &args.vbx_grid {
         Some(path) => std::fs::read_to_string(path)
             .with_context(|| format!("read {}", path.display()))?
             .lines()
             .map(|l| l.split('#').next().unwrap_or("").trim())
             .filter(|l| !l.is_empty())
-            .map(|l| parse_vbx_spec(main_vbx.config, main_vbx.init_threshold, l))
+            .map(|l| parse_vbx_spec(main_vbx.config, l))
             .collect::<Result<_, _>>()
             .map_err(anyhow::Error::msg)?,
         None => Vec::new(),
@@ -378,7 +370,6 @@ pub(crate) async fn run(args: DerArgs) -> Result<()> {
 
         let mut diarizer = OnlineDiarizer::new(family.load(&args.embedder)?, cluster)
             .with_offline_refinement_config(refine)
-            .with_resegment_threshold(main_vbx.init_threshold)
             .with_vbx_config(main_vbx.config)
             .with_dense_windows(args.dense_windows)
             .with_refine_mode(refine_mode);
@@ -735,7 +726,7 @@ impl GridDiarizer for OnlineDiarizer {
                 let budget = RefineBudget {
                     deadline: Instant::now() + std::time::Duration::from_secs(60),
                 };
-                let relabel = match self.resegment_with(spec.config, spec.init_threshold, budget) {
+                let relabel = match self.resegment_with(spec.config, budget) {
                     Ok(RefineOutcome::Relabel(plan)) => Some(plan.spans.into_iter().collect()),
                     Ok(_) => Some(HashMap::new()),
                     Err(_) => None,
@@ -1021,6 +1012,7 @@ impl AudioStream for FileStream {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use echo_diarize::vbx::DEFAULT_INIT_FALLBACK;
 
     #[test]
     fn manifest_resolves_relative_paths_and_skips_comments() {
@@ -1304,7 +1296,7 @@ mod tests {
             inner: Box::new(Slow),
             log: Arc::default(),
             plan: Arc::clone(&plan),
-            grid: vec![parse_vbx_spec(VbxConfig::default(), 0.5, "fa=0.4").unwrap()],
+            grid: vec![parse_vbx_spec(VbxConfig::default(), "fa=0.4").unwrap()],
             refine: Arc::clone(&refine),
         };
         let budget = RefineBudget {
@@ -1321,21 +1313,32 @@ mod tests {
     #[test]
     fn vbx_spec_overrides_only_the_named_keys() {
         let base = VbxConfig::default();
-        let same = parse_vbx_spec(base, 0.5, "").unwrap();
-        assert_eq!((same.config, same.init_threshold), (base, 0.5));
+        let same = parse_vbx_spec(base, "").unwrap();
+        assert_eq!(same.config, base);
 
-        let s = parse_vbx_spec(base, 0.5, "fa=0.4, fb=11,loop=0.7,lda=64,init=0.3").unwrap();
+        let s = parse_vbx_spec(base, "fa=0.4, fb=11,loop=0.7,lda=64,init=0.3").unwrap();
         assert_eq!(s.config.params.fa, 0.4);
         assert_eq!(s.config.params.fb, 11.0);
         assert_eq!(s.config.params.loop_p, 0.7);
         assert_eq!(s.config.lda_dim, 64);
-        assert_eq!(s.config.init_offset, None);
-        assert_eq!(s.init_threshold, 0.3);
+        assert_eq!(s.config.init, VbxInit::Fixed(0.3));
         assert_eq!(s.config.init_smoothing, base.init_smoothing);
 
-        let cal = parse_vbx_spec(base, 0.5, "init=cal:0.1").unwrap();
-        assert_eq!(cal.config.init_offset, Some(0.1));
-        assert_eq!(cal.init_threshold, 0.5, "fallback keeps the base cut");
+        let cal = parse_vbx_spec(base, "init=cal:0.1").unwrap();
+        assert_eq!(
+            cal.config.init,
+            VbxInit::Calibrated {
+                offset: 0.1,
+                fallback: DEFAULT_INIT_FALLBACK
+            },
+            "fallback keeps the base cut"
+        );
+        let fixed = VbxConfig {
+            init: VbxInit::Fixed(0.4),
+            ..base
+        };
+        let cal = parse_vbx_spec(fixed, "init=cal:0.1").unwrap();
+        assert!(matches!(cal.config.init, VbxInit::Calibrated { fallback, .. } if fallback == 0.4));
     }
 
     #[test]
@@ -1344,7 +1347,7 @@ mod tests {
         for bad in [
             "nope=1", "fa", "fa=x", "fa=0", "loop=1.5", "lda=0", "init=2", "fb=inf",
         ] {
-            assert!(parse_vbx_spec(base, 0.5, bad).is_err(), "{bad}");
+            assert!(parse_vbx_spec(base, bad).is_err(), "{bad}");
         }
     }
 

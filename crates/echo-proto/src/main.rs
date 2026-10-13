@@ -370,9 +370,10 @@ enum BenchKind {
         /// Override the preset online speaker cap (at least 1).
         #[arg(long, value_parser = bench_der::parse_max_speakers)]
         max_speakers: Option<usize>,
-        /// Override the preset offline refinement threshold (a cosine
-        /// similarity in -1..=1): the merge-only threshold and the
-        /// re-segmentation AHC cut alike.
+        /// Override the preset merge-only refinement threshold (a cosine
+        /// similarity in -1..=1 between raw embeddings). The
+        /// re-segmentation cut lives in the PLDA's LDA space and is set
+        /// with `--vbx init=...`.
         #[arg(long, value_parser = bench_der::parse_cosine_threshold)]
         refine_threshold: Option<f32>,
         /// Skip the end-of-session offline refinement pass (same as
@@ -385,7 +386,8 @@ enum BenchKind {
         refine_mode: Option<echo_diarize::OfflineRefineMode>,
         /// Override the preset VBx settings of the re-segmentation:
         /// comma-separated `fa=`, `fb=`, `loop=`, `init=` (`cal:<offset>`
-        /// or a fixed cosine cut), `lda=`, `smooth=`, `maxspk=`, `iters=`.
+        /// or a fixed cosine cut, both in the PLDA's LDA space), `lda=`,
+        /// `smooth=`, `maxspk=`, `iters=`.
         #[arg(long)]
         vbx: Option<String>,
         /// Also embed 1.5 s windows inside spans longer than 3 s for the

@@ -21,11 +21,7 @@ use crate::embedding::SpeakerEmbedder;
 use crate::eres2net::Eres2NetEmbedder;
 use crate::offline_refine::OfflineRefineConfig;
 use crate::plda::Plda;
-use crate::vbx::{VbxConfig, VbxParams};
-
-/// Re-segmentation AHC cut for families without a calibrated value. Equal
-/// to the conservative [`OfflineRefineConfig::default`] merge threshold.
-pub const DEFAULT_RESEGMENT_THRESHOLD: f32 = 0.85;
+use crate::vbx::{VbxConfig, VbxInit, VbxParams};
 
 /// End-of-session refinement the diarizer runs (ADR 0001, D6).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -193,21 +189,6 @@ impl EmbedderFamily {
         OfflineRefineMode::default()
     }
 
-    /// Cosine similarity at which the re-segmenting AHC
-    /// ([`OfflineRefineMode::Resegment`]) stops merging.
-    ///
-    /// Kept apart from the merge-only threshold of
-    /// [`Self::refine_config`] so the two passes can be calibrated
-    /// independently; the values start equal to it (multilingual
-    /// CAM++ 0.50, others [`DEFAULT_RESEGMENT_THRESHOLD`]).
-    #[must_use]
-    pub fn resegment_threshold(self) -> f32 {
-        match self {
-            Self::CamPlusPlusMultilingual => 0.50,
-            Self::CamPlusPlus | Self::Eres2Net => DEFAULT_RESEGMENT_THRESHOLD,
-        }
-    }
-
     /// PLDA model fitted on this family's embeddings, which the
     /// re-segmentation (VBx) needs. Only the multilingual CAM++ has one
     /// (bundled, `assets/README.md`); without a model
@@ -242,7 +223,10 @@ impl EmbedderFamily {
                         loop_p: 0.5,
                         ..base.params
                     },
-                    init_offset: Some(0.15),
+                    init: VbxInit::Calibrated {
+                        offset: 0.15,
+                        fallback: crate::vbx::DEFAULT_INIT_FALLBACK,
+                    },
                     ..base
                 }
             }
@@ -388,21 +372,6 @@ mod tests {
     }
 
     #[test]
-    fn resegment_threshold_starts_equal_to_the_merge_threshold() {
-        for family in EmbedderFamily::ALL {
-            assert_eq!(
-                family.resegment_threshold(),
-                family.refine_config().merge_threshold,
-                "{family:?}"
-            );
-        }
-        assert_eq!(
-            DEFAULT_RESEGMENT_THRESHOLD,
-            OfflineRefineConfig::default().merge_threshold
-        );
-    }
-
-    #[test]
     fn only_the_multilingual_campplus_ships_a_plda_model() {
         let plda = EmbedderFamily::CamPlusPlusMultilingual
             .plda()
@@ -416,7 +385,13 @@ mod tests {
     fn multilingual_campplus_vbx_preset_is_the_dev_calibration() {
         let c = EmbedderFamily::CamPlusPlusMultilingual.vbx_config();
         assert_eq!((c.params.fa, c.params.fb, c.params.loop_p), (0.5, 5.0, 0.5));
-        assert_eq!(c.init_offset, Some(0.15));
+        assert_eq!(
+            c.init,
+            VbxInit::Calibrated {
+                offset: 0.15,
+                fallback: crate::vbx::DEFAULT_INIT_FALLBACK
+            }
+        );
         assert_eq!((c.lda_dim, c.init_smoothing), (128, 5.0));
         for family in [EmbedderFamily::CamPlusPlus, EmbedderFamily::Eres2Net] {
             assert_eq!(family.vbx_config(), VbxConfig::default(), "{family:?}");
