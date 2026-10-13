@@ -45,8 +45,11 @@ const FRAME_MS: u32 = 20;
 pub(crate) struct DerArgs {
     /// Manifest file: one `<wav> <rttm>` pair per line.
     pub manifest: PathBuf,
-    /// Speaker embedder model; the family follows the file name.
+    /// Speaker embedder model file.
     pub embedder: PathBuf,
+    /// Catalog id of the embedder (`embedder-*`); `None` guesses the
+    /// family from the file name.
+    pub embedder_id: Option<String>,
     /// Optional pyannote segmenter model (whole-chunk embedding when absent).
     pub segmenter: Option<PathBuf>,
     /// Override of the preset similarity threshold.
@@ -155,6 +158,18 @@ pub(crate) fn parse_cosine_threshold(raw: &str) -> Result<f32, String> {
     Ok(value)
 }
 
+/// Embedder family to benchmark: the catalog id when given (as the app
+/// dispatches), else the file-name fallback for `embedder`.
+fn embedder_family(embedder: &Path, embedder_id: Option<&str>) -> Result<EmbedderFamily> {
+    match embedder_id {
+        Some(id) => EmbedderFamily::from_model_id(id).with_context(|| {
+            let known: Vec<&str> = EmbedderFamily::ALL.iter().map(|f| f.model_id()).collect();
+            format!("unknown embedder id `{id}` (known: {})", known.join(", "))
+        }),
+        None => Ok(EmbedderFamily::from_path(embedder)),
+    }
+}
+
 /// Entry point of `echo-proto bench der`.
 pub(crate) async fn run(args: DerArgs) -> Result<()> {
     let pairs = read_manifest(&args.manifest)?;
@@ -168,7 +183,7 @@ pub(crate) async fn run(args: DerArgs) -> Result<()> {
         "embedder {} not found",
         args.embedder.display()
     );
-    let family = EmbedderFamily::from_path(&args.embedder);
+    let family = embedder_family(&args.embedder, args.embedder_id.as_deref())?;
     let mut cluster = family.cluster_config(args.threshold);
     if let Some(max_speakers) = args.max_speakers {
         cluster.max_speakers = max_speakers;
@@ -689,6 +704,20 @@ mod tests {
         for bad in ["NaN", "inf", "-inf", "1.01", "-1.5", "x"] {
             assert!(parse_cosine_threshold(bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn embedder_id_wins_over_the_file_name() {
+        let path = Path::new("/m/custom_model.onnx");
+        assert_eq!(
+            embedder_family(path, Some("embedder-campplus-multi")).unwrap(),
+            EmbedderFamily::CamPlusPlusMultilingual
+        );
+        assert_eq!(
+            embedder_family(path, None).unwrap(),
+            EmbedderFamily::Eres2Net
+        );
+        assert!(embedder_family(path, Some("embedder-nope")).is_err());
     }
 
     #[test]
