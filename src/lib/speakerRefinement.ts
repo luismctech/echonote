@@ -35,9 +35,11 @@ export function applyChunkSpeakers(
 }
 
 /**
- * Fold absorbed speakers into their survivors on the live lines. The
- * survivor's slot is taken from a line it already owns; lines whose
- * survivor never appeared keep their slot.
+ * Fold absorbed speakers into their survivors on the live lines. Merge
+ * chains resolve to the final survivor (`a→b`, `b→c` moves `a` to `c`);
+ * speakers caught in a merge cycle keep their lines. The survivor's slot
+ * is taken from a line it already owns; lines whose survivor never
+ * appeared keep their slot.
  */
 export function applySpeakerMerges(
   lines: StreamLine[],
@@ -53,11 +55,31 @@ export function applySpeakerMerges(
   const survivorOf = new Map(merges.map((m) => [m.absorbed, m.surviving]));
   return lines.map((line) => {
     if (line.kind !== "chunk" || line.speakerId === undefined) return line;
-    const survivor = survivorOf.get(line.speakerId);
+    const survivor = finalSurvivor(survivorOf, line.speakerId);
     const slot = survivor === undefined ? undefined : slotOf.get(survivor);
     if (survivor === undefined || slot === undefined) return line;
     return { ...line, speakerId: survivor, speakerSlot: slot };
   });
+}
+
+/**
+ * Follow `survivorOf` from `id` to the speaker that is not absorbed any
+ * further. `undefined` when `id` is not absorbed or the chain loops.
+ */
+function finalSurvivor(
+  survivorOf: Map<SpeakerId, SpeakerId>,
+  id: SpeakerId,
+): SpeakerId | undefined {
+  const seen = new Set<SpeakerId>();
+  let current = id;
+  for (;;) {
+    const next = survivorOf.get(current);
+    if (next === undefined) break;
+    if (seen.has(current)) return undefined;
+    seen.add(current);
+    current = next;
+  }
+  return current === id ? undefined : current;
 }
 
 /** Counts for the post-stop notice. */
