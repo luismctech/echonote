@@ -1106,6 +1106,7 @@ fn refinement_completes_in_under_90s_for_30min_audio() { ... }
 - Separate audio track capture (mic and system)
 - Hybrid streaming + refinement pipeline
 - Speaker diarization via ONNX embeddings (3D-Speaker) over pyannote
+- Offline speaker re-segmentation from an in-memory embedding log, no audio retention (proposed: [ADR 0001](adr/0001-offline-speaker-resegmentation.md))
 - Zustand + TanStack Query over Redux
 - SQLite + FTS5 with optional SQLCipher
 - Clean Architecture with ports and adapters
