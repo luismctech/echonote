@@ -21,7 +21,7 @@ use crate::embedding::SpeakerEmbedder;
 use crate::eres2net::Eres2NetEmbedder;
 use crate::offline_refine::OfflineRefineConfig;
 use crate::plda::Plda;
-use crate::vbx::VbxConfig;
+use crate::vbx::{VbxConfig, VbxParams};
 
 /// Re-segmentation AHC cut for families without a calibrated value. Equal
 /// to the conservative [`OfflineRefineConfig::default`] merge threshold.
@@ -220,12 +220,34 @@ impl EmbedderFamily {
         }
     }
 
-    /// VBx settings of the re-segmentation for this family:
-    /// [`VbxConfig::default`] (the BUTSpeechFIT example recipe) until it
-    /// is calibrated.
+    /// VBx settings of the re-segmentation for this family.
+    ///
+    /// Multilingual CAM++: Fa 0.5, Fb 5, loopP 0.5, AHC initialisation
+    /// at the per-recording two-Gaussian threshold + 0.15, calibrated on
+    /// the held-out dev sets with `echo-proto bench der --vbx-grid`
+    /// (T10, `docs/spikes/2026-10-vbx.md`). The dev minimum (+0.20) sits
+    /// 0.02 below the offset where Spanish DER jumps; +0.15 keeps a margin.
+    /// The recipe defaults (Fb 17, loopP 0.99) collapse these sessions
+    /// to one or two speakers. Families without a PLDA model keep
+    /// [`VbxConfig::default`]; they never re-segment.
     #[must_use]
     pub fn vbx_config(self) -> VbxConfig {
-        VbxConfig::default()
+        match self {
+            Self::CamPlusPlusMultilingual => {
+                let base = VbxConfig::default();
+                VbxConfig {
+                    params: VbxParams {
+                        fa: 0.5,
+                        fb: 5.0,
+                        loop_p: 0.5,
+                        ..base.params
+                    },
+                    init_offset: Some(0.15),
+                    ..base
+                }
+            }
+            Self::CamPlusPlus | Self::Eres2Net => VbxConfig::default(),
+        }
     }
 
     /// Load the embedder adapter for this family from `path`.
@@ -388,6 +410,17 @@ mod tests {
         assert_eq!(plda.dim(), 192, "matches the multilingual CAM++ output");
         assert!(EmbedderFamily::CamPlusPlus.plda().is_none());
         assert!(EmbedderFamily::Eres2Net.plda().is_none());
+    }
+
+    #[test]
+    fn multilingual_campplus_vbx_preset_is_the_dev_calibration() {
+        let c = EmbedderFamily::CamPlusPlusMultilingual.vbx_config();
+        assert_eq!((c.params.fa, c.params.fb, c.params.loop_p), (0.5, 5.0, 0.5));
+        assert_eq!(c.init_offset, Some(0.15));
+        assert_eq!((c.lda_dim, c.init_smoothing), (128, 5.0));
+        for family in [EmbedderFamily::CamPlusPlus, EmbedderFamily::Eres2Net] {
+            assert_eq!(family.vbx_config(), VbxConfig::default(), "{family:?}");
+        }
     }
 
     #[test]
