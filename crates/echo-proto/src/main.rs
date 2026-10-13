@@ -373,9 +373,14 @@ enum BenchKind {
         /// cosine similarity in -1..=1).
         #[arg(long, value_parser = bench_der::parse_cosine_threshold)]
         refine_threshold: Option<f32>,
-        /// Skip the end-of-session offline refinement pass.
+        /// Skip the end-of-session offline refinement pass (same as
+        /// `--refine-mode off`).
         #[arg(long, default_value_t = false)]
         no_refine: bool,
+        /// End-of-session refinement: `off`, `merge-only` or `resegment`
+        /// (default: the embedder preset).
+        #[arg(long, value_parser = bench_der::parse_refine_mode)]
+        refine_mode: Option<echo_diarize::OfflineRefineMode>,
         /// Silero VAD model for speech-aligned chunks.
         #[arg(long, env = "ECHO_VAD_MODEL")]
         vad: Option<PathBuf>,
@@ -505,6 +510,7 @@ async fn main() -> Result<()> {
                 max_speakers,
                 refine_threshold,
                 no_refine,
+                refine_mode,
                 vad,
                 no_neural_vad,
                 min_chunk_ms,
@@ -529,7 +535,11 @@ async fn main() -> Result<()> {
                     threshold,
                     max_speakers,
                     refine_threshold,
-                    no_refine,
+                    refine_mode: if no_refine {
+                        Some(echo_diarize::OfflineRefineMode::Off)
+                    } else {
+                        refine_mode
+                    },
                     vad: vad.filter(|_| !no_neural_vad),
                     min_chunk_ms,
                     max_chunk_ms,

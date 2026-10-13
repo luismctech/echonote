@@ -7,8 +7,11 @@
 //! transcriber, so chunk boundaries and diarizer calls are exactly the
 //! ones a live session makes. A recording decorator around the diarizer
 //! captures every chunk's speaker spans; `Chunk` events supply each
-//! chunk's session offset and `SpeakersMerged` the offline refinement,
-//! which is applied to the spans before scoring.
+//! chunk's session offset and `SpeakersMerged` the merge-only offline
+//! refinement. A re-segmenting refine (`--refine-mode resegment`) is
+//! captured from the diarizer's span relabel plan, because the no-op
+//! transcriber emits no segments for `SpeakersReassigned` to move. Both
+//! are applied to the spans before scoring.
 //!
 //! The hypothesis is the diarizer's span timeline. The app persists one
 //! speaker per Whisper segment (dominant span), so app-visible DER also
@@ -26,13 +29,14 @@ use serde::Serialize;
 use echo_app::StreamingPipeline;
 use echo_audio::{RubatoResamplerAdapter, SileroVad};
 use echo_diarize::{
-    parse_rttm, score_der, write_rttm, DerConfig, DerReport, EmbedderFamily, OnlineDiarizer,
-    PyannoteSegmenter, RttmSegment,
+    parse_rttm, score_der, write_rttm, DerConfig, DerReport, EmbedderFamily, OfflineRefineMode,
+    OnlineDiarizer, PyannoteSegmenter, RttmSegment,
 };
 use echo_domain::{
-    AudioCapture, AudioFormat, AudioFrame, AudioSource, AudioStream, CaptureSpec, DeviceInfo,
-    Diarizer, DomainError, Resampler, Sample, Speaker, SpeakerId, SpeakerSpan, StreamingOptions,
-    TranscribeOptions, Transcriber, Transcript, TranscriptEvent,
+    AudioCapture, AudioFormat, AudioFrame, AudioSource, AudioStream, CaptureSpec, ChunkContext,
+    DeviceInfo, Diarizer, DomainError, RefineBudget, RefineOutcome, Resampler, Sample, SpanRef,
+    Speaker, SpeakerId, SpeakerSpan, StreamingOptions, TranscribeOptions, Transcriber, Transcript,
+    TranscriptEvent,
 };
 
 /// Diarizer sample rate: spans are in 16 kHz samples.
@@ -58,8 +62,8 @@ pub(crate) struct DerArgs {
     pub max_speakers: Option<usize>,
     /// Override of the preset offline refinement merge threshold.
     pub refine_threshold: Option<f32>,
-    /// Skip the end-of-session offline refinement.
-    pub no_refine: bool,
+    /// End-of-session refinement; `None` uses the embedder preset.
+    pub refine_mode: Option<OfflineRefineMode>,
     /// Silero VAD model; `None` runs fixed chunks behind the RMS gate.
     pub vad: Option<PathBuf>,
     /// Speech-aligned chunk bounds (ignored without a VAD).
@@ -91,6 +95,8 @@ struct FileReport {
     hyp_speakers: usize,
     chunks: usize,
     merges: usize,
+    /// Spans whose speaker the re-segmenting refine changed.
+    relabelled_spans: usize,
     elapsed_s: f64,
 }
 
@@ -102,6 +108,8 @@ struct Report {
     max_speakers: usize,
     segmenter: Option<String>,
     refine: bool,
+    /// `Off`, `MergeOnly` or `Resegment`.
+    refine_mode: String,
     /// Offline merge threshold; `None` when the refinement is skipped.
     refine_threshold: Option<f32>,
     vad: Option<String>,
@@ -122,6 +130,17 @@ struct PooledReport {
     scored_s: f64,
     /// Mean of |hyp_speakers - ref_speakers| over files.
     mean_abs_speaker_count_error: f64,
+}
+
+/// Parse `--refine-mode`: `off`, `merge-only` (or `merge`), `resegment`
+/// (or `reseg`).
+///
+/// # Errors
+///
+/// Returns a message naming the accepted values.
+pub(crate) fn parse_refine_mode(raw: &str) -> Result<OfflineRefineMode, String> {
+    OfflineRefineMode::parse(raw)
+        .ok_or_else(|| format!("`{raw}` is not a refine mode (off, merge-only, resegment)"))
 }
 
 /// Parse `--max-speakers`: a speaker cap of at least one.
@@ -192,6 +211,8 @@ pub(crate) async fn run(args: DerArgs) -> Result<()> {
     if let Some(threshold) = args.refine_threshold {
         refine.merge_threshold = threshold;
     }
+    let refine_mode = args.refine_mode.unwrap_or_else(|| family.refine_mode());
+    let refine_on = refine_mode != OfflineRefineMode::Off;
     let der_config = DerConfig {
         collar: args.collar,
         skip_overlap: args.skip_overlap,
@@ -208,10 +229,9 @@ pub(crate) async fn run(args: DerArgs) -> Result<()> {
         let reference = reference_for(reference, &file_stem(wav))
             .with_context(|| format!("select reference in {}", rttm.display()))?;
 
-        let mut diarizer = OnlineDiarizer::new(family.load(&args.embedder)?, cluster);
-        if !args.no_refine {
-            diarizer = diarizer.with_offline_refinement_config(refine);
-        }
+        let mut diarizer = OnlineDiarizer::new(family.load(&args.embedder)?, cluster)
+            .with_offline_refinement_config(refine)
+            .with_refine_mode(refine_mode);
         if let Some(seg) = &args.segmenter {
             diarizer = diarizer.with_segmenter(Box::new(
                 PyannoteSegmenter::new(seg).context("load pyannote segmenter")?,
@@ -221,7 +241,8 @@ pub(crate) async fn run(args: DerArgs) -> Result<()> {
         let run = diarize_file(wav, Box::new(diarizer), &args).await?;
         let elapsed_s = started.elapsed().as_secs_f64();
 
-        let hypothesis = spans_to_segments(&name, &run.chunks, &resolve_merges(&run.merges));
+        let (chunks, relabelled_spans) = relabel_spans(run.chunks, &run.relabel);
+        let hypothesis = spans_to_segments(&name, &chunks, &resolve_merges(&run.merges));
         if let Some(dir) = &args.hyp_dir {
             std::fs::create_dir_all(dir)?;
             std::fs::write(dir.join(format!("{name}.rttm")), write_rttm(&hypothesis))?;
@@ -238,8 +259,9 @@ pub(crate) async fn run(args: DerArgs) -> Result<()> {
             scored_s: r.total,
             ref_speakers: r.ref_speakers,
             hyp_speakers: r.hyp_speakers,
-            chunks: run.chunks.len(),
+            chunks: chunks.len(),
             merges: run.merges.len(),
+            relabelled_spans,
             elapsed_s,
         };
         if !args.json {
@@ -270,8 +292,9 @@ pub(crate) async fn run(args: DerArgs) -> Result<()> {
         similarity_threshold: cluster.similarity_threshold,
         max_speakers: cluster.max_speakers,
         segmenter: args.segmenter.as_ref().map(|p| p.display().to_string()),
-        refine: !args.no_refine,
-        refine_threshold: (!args.no_refine).then_some(refine.merge_threshold),
+        refine: refine_on,
+        refine_mode: format!("{refine_mode:?}"),
+        refine_threshold: refine_on.then_some(refine.merge_threshold),
         vad: args.vad.as_ref().map(|p| p.display().to_string()),
         min_chunk_ms: args.min_chunk_ms,
         max_chunk_ms: args.max_chunk_ms,
@@ -405,6 +428,38 @@ fn resolve_merges(merges: &[(SpeakerId, SpeakerId)]) -> HashMap<SpeakerId, Speak
         .collect()
 }
 
+/// Apply a re-segmentation plan to the recorded spans. Returns the
+/// `(offset ms, spans)` chunks and how many spans changed speaker.
+fn relabel_spans(
+    chunks: Vec<RecordedChunk>,
+    relabel: &HashMap<SpanRef, SpeakerId>,
+) -> (Vec<(u32, Vec<SpeakerSpan>)>, usize) {
+    let mut changed = 0;
+    let out = chunks
+        .into_iter()
+        .map(|c| {
+            let spans = c
+                .spans
+                .into_iter()
+                .enumerate()
+                .map(|(i, mut span)| {
+                    let at = SpanRef {
+                        chunk_index: c.chunk_index,
+                        span_index: u16::try_from(i).unwrap_or(u16::MAX),
+                    };
+                    if let Some(&id) = relabel.get(&at) {
+                        changed += usize::from(id != span.speaker_id);
+                        span.speaker_id = id;
+                    }
+                    span
+                })
+                .collect();
+            (c.offset_ms, spans)
+        })
+        .collect();
+    (out, changed)
+}
+
 /// Turn per-chunk spans into session-time RTTM segments, relabelled
 /// through `merges`.
 fn spans_to_segments(
@@ -431,11 +486,20 @@ fn spans_to_segments(
     segments
 }
 
+/// One diarized chunk as the bench saw it.
+struct RecordedChunk {
+    chunk_index: u32,
+    offset_ms: u32,
+    spans: Vec<SpeakerSpan>,
+}
+
 struct FileRun {
     audio_s: f64,
-    /// `(chunk offset ms, spans)` per diarized chunk, in order.
-    chunks: Vec<(u32, Vec<SpeakerSpan>)>,
+    /// Every diarized chunk, in order.
+    chunks: Vec<RecordedChunk>,
     merges: Vec<(SpeakerId, SpeakerId)>,
+    /// Span relabelling of a re-segmenting refine (empty otherwise).
+    relabel: HashMap<SpanRef, SpeakerId>,
 }
 
 async fn diarize_file(wav: &Path, diarizer: Box<dyn Diarizer>, args: &DerArgs) -> Result<FileRun> {
@@ -445,6 +509,7 @@ async fn diarize_file(wav: &Path, diarizer: Box<dyn Diarizer>, args: &DerArgs) -
         / f64::from(format.channels.max(1))
         / f64::from(format.sample_rate_hz.max(1));
     let span_log: SpanLog = Arc::default();
+    let plan_slot: PlanSlot = Arc::default();
     let capture: Arc<dyn AudioCapture> = Arc::new(FileCapture {
         samples: Arc::new(samples),
         format,
@@ -454,6 +519,7 @@ async fn diarize_file(wav: &Path, diarizer: Box<dyn Diarizer>, args: &DerArgs) -
         .with_diarizer(Box::new(RecordingDiarizer {
             inner: diarizer,
             log: Arc::clone(&span_log),
+            plan: Arc::clone(&plan_slot),
         }));
     if let Some(vad) = &args.vad {
         pipeline = pipeline.with_vad(Box::new(
@@ -472,7 +538,11 @@ async fn diarize_file(wav: &Path, diarizer: Box<dyn Diarizer>, args: &DerArgs) -
     let mut merges = Vec::new();
     while let Some(event) = handle.next_event().await {
         match event {
-            TranscriptEvent::Chunk { offset_ms, .. } => offsets.push(offset_ms),
+            TranscriptEvent::Chunk {
+                chunk_index,
+                offset_ms,
+                ..
+            } => offsets.push((chunk_index, offset_ms)),
             TranscriptEvent::SpeakersMerged { merges: m, .. } => {
                 merges.extend(m.into_iter().map(|x| (x.absorbed, x.surviving)));
             }
@@ -488,19 +558,42 @@ async fn diarize_file(wav: &Path, diarizer: Box<dyn Diarizer>, args: &DerArgs) -
         spans.len(),
         offsets.len()
     );
+    let mut chunks = Vec::with_capacity(spans.len());
+    for ((chunk_index, offset_ms), (logged_index, spans)) in offsets.into_iter().zip(spans) {
+        ensure!(
+            chunk_index == logged_index,
+            "diarizer saw chunk {logged_index} where the pipeline emitted chunk {chunk_index}"
+        );
+        chunks.push(RecordedChunk {
+            chunk_index,
+            offset_ms,
+            spans,
+        });
+    }
+    let relabel = plan_slot
+        .lock()
+        .expect("plan slot poisoned")
+        .take()
+        .unwrap_or_default();
     Ok(FileRun {
         audio_s,
-        chunks: offsets.into_iter().zip(spans).collect(),
+        chunks,
         merges,
+        relabel,
     })
 }
 
-type SpanLog = Arc<Mutex<Vec<Vec<SpeakerSpan>>>>;
+/// `(chunk index, spans)` per diarizer call, in call order.
+type SpanLog = Arc<Mutex<Vec<(u32, Vec<SpeakerSpan>)>>>;
+/// Span relabelling captured from the diarizer's refine plan.
+type PlanSlot = Arc<Mutex<Option<HashMap<SpanRef, SpeakerId>>>>;
 
-/// Forwards to the real diarizer and records each chunk's spans.
+/// Forwards to the real diarizer, records each chunk's spans and keeps
+/// a copy of a re-segmenting refine plan.
 struct RecordingDiarizer {
     inner: Box<dyn Diarizer>,
     log: SpanLog,
+    plan: PlanSlot,
 }
 
 #[async_trait]
@@ -514,11 +607,22 @@ impl Diarizer for RecordingDiarizer {
     }
 
     async fn assign_spans(&mut self, samples: &[Sample]) -> Result<Vec<SpeakerSpan>, DomainError> {
+        self.inner.assign_spans(samples).await
+    }
+
+    async fn assign_spans_at(
+        &mut self,
+        samples: &[Sample],
+        ctx: ChunkContext,
+    ) -> Result<Vec<SpeakerSpan>, DomainError> {
         // Errors are logged as an empty chunk, matching the pipeline,
         // which treats a failed diarization as unlabelled.
-        let result = self.inner.assign_spans(samples).await;
+        let result = self.inner.assign_spans_at(samples, ctx).await;
         let spans = result.as_ref().map(Clone::clone).unwrap_or_default();
-        self.log.lock().expect("span log poisoned").push(spans);
+        self.log
+            .lock()
+            .expect("span log poisoned")
+            .push((ctx.chunk_index, spans));
         result
     }
 
@@ -536,6 +640,15 @@ impl Diarizer for RecordingDiarizer {
 
     fn refine_offline(&self) -> Vec<(SpeakerId, SpeakerId)> {
         self.inner.refine_offline()
+    }
+
+    fn refine_plan(&self, budget: RefineBudget) -> Result<RefineOutcome, DomainError> {
+        let outcome = self.inner.refine_plan(budget)?;
+        if let RefineOutcome::Relabel(plan) = &outcome {
+            *self.plan.lock().expect("plan slot poisoned") =
+                Some(plan.spans.iter().copied().collect());
+        }
+        Ok(outcome)
     }
 }
 
@@ -727,6 +840,127 @@ mod tests {
         assert_eq!(resolved[&a], c);
         assert_eq!(resolved[&b], c);
         assert!(!resolved.contains_key(&c));
+    }
+
+    #[test]
+    fn refine_mode_flag_accepts_the_documented_values() {
+        assert_eq!(parse_refine_mode("off"), Ok(OfflineRefineMode::Off));
+        assert_eq!(
+            parse_refine_mode("merge-only"),
+            Ok(OfflineRefineMode::MergeOnly)
+        );
+        assert_eq!(
+            parse_refine_mode("resegment"),
+            Ok(OfflineRefineMode::Resegment)
+        );
+        assert!(parse_refine_mode("vbx").is_err());
+    }
+
+    #[test]
+    fn resegment_plan_relabels_recorded_spans_by_chunk_and_position() {
+        let (a, b) = (SpeakerId::new(), SpeakerId::new());
+        let span = |id, s, e| SpeakerSpan {
+            speaker_id: id,
+            slot: 0,
+            start_sample: s,
+            end_sample: e,
+        };
+        let chunks = vec![
+            RecordedChunk {
+                chunk_index: 0,
+                offset_ms: 0,
+                spans: vec![span(a, 0, 100), span(b, 100, 200)],
+            },
+            // Chunk 1 was skipped as silence: index 2 follows index 0.
+            RecordedChunk {
+                chunk_index: 2,
+                offset_ms: 9_000,
+                spans: vec![span(b, 0, 100)],
+            },
+        ];
+        let at = |chunk_index, span_index| SpanRef {
+            chunk_index,
+            span_index,
+        };
+        let relabel = HashMap::from([(at(0, 1), a), (at(2, 0), a), (at(0, 0), a)]);
+        let (out, changed) = relabel_spans(chunks, &relabel);
+        assert_eq!(changed, 2);
+        assert_eq!(out[1].0, 9_000);
+        assert!(out
+            .iter()
+            .flat_map(|(_, spans)| spans)
+            .all(|s| s.speaker_id == a));
+    }
+
+    #[tokio::test]
+    async fn recording_diarizer_forwards_context_and_captures_the_plan() {
+        struct Inner;
+        #[async_trait]
+        impl Diarizer for Inner {
+            fn sample_rate_hz(&self) -> u32 {
+                16_000
+            }
+            async fn assign(&mut self, _: &[Sample]) -> Result<Option<SpeakerId>, DomainError> {
+                Ok(None)
+            }
+            async fn assign_spans_at(
+                &mut self,
+                _: &[Sample],
+                ctx: ChunkContext,
+            ) -> Result<Vec<SpeakerSpan>, DomainError> {
+                Ok(vec![SpeakerSpan {
+                    speaker_id: SpeakerId(uuid::Uuid::from_u128(u128::from(ctx.offset_ms))),
+                    slot: 0,
+                    start_sample: 0,
+                    end_sample: 1,
+                }])
+            }
+            fn speakers(&self) -> Vec<Speaker> {
+                vec![]
+            }
+            fn rename(&mut self, _: SpeakerId, _: &str) -> Result<bool, DomainError> {
+                Ok(false)
+            }
+            fn reset(&mut self) {}
+            fn refine_plan(&self, _: RefineBudget) -> Result<RefineOutcome, DomainError> {
+                Ok(RefineOutcome::Relabel(echo_domain::SpanRelabelPlan {
+                    spans: vec![(
+                        SpanRef {
+                            chunk_index: 4,
+                            span_index: 0,
+                        },
+                        SpeakerId(uuid::Uuid::nil()),
+                    )],
+                    ..Default::default()
+                }))
+            }
+        }
+        let (log, plan): (SpanLog, PlanSlot) = (Arc::default(), Arc::default());
+        let mut d = RecordingDiarizer {
+            inner: Box::new(Inner),
+            log: Arc::clone(&log),
+            plan: Arc::clone(&plan),
+        };
+        let ctx = ChunkContext {
+            chunk_index: 4,
+            offset_ms: 7,
+            epoch: 0,
+        };
+        let spans = d.assign_spans_at(&[0.0], ctx).await.unwrap();
+        assert_eq!(
+            spans[0].speaker_id.0.as_u128(),
+            7,
+            "context reaches the inner diarizer"
+        );
+        assert_eq!(log.lock().unwrap()[0].0, 4);
+        let budget = RefineBudget {
+            deadline: std::time::Instant::now() + std::time::Duration::from_secs(1),
+        };
+        assert!(matches!(
+            d.refine_plan(budget).unwrap(),
+            RefineOutcome::Relabel(_)
+        ));
+        assert_eq!(plan.lock().unwrap().as_ref().map(HashMap::len), Some(1));
     }
 
     #[test]
