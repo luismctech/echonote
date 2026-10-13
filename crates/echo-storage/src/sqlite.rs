@@ -239,15 +239,12 @@ impl MeetingStore for SqliteMeetingStore {
         .await
         .map_err(map_sqlx("rewrite segments speaker_id"))?;
 
-        let row_delete = sqlx::query("DELETE FROM speakers WHERE id = ? AND meeting_id = ?")
-            .bind(&absorbed_str)
-            .bind(&meeting_str)
-            .execute(&mut *tx)
-            .await
-            .map_err(map_sqlx("delete absorbed speaker"))?;
+        let retired =
+            retire_speaker(&mut tx, &meeting_str, &absorbed_str, Some(&surviving_str)).await?;
 
         tx.commit().await.map_err(map_sqlx("commit tx"))?;
-        Ok(seg_update.rows_affected() > 0 || row_delete.rows_affected() > 0)
+        Ok(seg_update.rows_affected() > 0
+            || matches!(retired, Retirement::Deleted | Retirement::LabelMoved))
     }
 
     async fn rename_meeting(
@@ -948,6 +945,82 @@ fn sanitize_fts_query(raw: &str) -> Option<String> {
     }
 }
 
+/// What [`retire_speaker`] did with a speaker row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Retirement {
+    /// No such speaker on this meeting.
+    Missing,
+    /// The row still has segments or a label nobody could take; it stays.
+    Kept,
+    /// The row was deleted (it had no label).
+    Deleted,
+    /// The label moved to the recipient and the row was deleted.
+    LabelMoved,
+}
+
+/// Retire a speaker inside an open transaction, applying the label rule of
+/// ADR 0001 (Q1): a user label is never overwritten or destroyed.
+///
+/// - A row that still has segments is kept.
+/// - An unlabelled row is deleted.
+/// - A labelled row passes its label to `recipient` only when the
+///   recipient's label is `NULL`, then is deleted; otherwise it is kept with
+///   zero segments so the user-authored name survives.
+async fn retire_speaker(
+    conn: &mut sqlx::SqliteConnection,
+    meeting: &str,
+    retired: &str,
+    recipient: Option<&str>,
+) -> Result<Retirement, DomainError> {
+    let row: Option<(Option<String>,)> =
+        sqlx::query_as("SELECT label FROM speakers WHERE id = ? AND meeting_id = ?")
+            .bind(retired)
+            .bind(meeting)
+            .fetch_optional(&mut *conn)
+            .await
+            .map_err(map_sqlx("read retired speaker"))?;
+    let Some((label,)) = row else {
+        return Ok(Retirement::Missing);
+    };
+    let segments: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM segments WHERE meeting_id = ? AND speaker_id = ?")
+            .bind(meeting)
+            .bind(retired)
+            .fetch_one(&mut *conn)
+            .await
+            .map_err(map_sqlx("count retired speaker segments"))?;
+    if segments > 0 {
+        return Ok(Retirement::Kept);
+    }
+    let outcome = match (label, recipient) {
+        (None, _) => Retirement::Deleted,
+        (Some(label), Some(recipient)) => {
+            let moved = sqlx::query(
+                "UPDATE speakers SET label = ? \
+                 WHERE id = ? AND meeting_id = ? AND label IS NULL",
+            )
+            .bind(&label)
+            .bind(recipient)
+            .bind(meeting)
+            .execute(&mut *conn)
+            .await
+            .map_err(map_sqlx("move retired speaker label"))?;
+            if moved.rows_affected() == 0 {
+                return Ok(Retirement::Kept);
+            }
+            Retirement::LabelMoved
+        }
+        (Some(_), None) => return Ok(Retirement::Kept),
+    };
+    sqlx::query("DELETE FROM speakers WHERE id = ? AND meeting_id = ?")
+        .bind(retired)
+        .bind(meeting)
+        .execute(&mut *conn)
+        .await
+        .map_err(map_sqlx("delete retired speaker"))?;
+    Ok(outcome)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1270,6 +1343,98 @@ mod tests {
 
         store.delete(id).await.unwrap();
         assert!(store.list_speakers(id).await.unwrap().is_empty());
+    }
+
+    // ---------- merge_speakers label rule (ADR 0001, Q1) -------------------
+
+    /// Seed a meeting with two speakers (slots 0 and 1), optional labels,
+    /// and one segment per speaker. Returns `(meeting, a, b, seg_a, seg_b)`.
+    async fn seed_two_speakers(
+        store: &SqliteMeetingStore,
+        label_a: Option<&str>,
+        label_b: Option<&str>,
+    ) -> (MeetingId, Speaker, Speaker, Segment, Segment) {
+        let id = MeetingId::new();
+        store
+            .create(CreateMeeting {
+                id,
+                title: "merge".into(),
+                input_format: fmt(),
+            })
+            .await
+            .unwrap();
+        let a = Speaker {
+            label: label_a.map(str::to_owned),
+            ..Speaker::anonymous(0)
+        };
+        let b = Speaker {
+            label: label_b.map(str::to_owned),
+            ..Speaker::anonymous(1)
+        };
+        store.upsert_speaker(id, &a).await.unwrap();
+        store.upsert_speaker(id, &b).await.unwrap();
+        let mut seg_a = segment(0, 1_000, "uno");
+        seg_a.speaker_id = Some(a.id);
+        let mut seg_b = segment(1_000, 2_000, "dos");
+        seg_b.speaker_id = Some(b.id);
+        store
+            .append_segments(id, &[seg_a.clone(), seg_b.clone()])
+            .await
+            .unwrap();
+        (id, a, b, seg_a, seg_b)
+    }
+
+    #[tokio::test]
+    async fn merge_of_unlabelled_speaker_rewrites_segments_and_deletes_row() {
+        let store = SqliteMeetingStore::open_in_memory().await.unwrap();
+        let (id, a, b, _, seg_b) = seed_two_speakers(&store, None, None).await;
+
+        assert!(store.merge_speakers(id, b.id, a.id).await.unwrap());
+
+        let full = store.get(id).await.unwrap().unwrap();
+        assert_eq!(full.speakers.len(), 1);
+        assert_eq!(full.speakers[0].id, a.id);
+        let moved = full.segments.iter().find(|s| s.id == seg_b.id).unwrap();
+        assert_eq!(moved.speaker_id, Some(a.id));
+    }
+
+    #[tokio::test]
+    async fn merge_moves_absorbed_label_to_unlabelled_survivor() {
+        let store = SqliteMeetingStore::open_in_memory().await.unwrap();
+        let (id, a, b, _, _) = seed_two_speakers(&store, None, Some("Bea")).await;
+
+        assert!(store.merge_speakers(id, b.id, a.id).await.unwrap());
+
+        let speakers = store.list_speakers(id).await.unwrap();
+        assert_eq!(
+            speakers.len(),
+            1,
+            "absorbed row is deleted once its label moved"
+        );
+        assert_eq!(speakers[0].id, a.id);
+        assert_eq!(speakers[0].label.as_deref(), Some("Bea"));
+    }
+
+    #[tokio::test]
+    async fn merge_keeps_labelled_absorbed_row_when_survivor_is_labelled() {
+        let store = SqliteMeetingStore::open_in_memory().await.unwrap();
+        let (id, a, b, _, seg_b) = seed_two_speakers(&store, Some("Ana"), Some("Bea")).await;
+
+        assert!(store.merge_speakers(id, b.id, a.id).await.unwrap());
+
+        let full = store.get(id).await.unwrap().unwrap();
+        let labels: Vec<_> = full
+            .speakers
+            .iter()
+            .map(|s| (s.id, s.label.clone()))
+            .collect();
+        assert_eq!(
+            labels,
+            vec![(a.id, Some("Ana".into())), (b.id, Some("Bea".into()))],
+            "no user label is overwritten or destroyed"
+        );
+        let moved = full.segments.iter().find(|s| s.id == seg_b.id).unwrap();
+        assert_eq!(moved.speaker_id, Some(a.id), "segments still move");
     }
 
     // ---------- FTS5 search (Sprint 1 day 8) -------------------------------

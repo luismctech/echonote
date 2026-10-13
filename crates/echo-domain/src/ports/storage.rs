@@ -106,7 +106,10 @@ pub trait MeetingStore: Send + Sync {
     /// Collapse one speaker into another for this meeting.
     ///
     /// Rewrites every `segments.speaker_id` referencing `absorbed` to
-    /// `surviving`, then deletes the `absorbed` row. Used by the
+    /// `surviving`, then retires the `absorbed` row without ever losing a
+    /// user label (ADR 0001, Q1): an unlabelled row is deleted; a labelled
+    /// row hands its label to `surviving` when that row has none, and is
+    /// otherwise kept with zero segments. Used by the
     /// offline diarization refinement pass invoked at the end of a
     /// streaming session to fix online over-splits.
     ///
