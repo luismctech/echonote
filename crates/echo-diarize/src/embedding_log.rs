@@ -19,6 +19,12 @@ use crate::embedding::l2_normalize;
 /// dims). The log never holds more; reaching it compacts the log.
 pub const EMBEDDING_LOG_CAP: usize = 16_384;
 
+/// Hard cap on the extra window embeddings across all entries (ADR 0001,
+/// Q3: about 13 MB at 192 dims, so the whole log stays near 35 MB at the
+/// worst case of 512 dims for the entries alone). Reaching it thins the
+/// windows; entries are never dropped for windows.
+pub const EMBEDDING_LOG_WINDOW_CAP: usize = 16_384;
+
 /// One embedded span (or, after compaction, several spans of the same
 /// online speaker and epoch).
 #[derive(Clone, PartialEq)]
@@ -44,6 +50,10 @@ pub struct EmbeddingLogEntry {
     pub online_speaker: SpeakerId,
     /// The embedding as produced by the embedder.
     pub embedding: Box<[f32]>,
+    /// Extra embeddings of fixed-length windows inside a long span, in
+    /// time order (ADR 0001, Q3). Only the re-segmentation reads them;
+    /// empty for short spans and when dense windows are off.
+    pub windows: Vec<Box<[f32]>>,
 }
 
 impl EmbeddingLogEntry {
@@ -67,7 +77,15 @@ impl EmbeddingLogEntry {
             local_speaker,
             online_speaker,
             embedding,
+            windows: Vec::new(),
         }
+    }
+
+    /// The same entry with these window embeddings.
+    #[must_use]
+    pub fn with_windows(mut self, windows: Vec<Box<[f32]>>) -> Self {
+        self.windows = windows;
+        self
     }
 
     /// Logged speech duration in milliseconds ([`Self::speech_ms`]), not
@@ -91,6 +109,7 @@ impl std::fmt::Debug for EmbeddingLogEntry {
             .field("local_speaker", &self.local_speaker)
             .field("online_speaker", &self.online_speaker)
             .field("embedding_dim", &self.embedding.len())
+            .field("windows", &self.windows.len())
             .finish()
     }
 }
@@ -100,22 +119,40 @@ impl std::fmt::Debug for EmbeddingLogEntry {
 pub struct EmbeddingLog {
     entries: Vec<EmbeddingLogEntry>,
     cap: usize,
+    windows: usize,
+    window_cap: usize,
 }
 
 impl Default for EmbeddingLog {
     fn default() -> Self {
-        Self::with_cap(EMBEDDING_LOG_CAP)
+        Self::with_caps(EMBEDDING_LOG_CAP, EMBEDDING_LOG_WINDOW_CAP)
     }
 }
 
 impl EmbeddingLog {
-    /// Empty log that never holds more than `cap` entries (`cap >= 2`).
+    /// Empty log that never holds more than `cap` entries (`cap >= 2`)
+    /// or more than [`EMBEDDING_LOG_WINDOW_CAP`] window embeddings.
     #[must_use]
     pub fn with_cap(cap: usize) -> Self {
+        Self::with_caps(cap, EMBEDDING_LOG_WINDOW_CAP)
+    }
+
+    /// Empty log that never holds more than `cap` entries (`cap >= 2`)
+    /// or more than `window_cap` window embeddings.
+    #[must_use]
+    pub fn with_caps(cap: usize, window_cap: usize) -> Self {
         Self {
             entries: Vec::new(),
             cap: cap.max(2),
+            windows: 0,
+            window_cap,
         }
+    }
+
+    /// Window embeddings held across all entries.
+    #[must_use]
+    pub fn window_count(&self) -> usize {
+        self.windows
     }
 
     /// Entries in insertion (time) order.
@@ -139,14 +176,54 @@ impl EmbeddingLog {
     /// Drop every entry (session reset).
     pub fn clear(&mut self) {
         self.entries.clear();
+        self.windows = 0;
     }
 
-    /// Append an entry, compacting first when the log is full.
-    pub fn push(&mut self, entry: EmbeddingLogEntry) {
+    /// Append an entry, compacting first when the log is full and
+    /// thinning the windows when they exceed their cap.
+    pub fn push(&mut self, mut entry: EmbeddingLogEntry) {
         if self.entries.len() >= self.cap {
             self.compact();
+            self.windows = self.entries.iter().map(|e| e.windows.len()).sum();
         }
+        entry.windows.truncate(self.window_cap);
+        self.windows += entry.windows.len();
         self.entries.push(entry);
+        if self.windows > self.window_cap {
+            self.thin_windows();
+        }
+    }
+
+    /// Bring the window count back under its cap, O(n) per pass: first
+    /// keep every other window of each entry that has several (the first
+    /// one stays), so the remaining windows still cover each long span;
+    /// once every entry has at most one, drop windows oldest first.
+    fn thin_windows(&mut self) {
+        let before = self.windows;
+        while self.windows > self.window_cap && self.entries.iter().any(|e| e.windows.len() > 1) {
+            for e in &mut self.entries {
+                if e.windows.len() > 1 {
+                    let mut i = 0;
+                    e.windows.retain(|_| {
+                        i += 1;
+                        i % 2 == 1
+                    });
+                }
+            }
+            self.windows = self.entries.iter().map(|e| e.windows.len()).sum();
+        }
+        for e in &mut self.entries {
+            if self.windows <= self.window_cap {
+                break;
+            }
+            self.windows -= e.windows.len();
+            e.windows.clear();
+        }
+        tracing::debug!(
+            before,
+            after = self.windows,
+            "embedding log windows thinned"
+        );
     }
 
     /// Make room for at least one entry. Runs on the streaming assign
@@ -239,6 +316,8 @@ fn coalesce(a: EmbeddingLogEntry, b: EmbeddingLogEntry) -> EmbeddingLogEntry {
     l2_normalize(&mut embedding);
     let mut spans = a.spans;
     spans.extend(b.spans);
+    let mut windows = a.windows;
+    windows.extend(b.windows);
     EmbeddingLogEntry {
         spans,
         start_ms: a.start_ms.min(b.start_ms),
@@ -252,6 +331,7 @@ fn coalesce(a: EmbeddingLogEntry, b: EmbeddingLogEntry) -> EmbeddingLogEntry {
         },
         online_speaker: a.online_speaker,
         embedding: embedding.into_boxed_slice(),
+        windows,
     }
 }
 
@@ -367,6 +447,70 @@ mod tests {
         }
         log.push(entry(4, 4_000, 5_000, a, [1.0, 0.0]));
         assert_eq!(chunks(&log), vec![vec![0, 2], vec![1, 3], vec![4]]);
+    }
+
+    fn windowed(chunk: u32, speaker: SpeakerId, n: usize) -> EmbeddingLogEntry {
+        let t = chunk * 6_000;
+        entry(chunk, t, t + 6_000, speaker, [1.0, 0.0]).with_windows(
+            (0..n)
+                .map(|i| vec![i as f32, 1.0].into_boxed_slice())
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn debug_output_never_prints_the_window_vectors() {
+        let e = windowed(0, SpeakerId::new(), 2);
+        let text = format!("{e:?}");
+        assert!(text.contains("windows: 2"), "{text}");
+    }
+
+    #[test]
+    fn windows_beyond_their_cap_are_thinned_and_the_cap_holds() {
+        let a = SpeakerId::new();
+        let mut log = EmbeddingLog::with_caps(100, 8);
+        for i in 0..5 {
+            log.push(windowed(i, a, 4));
+            assert!(log.window_count() <= 8, "{} windows", log.window_count());
+        }
+        assert_eq!(log.len(), 5, "thinning windows never drops entries");
+        let counted: usize = log.entries().iter().map(|e| e.windows.len()).sum();
+        assert_eq!(counted, log.window_count());
+        assert!(
+            log.entries()
+                .iter()
+                .all(|e| e.windows.first().is_some_and(|w| w[0] == 0.0)),
+            "every entry keeps its first window"
+        );
+    }
+
+    #[test]
+    fn single_windows_beyond_the_cap_go_oldest_first() {
+        let a = SpeakerId::new();
+        let mut log = EmbeddingLog::with_caps(100, 2);
+        for i in 0..4 {
+            log.push(windowed(i, a, 1));
+        }
+        assert!(log.window_count() <= 2);
+        assert!(
+            log.entries()[3].windows.len() == 1,
+            "newest keeps its window"
+        );
+        assert!(
+            log.entries()[0].windows.is_empty(),
+            "oldest lost its window"
+        );
+    }
+
+    #[test]
+    fn coalescing_keeps_both_window_lists_and_the_count() {
+        let a = SpeakerId::new();
+        let mut log = EmbeddingLog::with_caps(2, 100);
+        log.push(windowed(0, a, 2));
+        log.push(windowed(1, a, 3));
+        log.push(windowed(2, a, 1));
+        assert_eq!(log.entries()[0].windows.len(), 5);
+        assert_eq!(log.window_count(), 6);
     }
 
     #[test]

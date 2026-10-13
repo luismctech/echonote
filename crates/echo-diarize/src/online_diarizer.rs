@@ -29,6 +29,12 @@ use crate::presets::{OfflineRefineMode, DEFAULT_RESEGMENT_THRESHOLD};
 use crate::resegment::{relabel_plan, too_short, OfflineReclusterer};
 use crate::vbx::{VbxConfig, VbxReclusterer};
 
+/// Length of a dense window embedding (ADR 0001, Q3).
+pub const DENSE_WINDOW_MS: u32 = 1_500;
+
+/// Only spans longer than this get dense window embeddings.
+pub const DENSE_WINDOW_MIN_SPAN_MS: u32 = 3_000;
+
 /// Streaming diarizer backed by a swappable embedder + online cluster.
 ///
 /// In addition to real-time assignment, the diarizer optionally
@@ -72,6 +78,8 @@ pub struct OnlineDiarizer {
     plda: Option<Arc<Plda>>,
     /// VBx settings of the re-segmentation.
     vbx_config: VbxConfig,
+    /// Log dense window embeddings (re-segmentation only).
+    dense_windows: bool,
     /// Context the next plain [`Diarizer::assign_spans`] call is logged
     /// under: callers that do not pass a [`ChunkContext`] get
     /// consecutive chunk indices and back-to-back session times.
@@ -96,6 +104,7 @@ impl OnlineDiarizer {
             resegment_threshold: DEFAULT_RESEGMENT_THRESHOLD,
             plda: None,
             vbx_config: VbxConfig::default(),
+            dense_windows: false,
             next_ctx: ChunkContext::default(),
         }
     }
@@ -190,6 +199,49 @@ impl OnlineDiarizer {
     pub fn with_vbx_config(mut self, config: VbxConfig) -> Self {
         self.vbx_config = config;
         self
+    }
+
+    /// Whether spans longer than [`DENSE_WINDOW_MIN_SPAN_MS`] also log
+    /// embeddings of [`DENSE_WINDOW_MS`] windows for the re-segmentation
+    /// (ADR 0001, Q3). Off by default: on the held-out calibration data
+    /// the windows raised the VBx DER and roughly doubled the embedding
+    /// cost of long spans (`docs/spikes/2026-10-vbx.md`). Only
+    /// [`OfflineRefineMode::Resegment`] reads them; other modes never
+    /// compute them.
+    #[must_use]
+    pub fn with_dense_windows(mut self, on: bool) -> Self {
+        self.dense_windows = on;
+        self
+    }
+
+    fn dense_windows(&self) -> bool {
+        self.dense_windows && self.refine_mode() == OfflineRefineMode::Resegment
+    }
+
+    /// Embeddings of the dense windows of `span` (empty when the span is
+    /// not long enough or dense windows are off). Windows tile the span
+    /// without overlap, spread evenly; a window the embedder declines or
+    /// a non-finite vector is skipped.
+    fn window_embeddings(&mut self, span: &[Sample]) -> Result<Vec<Box<[f32]>>, DomainError> {
+        let rate = u64::from(self.embedder.sample_rate_hz().max(1));
+        let win = usize::try_from(rate * u64::from(DENSE_WINDOW_MS) / 1_000).unwrap_or(usize::MAX);
+        let min = usize::try_from(rate * u64::from(DENSE_WINDOW_MIN_SPAN_MS) / 1_000)
+            .unwrap_or(usize::MAX);
+        if !self.dense_windows() || span.len() <= min || win == 0 {
+            return Ok(Vec::new());
+        }
+        let n = span.len() / win;
+        let slack = span.len() - n * win;
+        let mut out = Vec::with_capacity(n);
+        for i in 0..n {
+            let start = i * win + if n > 1 { slack * i / (n - 1) } else { 0 };
+            if let Some(e) = self.embedder.embed(&span[start..start + win])? {
+                if e.iter().all(|x| x.is_finite()) {
+                    out.push(e.into_boxed_slice());
+                }
+            }
+        }
+        Ok(out)
     }
 
     /// Re-segment the log with other VBx settings and AHC cut, whatever
@@ -308,15 +360,19 @@ impl OnlineDiarizer {
         // online as before, but never logged: it would poison the
         // end-of-session clustering.
         let id = if self.keeps_log() && embedding.iter().all(|x| x.is_finite()) {
+            let windows = self.window_embeddings(&samples[range.clone()])?;
             let id = self.cluster.assign(embedding.clone());
-            self.embedding_log.push(EmbeddingLogEntry::new(
-                vec![span],
-                start_ms..end_ms,
-                ctx.epoch,
-                local_speaker,
-                id,
-                embedding.into_boxed_slice(),
-            ));
+            self.embedding_log.push(
+                EmbeddingLogEntry::new(
+                    vec![span],
+                    start_ms..end_ms,
+                    ctx.epoch,
+                    local_speaker,
+                    id,
+                    embedding.into_boxed_slice(),
+                )
+                .with_windows(windows),
+            );
             id
         } else {
             self.cluster.assign(embedding)
@@ -880,6 +936,77 @@ mod tests {
         let mut d = diarizer(OfflineRefineMode::Resegment, -0.5);
         feed(&mut d, &[0.001, 0.002, 0.001]).await;
         assert_eq!(d.refine_plan(budget()).unwrap(), RefineOutcome::Unchanged);
+    }
+
+    /// Stub embedder that counts its calls.
+    struct CountingEmbedder {
+        calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl SpeakerEmbedder for CountingEmbedder {
+        fn sample_rate_hz(&self) -> u32 {
+            16_000
+        }
+        fn dim(&self) -> usize {
+            4
+        }
+        fn embed(&mut self, samples: &[Sample]) -> Result<Option<Vec<f32>>, DomainError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(Some(vec![1.0, 0.0, 0.0, samples.len() as f32 / 1e6]))
+        }
+    }
+
+    async fn windows_and_calls(
+        mode: OfflineRefineMode,
+        dense: bool,
+        samples: usize,
+    ) -> (usize, usize) {
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut d = OnlineDiarizer::with_defaults(Box::new(CountingEmbedder {
+            calls: std::sync::Arc::clone(&calls),
+        }))
+        .with_dense_windows(dense)
+        .with_refine_mode(mode);
+        d.assign_spans(&vec![0.1; samples]).await.unwrap();
+        let windows = d.log().first().map_or(0, |e| e.windows.len());
+        (windows, calls.load(std::sync::atomic::Ordering::SeqCst))
+    }
+
+    #[tokio::test]
+    async fn dense_windows_tile_long_spans_when_enabled() {
+        // 4.5 s span: three 1.5 s windows besides the span itself.
+        assert_eq!(
+            windows_and_calls(OfflineRefineMode::Resegment, true, 72_000).await,
+            (3, 4)
+        );
+        // Exactly 3 s is not "longer than 3 s": no windows.
+        assert_eq!(
+            windows_and_calls(OfflineRefineMode::Resegment, true, 48_000).await,
+            (0, 1)
+        );
+    }
+
+    #[tokio::test]
+    async fn dense_windows_are_off_by_default() {
+        assert_eq!(
+            windows_and_calls(OfflineRefineMode::Resegment, false, 72_000).await,
+            (0, 1)
+        );
+        let d = OnlineDiarizer::with_defaults(Box::new(StubEmbedder::new()))
+            .with_refine_mode(OfflineRefineMode::Resegment);
+        assert!(!d.dense_windows());
+    }
+
+    #[tokio::test]
+    async fn other_modes_never_spend_extra_embeddings() {
+        assert_eq!(
+            windows_and_calls(OfflineRefineMode::MergeOnly, true, 72_000).await,
+            (0, 1)
+        );
+        assert_eq!(
+            windows_and_calls(OfflineRefineMode::Off, true, 72_000).await,
+            (0, 1)
+        );
     }
 
     #[tokio::test]

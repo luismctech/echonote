@@ -437,17 +437,26 @@ struct Frame<'a> {
     embedding: &'a [f32],
 }
 
-/// Frames of the log, in time order: one per entry.
+/// Frames of the log, in time order: an entry's dense windows when it
+/// has any, else its span embedding.
 fn frames(entries: &[EmbeddingLogEntry]) -> Vec<Frame<'_>> {
-    entries
-        .iter()
-        .enumerate()
-        .map(|(entry, e)| Frame {
-            entry,
-            epoch: e.epoch,
-            embedding: &e.embedding,
-        })
-        .collect()
+    let mut out = Vec::with_capacity(entries.len());
+    for (entry, e) in entries.iter().enumerate() {
+        if e.windows.is_empty() {
+            out.push(Frame {
+                entry,
+                epoch: e.epoch,
+                embedding: &e.embedding,
+            });
+        } else {
+            out.extend(e.windows.iter().map(|w| Frame {
+                entry,
+                epoch: e.epoch,
+                embedding: w,
+            }));
+        }
+    }
+    out
 }
 
 impl OfflineReclusterer for VbxReclusterer {
@@ -791,6 +800,24 @@ mod tests {
             .collect();
         let labels = reclusterer(4).recluster(&entries, budget()).unwrap();
         assert_eq!(labels, vec![0, 1, 0, 1, 0, 1, 0, 1]);
+    }
+
+    #[test]
+    fn dense_windows_outvote_the_span_embedding() {
+        let mut entries: Vec<_> = (0..6)
+            .map(|i| log_entry(i, 0, (i % 2) as usize, 4))
+            .collect();
+        // Entry 4's span embedding looks like voice 0, but its three
+        // windows all sound like voice 1.
+        let w = |axis: usize| {
+            let mut v = vec![0.0_f32; 4];
+            v[axis] = 1.0;
+            v.into_boxed_slice()
+        };
+        entries[4].windows = vec![w(1), w(1), w(1)];
+        let labels = reclusterer(4).recluster(&entries, budget()).unwrap();
+        assert_eq!(labels[4], labels[1]);
+        assert_ne!(labels[4], labels[0]);
     }
 
     #[test]
