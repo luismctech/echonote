@@ -251,8 +251,8 @@ matrix.
 
 ## Next
 
-- T7: compare candidate embedders with this harness, each with its own threshold calibrated on
-  the dev sets above. EN CAM++ and ERes2Net are still uncalibrated.
+- T7 (done, no-go): candidate embedders were compared with this harness, see
+  `docs/spikes/2026-10-embedder-spike.md`. EN CAM++ and ERes2Net are still uncalibrated.
 - T10 (VBx) should target the speaker over-count that remains after calibration.
 - Done in T6b: `build_diarizer` builds the diarizer from `EmbedderFamily` (`a7f843a`), and the
   app defaults to the multilingual CAM++ when the user has no preference (`bb29136`).
