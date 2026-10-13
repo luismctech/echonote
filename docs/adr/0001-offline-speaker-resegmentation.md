@@ -355,6 +355,9 @@ flowchart LR
    on the held-out T6 test sets with the calibrated preset, the weighted DER (2·ES + Vox)/3 is at
    least 0.5 points lower than merge-only (today 6.73) **and** the speaker over-count is no worse
    (Spanish test set: at most 4.15 estimated speakers against 2.80 true).
+   **T10 outcome (2026-10-13): not met.** VBx reached 3.45 estimated Spanish speakers (met) but a
+   weighted test DER of 9.31 against 6.73 for merge-only, 3.08 points short of the required 6.23.
+   The default stays `MergeOnly` (`docs/spikes/2026-10-vbx.md`).
 
 ## Implementation notes (T9)
 
@@ -385,9 +388,8 @@ sketches above:
 - **UI.** The live pane patches chunk slots for `speakersReassigned` and, now, `speakersMerged`,
   and shows the Q2 notice. `MeetingDetail` does not refetch on `speakersReassigned`; the
   refetch after `stopped` already shows the persisted result.
-- **Known limit (unchanged).** The merge-only refine still builds a full `n × n` similarity
-  matrix over the log. At the 16 384-entry cap that is about 1 GB; T10 should bound it the way
-  the AHC reclusterer is bounded.
+- **Known limit (fixed in T10).** The merge-only refine built a full `n × n` similarity matrix
+  over the log, about 1 GB at the 16 384-entry cap. T10 removed the matrix (see the T10 notes).
 
 ## Implementation notes (T9b review fixes)
 
@@ -434,3 +436,40 @@ Decisions taken while fixing the T9 review warnings:
   shows such a speaker at 0 % where it can still be renamed; no UI change was needed.
 - **Live pane merges.** `applySpeakerMerges` follows merge chains to the final survivor and
   leaves speakers in a merge cycle unchanged.
+
+## Implementation notes (T10)
+
+T10 replaces the AHC-only reclusterer with VBx. The default stays `MergeOnly` because Q4 was not
+met (`docs/spikes/2026-10-vbx.md`). Where the code differs from the sketches above:
+
+- **VBx.** `vbx.rs` ports `VBx`, `forward_backward` and `twoGMMcalib_lin` from BUTSpeechFIT VBx
+  (Apache-2.0; the notice and licence are in `crates/echo-diarize/third_party/`). Each epoch is an
+  independent HMM run (D7): its first frame is entered from the speaker priors, never through a
+  speaker transition. VBx checks the deadline between iterations and never returns a partial
+  plan.
+- **AHC is the initialisation.** The T9 strided average-linkage AHC now runs in the PLDA's LDA
+  space. It is cut at the per-recording two-Gaussian threshold plus a calibrated offset, uses at
+  most 2 048 representatives (8.4 MB condensed matrix) and keeps at most 20 seed speakers. The
+  rest join the nearest seed. The fixed `resegment_threshold` is the fallback cut when the
+  calibration is impossible. The AHC-only reclusterer is gone.
+- **PLDA asset.** One model, for the multilingual CAM++ only. It is 166 KB, so it is compiled
+  into the binary (`assets/plda_campplus_multi.plda`) instead of downloaded into the models
+  directory, and T11 has nothing to host for it. It is fitted with `scripts/fit-plda.py` on 174
+  Multilingual LibriSpeech train speakers (CC BY 4.0). Families without a model, or a model of
+  another dimension, fall back to the merge-only refine with one `info!` line (D6).
+- **Merge-only bound (Q3).** For unit vectors, average linkage equals the dot product of the
+  group sums divided by the group sizes. The merge-only refine therefore keeps one sum per
+  speaker and no pairwise matrix: O(speakers × dim) memory, with exactly the same merges (dev DER
+  unchanged). This is stronger than the 4 096-representative bound Q3 asked for.
+- **Dense windows (Q3).** They are implemented as Q3 allows: 1.5 s windows tiling spans longer
+  than 3 s, RAM-only, never logged, with their own cap of 16 384 vectors and O(n) thinning that
+  never drops an entry. VBx uses them as frames that vote for their span. They are **off by
+  default** (`OnlineDiarizer::with_dense_windows`): on the dev sets they raised the VBx DER and
+  cost about 1.5x the pipeline time.
+- **Memory and time.** An ignored release test (`tests/resegment_memory.rs`) fills the log to
+  its caps. The stop-time transient was 30.5 MB in about 0.6 s, within the Q3 target of about
+  35 MB. On a synthetic 3 h stream (20 speakers) the refine took 1.0 s (max of 21 runs), well
+  inside the D8 target of p95 ≤ 5 s. VBx without windows adds no live cost.
+- **Not changed.** `RESEGMENT_MIN_ENTRIES` (4) and `RESEGMENT_MIN_SPEECH_MS` (10 s) keep their
+  initial values. The VBx failures on test are on full 3-5 minute recordings, not short ones.
+

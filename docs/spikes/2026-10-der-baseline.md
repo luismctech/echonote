@@ -257,6 +257,23 @@ The default stays `MergeOnly`. This check proves the plan end to end; it is not 
 default. T10 (VBx with PLDA, AHC initialisation and a minimum-cluster prior) is the intended
 `Resegment` implementation. Raw JSON: scratchpad `der-eval/results/t9/`.
 
+## T10 VBx check
+
+T10 replaces the AHC behind `--refine-mode resegment` with VBx: VB-HMM over a PLDA fitted on
+Multilingual LibriSpeech train speakers, with an AHC initialisation. Its parameters were
+calibrated on the dev sets above, then the untouched test sets were run once. Details, grids and
+costs are in `docs/spikes/2026-10-vbx.md`.
+
+| Set | Merge-only DER % / est spk | VBx DER % / est spk | True spk |
+|---|---|---|---|
+| `mls_es_dev` | 5.85 / 4.75 | **3.59** / 3.50 | 3.45 |
+| `voxconverse_dev` | 16.26 / 5.42 | **14.88** / 3.83 | 3.67 |
+| `mls_es` (test) | **7.31** / 4.15 | 10.91 / **3.45** | 2.80 |
+| `voxconverse` (test) | **5.56** / 4.67 | 6.10 / **3.08** | 3.33 |
+
+Weighted test DER: merge-only 6.73, VBx 9.31. VBx fixes the over-count but loses on test DER, so
+the ADR 0001 Q4 criterion is not met and the default stays merge-only.
+
 ## Reproduce
 
 ```
@@ -276,6 +293,7 @@ matrix.
 
 - T7 (done, no-go): candidate embedders were compared with this harness, see
   `docs/spikes/2026-10-embedder-spike.md`. EN CAM++ and ERes2Net are still uncalibrated.
-- T10 (VBx) should target the speaker over-count that remains after calibration.
+- T10 (done, default unchanged): VBx fixes the speaker over-count but not the test DER, see
+  `docs/spikes/2026-10-vbx.md`.
 - Done in T6b: `build_diarizer` builds the diarizer from `EmbedderFamily` (`a7f843a`), and the
   app defaults to the multilingual CAM++ when the user has no preference (`bb29136`).
