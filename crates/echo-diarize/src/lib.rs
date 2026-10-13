@@ -17,6 +17,7 @@
 //!   the end-of-session refine (never persisted or logged).
 //! - [`resegment`]: re-segmentation of that log into a span relabel
 //!   plan with stable speaker ids (ADR 0001).
+//! - [`plda`]: the PLDA back-end of the speaker re-segmentation.
 //! - [`presets`]: [`EmbedderFamily`], the per-embedder loader and
 //!   clustering thresholds the app and the benchmarks share.
 //!
@@ -36,6 +37,7 @@ pub mod eres2net;
 pub mod metrics;
 pub mod offline_refine;
 pub mod online_diarizer;
+pub mod plda;
 pub mod presets;
 pub mod pyannote_segmenter;
 pub mod resegment;
@@ -56,6 +58,7 @@ pub use metrics::{
 };
 pub use offline_refine::{refine_speakers, OfflineRefineConfig};
 pub use online_diarizer::OnlineDiarizer;
+pub use plda::Plda;
 pub use presets::{EmbedderFamily, OfflineRefineMode, DEFAULT_RESEGMENT_THRESHOLD};
 pub use pyannote_segmenter::{
     PyannoteSegmenter, PyannoteSegmenterConfig, PYANNOTE_CHUNK_SAMPLES, PYANNOTE_HOP_SAMPLES,

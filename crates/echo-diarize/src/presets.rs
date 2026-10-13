@@ -11,6 +11,7 @@
 //! configuration the app builds.
 
 use std::path::Path;
+use std::sync::Arc;
 
 use echo_domain::DomainError;
 
@@ -19,6 +20,7 @@ use crate::cluster::OnlineClusterConfig;
 use crate::embedding::SpeakerEmbedder;
 use crate::eres2net::Eres2NetEmbedder;
 use crate::offline_refine::OfflineRefineConfig;
+use crate::plda::Plda;
 
 /// Re-segmentation AHC cut for families without a calibrated value. Equal
 /// to the conservative [`OfflineRefineConfig::default`] merge threshold.
@@ -205,6 +207,18 @@ impl EmbedderFamily {
         }
     }
 
+    /// PLDA model fitted on this family's embeddings, which the
+    /// re-segmentation (VBx) needs. Only the multilingual CAM++ has one
+    /// (bundled, `assets/README.md`); without a model
+    /// [`OfflineRefineMode::Resegment`] falls back to the merge-only refine.
+    #[must_use]
+    pub fn plda(self) -> Option<Arc<Plda>> {
+        match self {
+            Self::CamPlusPlusMultilingual => Some(Plda::campplus_multilingual()),
+            Self::CamPlusPlus | Self::Eres2Net => None,
+        }
+    }
+
     /// Load the embedder adapter for this family from `path`.
     ///
     /// # Errors
@@ -355,6 +369,16 @@ mod tests {
             DEFAULT_RESEGMENT_THRESHOLD,
             OfflineRefineConfig::default().merge_threshold
         );
+    }
+
+    #[test]
+    fn only_the_multilingual_campplus_ships_a_plda_model() {
+        let plda = EmbedderFamily::CamPlusPlusMultilingual
+            .plda()
+            .expect("bundled model");
+        assert_eq!(plda.dim(), 192, "matches the multilingual CAM++ output");
+        assert!(EmbedderFamily::CamPlusPlus.plda().is_none());
+        assert!(EmbedderFamily::Eres2Net.plda().is_none());
     }
 
     #[test]
