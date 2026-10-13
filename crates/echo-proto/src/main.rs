@@ -360,11 +360,12 @@ enum BenchKind {
         /// Override the preset online-cluster similarity threshold.
         #[arg(long)]
         threshold: Option<f32>,
-        /// Override the preset online speaker cap.
-        #[arg(long)]
+        /// Override the preset online speaker cap (at least 1).
+        #[arg(long, value_parser = bench_der::parse_max_speakers)]
         max_speakers: Option<usize>,
-        /// Override the preset offline refinement merge threshold.
-        #[arg(long)]
+        /// Override the preset offline refinement merge threshold (a
+        /// cosine similarity in -1..=1).
+        #[arg(long, value_parser = bench_der::parse_cosine_threshold)]
         refine_threshold: Option<f32>,
         /// Skip the end-of-session offline refinement pass.
         #[arg(long, default_value_t = false)]

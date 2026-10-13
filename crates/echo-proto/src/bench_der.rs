@@ -14,7 +14,7 @@
 //! speaker per Whisper segment (dominant span), so app-visible DER also
 //! depends on ASR segmentation; this harness isolates the diarizer.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -119,6 +119,40 @@ struct PooledReport {
     scored_s: f64,
     /// Mean of |hyp_speakers - ref_speakers| over files.
     mean_abs_speaker_count_error: f64,
+}
+
+/// Parse `--max-speakers`: a speaker cap of at least one.
+///
+/// # Errors
+///
+/// Returns a message for non-integers and for `0`.
+pub(crate) fn parse_max_speakers(raw: &str) -> Result<usize, String> {
+    let cap: usize = raw
+        .parse()
+        .map_err(|e| format!("`{raw}` is not a speaker count: {e}"))?;
+    if cap == 0 {
+        return Err("the speaker cap must be at least 1".to_string());
+    }
+    Ok(cap)
+}
+
+/// Parse a cosine-similarity threshold (`--refine-threshold`): a finite
+/// value in `-1..=1`.
+///
+/// # Errors
+///
+/// Returns a message for non-numbers, NaN, infinities and values outside
+/// `-1..=1`.
+pub(crate) fn parse_cosine_threshold(raw: &str) -> Result<f32, String> {
+    let value: f32 = raw
+        .parse()
+        .map_err(|e| format!("`{raw}` is not a number: {e}"))?;
+    if !value.is_finite() || !(-1.0..=1.0).contains(&value) {
+        return Err(format!(
+            "`{raw}` is not a cosine similarity (a finite value in -1..=1)"
+        ));
+    }
+    Ok(value)
 }
 
 /// Entry point of `echo-proto bench der`.
@@ -292,28 +326,37 @@ fn file_stem(path: &Path) -> String {
 /// two recordings share a stem, so hypothesis RTTMs never overwrite
 /// each other.
 fn unique_names(pairs: &[(PathBuf, PathBuf)]) -> Vec<String> {
-    let mut seen: HashMap<String, usize> = HashMap::new();
+    let mut used: HashSet<String> = HashSet::new();
     pairs
         .iter()
         .map(|(wav, _)| {
             let stem = file_stem(wav);
-            let n = seen.entry(stem.clone()).or_insert(0);
-            *n += 1;
-            if *n == 1 {
-                stem
-            } else {
-                format!("{stem}_{n}")
+            let mut name = stem.clone();
+            let mut n = 1;
+            // A generated `stem_n` may equal a later (or earlier) real
+            // stem, so keep counting until the name is unused.
+            while used.contains(&name) {
+                n += 1;
+                name = format!("{stem}_{n}");
             }
+            used.insert(name.clone());
+            name
         })
         .collect()
 }
 
 /// Reference turns of recording `file_id`. An RTTM that lists several
 /// recordings is filtered by file id (and must contain `file_id`); a
-/// single-recording RTTM is used whole, whatever id it carries.
+/// single-recording RTTM must carry `file_id` too, so a manifest line
+/// that pairs a wav with the wrong RTTM fails instead of scoring
+/// against another recording's turns.
 fn reference_for(segments: Vec<RttmSegment>, file_id: &str) -> Result<Vec<RttmSegment>> {
     let first = segments.first().map(|s| s.file_id.clone());
-    if segments.iter().all(|s| Some(&s.file_id) == first.as_ref()) {
+    if let Some(only) = first.filter(|f| segments.iter().all(|s| &s.file_id == f)) {
+        ensure!(
+            only == file_id,
+            "single-recording RTTM is for file id `{only}`, not `{file_id}` (the wav stem)"
+        );
         return Ok(segments);
     }
     let selected: Vec<RttmSegment> = segments
@@ -599,9 +642,12 @@ mod tests {
     }
 
     #[test]
-    fn single_recording_rttm_is_used_whatever_its_id() {
-        let one = vec![seg("other", "x"), seg("other", "y")];
+    fn single_recording_rttm_must_name_the_recording() {
+        let one = vec![seg("rec", "x"), seg("rec", "y")];
         assert_eq!(reference_for(one, "rec").unwrap().len(), 2);
+        let other = vec![seg("other", "x"), seg("other", "y")];
+        let err = reference_for(other, "rec").unwrap_err().to_string();
+        assert!(err.contains("other") && err.contains("rec"), "{err}");
     }
 
     #[test]
@@ -609,6 +655,40 @@ mod tests {
         let pair = |w: &str| (PathBuf::from(w), PathBuf::from("r.rttm"));
         let names = unique_names(&[pair("/x/rec.wav"), pair("/y/rec.wav"), pair("/z/b.wav")]);
         assert_eq!(names, vec!["rec", "rec_2", "b"]);
+    }
+
+    #[test]
+    fn generated_names_never_collide_with_real_stems() {
+        let pair = |w: &str| (PathBuf::from(w), PathBuf::from("r.rttm"));
+        let names = unique_names(&[
+            pair("/x/rec.wav"),
+            pair("/y/rec.wav"),
+            pair("/z/rec_2.wav"),
+            pair("/w/rec.wav"),
+        ]);
+        let distinct: std::collections::HashSet<&String> = names.iter().collect();
+        assert_eq!(distinct.len(), names.len(), "{names:?}");
+        assert_eq!(names[0], "rec");
+        assert_eq!(names[2], "rec_2_2", "{names:?}");
+    }
+
+    #[test]
+    fn speaker_cap_must_be_positive() {
+        assert_eq!(parse_max_speakers("1").unwrap(), 1);
+        assert_eq!(parse_max_speakers("8").unwrap(), 8);
+        for bad in ["0", "-1", "x", ""] {
+            assert!(parse_max_speakers(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn refine_threshold_must_be_a_finite_cosine() {
+        for ok in ["-1", "0", "0.5", "1"] {
+            assert!(parse_cosine_threshold(ok).is_ok(), "{ok}");
+        }
+        for bad in ["NaN", "inf", "-inf", "1.01", "-1.5", "x"] {
+            assert!(parse_cosine_threshold(bad).is_err(), "{bad}");
+        }
     }
 
     #[test]
