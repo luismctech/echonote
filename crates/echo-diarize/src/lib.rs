@@ -67,4 +67,4 @@ pub use pyannote_segmenter::{
     PyannoteSegmenter, PyannoteSegmenterConfig, PYANNOTE_CHUNK_SAMPLES, PYANNOTE_HOP_SAMPLES,
     PYANNOTE_MAX_LOCAL_SPEAKERS, PYANNOTE_SAMPLE_RATE,
 };
-pub use vbx::VbxParams;
+pub use vbx::{VbxConfig, VbxParams};

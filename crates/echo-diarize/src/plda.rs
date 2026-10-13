@@ -253,6 +253,26 @@ pub(crate) mod tests {
         out
     }
 
+    /// Model whose LDA is the identity and whose PLDA transform scales
+    /// the unit vectors by 10 (a within-speaker spread of 0.1), with every
+    /// across-class variance equal to `psi`.
+    pub(crate) fn identity(dim: usize, psi: f32) -> Plda {
+        let mut eye = vec![0.0_f32; dim * dim];
+        let mut scaled = vec![0.0_f32; dim * dim];
+        for i in 0..dim {
+            eye[i * dim + i] = 1.0;
+            scaled[i * dim + i] = 10.0;
+        }
+        let zeros = vec![0.0_f32; dim];
+        let psis = vec![psi; dim];
+        Plda::from_bytes(&encode(
+            dim,
+            dim,
+            [&zeros, &eye, &zeros, &zeros, &scaled, &psis],
+        ))
+        .unwrap()
+    }
+
     /// 3 -> 2 model with hand-picked values; reference outputs computed
     /// with numpy using the VBx formulas (`vbhmm.py`).
     fn small() -> Plda {

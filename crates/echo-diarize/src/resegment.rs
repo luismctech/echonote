@@ -7,10 +7,9 @@
 //! so a matched speaker keeps its id, slot, colour and user label. Only
 //! unmatched clusters get a fresh id.
 //!
-//! The clustering itself sits behind [`OfflineReclusterer`].
-//! [`AhcReclusterer`] (average-linkage AHC over the log entries) is the
-//! current implementation; a VB-HMM (VBx) reclusterer is the planned
-//! second one.
+//! The clustering itself sits behind [`OfflineReclusterer`]; its
+//! implementation is the VB-HMM in [`crate::vbx`], initialised by the
+//! average-linkage AHC of this module ([`strided_ahc`]).
 //!
 //! Non-finite embeddings (a broken model) are not logged in the first
 //! place; as a second line of defence, any non-finite distance counts as
@@ -27,16 +26,15 @@ use echo_domain::{
 use crate::embedding::{cosine_similarity, l2_normalize};
 use crate::embedding_log::EmbeddingLogEntry;
 use crate::metrics::max_weight_assignment;
+use crate::vbx::two_gmm_threshold;
 
 /// Fewer logged entries than this: the session is too short to
 /// re-segment and the refine returns [`RefineOutcome::Unchanged`].
-/// Initial value from ADR 0001 (D7), still to be calibrated together
-/// with the VBx reclusterer.
+/// Value from ADR 0001 (D7).
 pub const RESEGMENT_MIN_ENTRIES: usize = 4;
 
 /// Less logged speech than this (milliseconds): too short to
-/// re-segment. Initial value from ADR 0001 (D7), still to be calibrated
-/// together with the VBx reclusterer.
+/// re-segment. Value from ADR 0001 (D7).
 pub const RESEGMENT_MIN_SPEECH_MS: u64 = 10_000;
 
 /// At most this many entries take part in the AHC itself (a condensed
@@ -56,14 +54,6 @@ pub(crate) trait OfflineReclusterer {
     ) -> Result<Vec<usize>, DomainError>;
 }
 
-/// Average-linkage AHC over the log entries, cut at a cosine similarity.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct AhcReclusterer {
-    /// Two clusters merge while their average-linkage cosine similarity
-    /// is at least this value.
-    pub threshold: f32,
-}
-
 /// Cosine distance of the largest possible value (opposite vectors);
 /// stands in for any non-finite distance.
 const MAX_COSINE_DISTANCE: f32 = 2.0;
@@ -71,55 +61,80 @@ const MAX_COSINE_DISTANCE: f32 = 2.0;
 /// Deadline checks in per-entry loops happen once every this many entries.
 const DEADLINE_CHECK_EVERY: usize = 256;
 
-impl OfflineReclusterer for AhcReclusterer {
-    fn recluster(
-        &self,
-        entries: &[EmbeddingLogEntry],
-        budget: RefineBudget,
-    ) -> Result<Vec<usize>, DomainError> {
-        let n = entries.len();
-        if n == 0 {
-            return Ok(Vec::new());
-        }
-        let stride = n.div_ceil(AHC_MAX_REPRESENTATIVES);
-        let reps: Vec<usize> = (0..n).step_by(stride).collect();
-        let rep_emb: Vec<&[f32]> = reps.iter().map(|&i| &*entries[i].embedding).collect();
-        let rep_labels = average_linkage_labels(&rep_emb, self.threshold, budget.deadline)?;
-        if stride == 1 {
-            return Ok(rep_labels);
-        }
+/// Where [`strided_ahc`] cuts the dendrogram.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum AhcCut {
+    /// Merge while the average-linkage cosine similarity is at least
+    /// this value.
+    Similarity(f32),
+    /// Per-recording threshold, as in VBx: the two-Gaussian calibration
+    /// of the pairwise similarities ([`crate::vbx::two_gmm_threshold`])
+    /// plus `offset`. Falls back to `fallback` when the scores cannot be
+    /// calibrated (fewer than two distinct values).
+    Calibrated {
+        /// Added to the calibrated threshold.
+        offset: f32,
+        /// Similarity cut when calibration is impossible.
+        fallback: f32,
+    },
+}
 
-        // Strided: every other entry joins the nearest centroid.
-        let k = rep_labels.iter().max().map_or(0, |m| m + 1);
-        let dim = rep_emb[0].len();
-        let mut centroids = vec![vec![0.0_f32; dim]; k];
-        for (e, &label) in rep_emb.iter().zip(&rep_labels) {
-            for (c, x) in centroids[label].iter_mut().zip(e.iter()) {
-                *c += x;
-            }
-        }
-        for c in &mut centroids {
-            l2_normalize(c);
-        }
-        let mut labels = vec![0_usize; n];
-        for (r, &i) in reps.iter().enumerate() {
-            labels[i] = rep_labels[r];
-        }
-        for (i, label) in labels.iter_mut().enumerate() {
-            if i % DEADLINE_CHECK_EVERY == 0 {
-                budget.check()?;
-            }
-            if i % stride != 0 {
-                *label = nearest(&centroids, &entries[i].embedding);
-            }
-        }
-        Ok(labels)
+/// At most this many pairwise scores feed the two-Gaussian calibration;
+/// longer condensed matrices are strided.
+const CALIBRATION_MAX_SCORES: usize = 1 << 20;
+
+/// Average-linkage AHC over `vectors` with at most `max_reps` (itself at
+/// most [`AHC_MAX_REPRESENTATIVES`]) of them in the clustering itself:
+/// longer inputs are strided and every other vector joins the nearest
+/// cluster centroid. One label per vector, compact (`0..k`).
+pub(crate) fn strided_ahc(
+    vectors: &[&[f32]],
+    cut: AhcCut,
+    max_reps: usize,
+    budget: RefineBudget,
+) -> Result<Vec<usize>, DomainError> {
+    let n = vectors.len();
+    if n == 0 {
+        return Ok(Vec::new());
     }
+    let stride = n.div_ceil(max_reps.clamp(1, AHC_MAX_REPRESENTATIVES));
+    let reps: Vec<usize> = (0..n).step_by(stride).collect();
+    let rep_emb: Vec<&[f32]> = reps.iter().map(|&i| vectors[i]).collect();
+    let rep_labels = average_linkage_labels(&rep_emb, cut, budget.deadline)?;
+    if stride == 1 {
+        return Ok(rep_labels);
+    }
+
+    // Strided: every other vector joins the nearest centroid.
+    let k = rep_labels.iter().max().map_or(0, |m| m + 1);
+    let dim = rep_emb[0].len();
+    let mut centroids = vec![vec![0.0_f32; dim]; k];
+    for (e, &label) in rep_emb.iter().zip(&rep_labels) {
+        for (c, x) in centroids[label].iter_mut().zip(e.iter()) {
+            *c += x;
+        }
+    }
+    for c in &mut centroids {
+        l2_normalize(c);
+    }
+    let mut labels = vec![0_usize; n];
+    for (r, &i) in reps.iter().enumerate() {
+        labels[i] = rep_labels[r];
+    }
+    for (i, label) in labels.iter_mut().enumerate() {
+        if i % DEADLINE_CHECK_EVERY == 0 {
+            budget.check()?;
+        }
+        if i % stride != 0 {
+            *label = nearest(&centroids, vectors[i]);
+        }
+    }
+    Ok(labels)
 }
 
 /// Index of the centroid most similar to `v`. A non-finite similarity
 /// ranks below every finite one.
-fn nearest(centroids: &[Vec<f32>], v: &[f32]) -> usize {
+pub(crate) fn nearest(centroids: &[Vec<f32>], v: &[f32]) -> usize {
     centroids
         .iter()
         .enumerate()
@@ -150,7 +165,7 @@ fn tri(n: usize, i: usize, j: usize) -> usize {
 }
 
 /// Average-linkage (UPGMA) agglomerative clustering of `emb`, cut where
-/// the linkage cosine similarity drops below `threshold`.
+/// the linkage cosine similarity drops below the threshold `cut` gives.
 ///
 /// Nearest-neighbour-chain algorithm with Lance-Williams updates:
 /// O(n^2) time and one condensed f32 distance matrix. Average linkage
@@ -159,7 +174,7 @@ fn tri(n: usize, i: usize, j: usize) -> usize {
 /// Labels are compact (`0..k`) in order of first appearance.
 fn average_linkage_labels(
     emb: &[&[f32]],
-    threshold: f32,
+    cut: AhcCut,
     deadline: Instant,
 ) -> Result<Vec<usize>, DomainError> {
     let n = emb.len();
@@ -175,6 +190,20 @@ fn average_linkage_labels(
             check_deadline(deadline)?;
         }
     }
+    let threshold = match cut {
+        AhcCut::Similarity(t) => t,
+        AhcCut::Calibrated { offset, fallback } => {
+            let step = dist.len().div_ceil(CALIBRATION_MAX_SCORES).max(1);
+            let scores: Vec<f32> = dist
+                .iter()
+                .step_by(step)
+                .filter(|d| **d < MAX_COSINE_DISTANCE)
+                .map(|d| 1.0 - d)
+                .collect();
+            check_deadline(deadline)?;
+            two_gmm_threshold(&scores).map_or(fallback, |t| t as f32 + offset)
+        }
+    };
     let cut = 1.0 - threshold;
 
     let mut size = vec![1_u32; n];
@@ -387,7 +416,8 @@ mod tests {
     fn ahc_groups_close_embeddings_and_separates_far_ones() {
         let emb = [unit(0.0), unit(5.0), unit(90.0), unit(2.0), unit(95.0)];
         let refs: Vec<&[f32]> = emb.iter().map(Vec::as_slice).collect();
-        let labels = average_linkage_labels(&refs, 0.5, far_budget().deadline).unwrap();
+        let labels =
+            average_linkage_labels(&refs, AhcCut::Similarity(0.5), far_budget().deadline).unwrap();
         assert_eq!(labels, vec![0, 0, 1, 0, 1]);
     }
 
@@ -395,7 +425,8 @@ mod tests {
     fn ahc_with_a_strict_threshold_keeps_every_entry_apart() {
         let emb = [unit(0.0), unit(30.0), unit(60.0)];
         let refs: Vec<&[f32]> = emb.iter().map(Vec::as_slice).collect();
-        let labels = average_linkage_labels(&refs, 0.99, far_budget().deadline).unwrap();
+        let labels =
+            average_linkage_labels(&refs, AhcCut::Similarity(0.99), far_budget().deadline).unwrap();
         assert_eq!(labels, vec![0, 1, 2]);
     }
 
@@ -403,7 +434,8 @@ mod tests {
     fn ahc_treats_a_non_finite_embedding_as_its_own_cluster() {
         let emb = [unit(0.0), vec![f32::NAN, f32::NAN], unit(5.0)];
         let refs: Vec<&[f32]> = emb.iter().map(Vec::as_slice).collect();
-        let labels = average_linkage_labels(&refs, 0.5, far_budget().deadline).unwrap();
+        let labels =
+            average_linkage_labels(&refs, AhcCut::Similarity(0.5), far_budget().deadline).unwrap();
         assert_eq!(labels, vec![0, 1, 0]);
     }
 
@@ -419,7 +451,13 @@ mod tests {
         let past = RefineBudget {
             deadline: Instant::now() - Duration::from_millis(1),
         };
-        let r = AhcReclusterer { threshold: 0.5 }.recluster(&entries, past);
+        let vectors: Vec<&[f32]> = entries.iter().map(|e| &*e.embedding).collect();
+        let r = strided_ahc(
+            &vectors,
+            AhcCut::Similarity(0.5),
+            AHC_MAX_REPRESENTATIVES,
+            past,
+        );
         assert!(matches!(r, Err(DomainError::DiarizationFailed(_))));
     }
 
@@ -436,9 +474,14 @@ mod tests {
                 }
             })
             .collect();
-        let labels = AhcReclusterer { threshold: 0.5 }
-            .recluster(&entries, far_budget())
-            .unwrap();
+        let vectors: Vec<&[f32]> = entries.iter().map(|e| &*e.embedding).collect();
+        let labels = strided_ahc(
+            &vectors,
+            AhcCut::Similarity(0.5),
+            AHC_MAX_REPRESENTATIVES,
+            far_budget(),
+        )
+        .unwrap();
         for (e, &l) in entries.iter().zip(&labels) {
             let expected = if e.online_speaker == a {
                 labels[0]

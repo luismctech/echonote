@@ -21,6 +21,7 @@ use crate::embedding::SpeakerEmbedder;
 use crate::eres2net::Eres2NetEmbedder;
 use crate::offline_refine::OfflineRefineConfig;
 use crate::plda::Plda;
+use crate::vbx::VbxConfig;
 
 /// Re-segmentation AHC cut for families without a calibrated value. Equal
 /// to the conservative [`OfflineRefineConfig::default`] merge threshold.
@@ -217,6 +218,14 @@ impl EmbedderFamily {
             Self::CamPlusPlusMultilingual => Some(Plda::campplus_multilingual()),
             Self::CamPlusPlus | Self::Eres2Net => None,
         }
+    }
+
+    /// VBx settings of the re-segmentation for this family:
+    /// [`VbxConfig::default`] (the BUTSpeechFIT example recipe) until it
+    /// is calibrated.
+    #[must_use]
+    pub fn vbx_config(self) -> VbxConfig {
+        VbxConfig::default()
     }
 
     /// Load the embedder adapter for this family from `path`.

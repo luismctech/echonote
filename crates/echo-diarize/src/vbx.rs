@@ -32,9 +32,15 @@
 //! `Fb` leaves fewer speakers) and `loopP` is the probability of staying
 //! with the same speaker between consecutive frames.
 
+use std::sync::Arc;
 use std::time::Instant;
 
-use echo_domain::DomainError;
+use echo_domain::{DomainError, RefineBudget};
+
+use crate::embedding::l2_normalize;
+use crate::embedding_log::EmbeddingLogEntry;
+use crate::plda::Plda;
+use crate::resegment::{nearest, strided_ahc, AhcCut, OfflineReclusterer};
 
 /// VB-HMM hyper-parameters (names as in the original).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -359,6 +365,231 @@ pub fn two_gmm_threshold(scores: &[f32]) -> Option<f64> {
     threshold.is_finite().then_some(threshold)
 }
 
+/// Settings of the VBx re-segmentation ([`VbxReclusterer`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct VbxConfig {
+    /// VB-HMM hyper-parameters.
+    pub params: VbxParams,
+    /// AHC initialisation cut: `Some(offset)` uses the per-recording
+    /// two-Gaussian threshold plus `offset` (the VBx recipe), `None` a
+    /// fixed similarity (the diarizer's re-segmentation threshold). Both
+    /// cut cosine similarities in the PLDA's LDA space.
+    pub init_offset: Option<f32>,
+    /// Sharpness of the initial responsibilities: each frame starts with
+    /// `softmax(smoothing * one_hot(ahc_label))`.
+    pub init_smoothing: f64,
+    /// PLDA dimensions VBx uses (at most the model's LDA dimension).
+    pub lda_dim: usize,
+    /// At most this many AHC clusters seed VBx; frames of smaller
+    /// clusters start from the nearest kept one. Bounds the `T x S`
+    /// matrices.
+    pub max_speakers: usize,
+}
+
+impl Default for VbxConfig {
+    /// The BUTSpeechFIT example recipe (`run_example.sh`): Fa 0.3, Fb 17,
+    /// loopP 0.99, AHC offset -0.015, smoothing 5, LDA 128, 40 iterations.
+    fn default() -> Self {
+        Self {
+            params: VbxParams {
+                fa: 0.3,
+                fb: 17.0,
+                loop_p: 0.99,
+                max_iters: 40,
+                epsilon: 1e-6,
+            },
+            init_offset: Some(-0.015),
+            init_smoothing: 5.0,
+            lda_dim: 128,
+            max_speakers: 20,
+        }
+    }
+}
+
+/// At most this many frames take part in the AHC initialisation itself
+/// (a condensed f32 matrix of about 8.4 MB); the others start from the
+/// nearest AHC centroid. VBx then revisits every frame, so a coarser
+/// initialisation than the AHC-only bound
+/// ([`crate::resegment::AHC_MAX_REPRESENTATIVES`]) keeps the stop-time
+/// transient memory near the ADR 0001 (Q3) target.
+pub const VBX_INIT_MAX_REPRESENTATIVES: usize = 2_048;
+
+/// At most this many frames enter VBx; a longer log is an invariant
+/// violation of the embedding-log caps and is rejected (fail-safe).
+pub const VBX_MAX_FRAMES: usize = 32_768;
+
+/// VB-HMM re-clustering of the embedding log, initialised by AHC.
+#[derive(Debug, Clone)]
+pub(crate) struct VbxReclusterer {
+    /// PLDA model of the embedder that produced the log.
+    pub plda: Arc<Plda>,
+    /// VBx settings.
+    pub config: VbxConfig,
+    /// Fixed AHC cut when [`VbxConfig::init_offset`] is `None`, and the
+    /// fallback when the calibration is impossible.
+    pub init_threshold: f32,
+}
+
+/// One VBx frame: an embedding and the log entry it votes for.
+struct Frame<'a> {
+    entry: usize,
+    epoch: u16,
+    embedding: &'a [f32],
+}
+
+/// Frames of the log, in time order: one per entry.
+fn frames(entries: &[EmbeddingLogEntry]) -> Vec<Frame<'_>> {
+    entries
+        .iter()
+        .enumerate()
+        .map(|(entry, e)| Frame {
+            entry,
+            epoch: e.epoch,
+            embedding: &e.embedding,
+        })
+        .collect()
+}
+
+impl OfflineReclusterer for VbxReclusterer {
+    fn recluster(
+        &self,
+        entries: &[EmbeddingLogEntry],
+        budget: RefineBudget,
+    ) -> Result<Vec<usize>, DomainError> {
+        budget.check()?;
+        let frames = frames(entries);
+        if frames.is_empty() {
+            return Ok(Vec::new());
+        }
+        if frames.len() > VBX_MAX_FRAMES {
+            return Err(DomainError::DiarizationFailed(format!(
+                "VBx: {} frames exceed the {VBX_MAX_FRAMES} cap",
+                frames.len()
+            )));
+        }
+        if frames.iter().any(|f| f.embedding.len() != self.plda.dim()) {
+            return Err(DomainError::DiarizationFailed(
+                "VBx: embedding dimension does not match the PLDA model".into(),
+            ));
+        }
+        let y: Vec<Vec<f32>> = frames
+            .iter()
+            .map(|f| self.plda.transform(f.embedding))
+            .collect();
+        let refs: Vec<&[f32]> = y.iter().map(Vec::as_slice).collect();
+        let cut = match self.config.init_offset {
+            Some(offset) => AhcCut::Calibrated {
+                offset,
+                fallback: self.init_threshold,
+            },
+            None => AhcCut::Similarity(self.init_threshold),
+        };
+        let init = strided_ahc(&refs, cut, VBX_INIT_MAX_REPRESENTATIVES, budget)?;
+        let (init, s) = keep_largest(init, &refs, self.config.max_speakers.max(1));
+
+        let t_len = frames.len();
+        let on = self.config.init_smoothing.exp();
+        let z = on + (s - 1) as f64;
+        let mut gamma = vec![1.0 / z; t_len * s];
+        for (t, &label) in init.iter().enumerate() {
+            gamma[t * s + label] = on / z;
+        }
+        let dim = self.config.lda_dim.clamp(1, self.plda.lda_dim());
+        let x: Vec<f64> = y.iter().flat_map(|v| self.plda.project(v, dim)).collect();
+        drop(refs);
+        drop(y);
+        let phi: Vec<f64> = self.plda.psi()[..dim]
+            .iter()
+            .map(|p| f64::from(*p))
+            .collect();
+        let run_starts: Vec<usize> = (1..t_len)
+            .filter(|&t| frames[t].epoch != frames[t - 1].epoch)
+            .collect();
+        let out = vbx(
+            x,
+            &phi,
+            gamma,
+            &run_starts,
+            self.config.params,
+            budget.deadline,
+        )?;
+        budget.check()?;
+
+        // Each entry takes the speaker with the most posterior mass over
+        // its frames.
+        let mut votes = vec![0.0_f64; entries.len() * s];
+        for (t, f) in frames.iter().enumerate() {
+            for k in 0..s {
+                votes[f.entry * s + k] += out.gamma[t * s + k];
+            }
+        }
+        let raw: Vec<usize> = votes
+            .chunks_exact(s)
+            .map(|v| {
+                v.iter()
+                    .enumerate()
+                    .max_by(|a, b| a.1.total_cmp(b.1))
+                    .map_or(0, |(k, _)| k)
+            })
+            .collect();
+        Ok(compact(&raw))
+    }
+}
+
+/// Keep the `max` largest clusters of `labels`; members of the others
+/// move to the nearest kept centroid. Returns compact labels and their
+/// count.
+fn keep_largest(labels: Vec<usize>, vectors: &[&[f32]], max: usize) -> (Vec<usize>, usize) {
+    let k = labels.iter().max().map_or(0, |m| m + 1);
+    if k <= max {
+        return (labels, k.max(1));
+    }
+    let mut sizes: Vec<(usize, usize)> = (0..k).map(|c| (c, 0)).collect();
+    for &l in &labels {
+        sizes[l].1 += 1;
+    }
+    // Largest first; the earlier cluster wins ties.
+    sizes.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    let kept: Vec<usize> = sizes[..max].iter().map(|(c, _)| *c).collect();
+    let dim = vectors[0].len();
+    let mut centroids = vec![vec![0.0_f32; dim]; max];
+    for (v, &l) in vectors.iter().zip(&labels) {
+        if let Some(i) = kept.iter().position(|&c| c == l) {
+            for (c, x) in centroids[i].iter_mut().zip(v.iter()) {
+                *c += x;
+            }
+        }
+    }
+    for c in &mut centroids {
+        l2_normalize(c);
+    }
+    let out = labels
+        .iter()
+        .zip(vectors)
+        .map(|(&l, v)| {
+            kept.iter()
+                .position(|&c| c == l)
+                .unwrap_or_else(|| nearest(&centroids, v))
+        })
+        .collect();
+    (out, max)
+}
+
+/// Relabel to `0..k` in order of first appearance.
+fn compact(labels: &[usize]) -> Vec<usize> {
+    let mut map: Vec<(usize, usize)> = Vec::new();
+    labels
+        .iter()
+        .map(|&l| match map.iter().find(|(from, _)| *from == l) {
+            Some(&(_, to)) => to,
+            None => {
+                map.push((l, map.len()));
+                map.len() - 1
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -513,6 +744,69 @@ mod tests {
         let past = Instant::now() - Duration::from_millis(1);
         let r = vbx(X.to_vec(), &PHI, init(), &[], params(), past);
         assert!(matches!(r, Err(DomainError::DiarizationFailed(_))));
+    }
+
+    fn log_entry(i: u32, epoch: u16, axis: usize, dim: usize) -> EmbeddingLogEntry {
+        let mut v = vec![0.0_f32; dim];
+        v[axis] = 1.0;
+        EmbeddingLogEntry::new(
+            vec![echo_domain::SpanRef {
+                chunk_index: i,
+                span_index: 0,
+            }],
+            i * 3_000..(i + 1) * 3_000,
+            epoch,
+            None,
+            echo_domain::SpeakerId::new(),
+            v.into_boxed_slice(),
+        )
+    }
+
+    fn reclusterer(dim: usize) -> VbxReclusterer {
+        VbxReclusterer {
+            plda: Arc::new(crate::plda::tests::identity(dim, 25.0)),
+            config: VbxConfig {
+                params: VbxParams {
+                    fa: 1.0,
+                    fb: 1.0,
+                    loop_p: 0.5,
+                    max_iters: 10,
+                    epsilon: 1e-6,
+                },
+                init_offset: None,
+                ..VbxConfig::default()
+            },
+            init_threshold: 0.5,
+        }
+    }
+
+    fn budget() -> RefineBudget {
+        RefineBudget { deadline: far() }
+    }
+
+    #[test]
+    fn reclusterer_separates_two_voices_across_epochs() {
+        let entries: Vec<_> = (0..8)
+            .map(|i| log_entry(i, u16::from(i >= 4), (i % 2) as usize, 4))
+            .collect();
+        let labels = reclusterer(4).recluster(&entries, budget()).unwrap();
+        assert_eq!(labels, vec![0, 1, 0, 1, 0, 1, 0, 1]);
+    }
+
+    #[test]
+    fn a_dimension_mismatch_is_an_error() {
+        let entries: Vec<_> = (0..4).map(|i| log_entry(i, 0, 0, 3)).collect();
+        assert!(reclusterer(4).recluster(&entries, budget()).is_err());
+    }
+
+    #[test]
+    fn keep_largest_moves_small_clusters_to_the_nearest_kept_one() {
+        let v = |a: f32| vec![a.cos(), a.sin()];
+        let vectors = [v(0.0), v(0.1), v(1.5), v(1.6), v(0.2)];
+        let refs: Vec<&[f32]> = vectors.iter().map(Vec::as_slice).collect();
+        let (labels, k) = keep_largest(vec![0, 0, 1, 1, 2], &refs, 2);
+        assert_eq!(k, 2);
+        assert_eq!(labels, vec![0, 0, 1, 1, 0]);
     }
 
     #[test]
