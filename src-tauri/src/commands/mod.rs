@@ -39,7 +39,8 @@ use echo_app::{MeetingRecorder, RenameSpeaker, StreamingHandle};
 use echo_asr::WhisperCppTranscriber;
 use echo_audio::{RoutingAudioCapture, RubatoResamplerAdapter, SileroVad};
 use echo_diarize::{
-    EmbedderFamily, OfflineRefineConfig, OnlineClusterConfig, OnlineDiarizer, PyannoteSegmenter,
+    EmbedderFamily, OfflineRefineConfig, OfflineRefineMode, OnlineClusterConfig, OnlineDiarizer,
+    PyannoteSegmenter,
 };
 use echo_domain::{
     ChatAssistant, Diarizer, LlmModel, MeetingStore, Resampler, SegmentRetriever, Transcriber,
@@ -464,7 +465,17 @@ impl AppState {
         } else {
             None
         };
-        let (family, cluster_cfg, refine_cfg) = diarizer_preset(&path, env_sim_threshold);
+        // ECHO_DIAR_REFINE=off|merge|reseg picks the end-of-session pass
+        // (debug builds only; release builds use the preset).
+        let env_refine_mode = if cfg!(debug_assertions) {
+            std::env::var("ECHO_DIAR_REFINE")
+                .ok()
+                .and_then(|v| OfflineRefineMode::parse(&v))
+        } else {
+            None
+        };
+        let (family, cluster_cfg, refine_cfg, refine_mode) =
+            diarizer_preset(&path, env_sim_threshold, env_refine_mode);
         let started = std::time::Instant::now();
         let embedder = family.load(&path).map_err(|e| {
             IpcError::new(
@@ -478,13 +489,16 @@ impl AppState {
             similarity_threshold = cluster_cfg.similarity_threshold,
             max_speakers = cluster_cfg.max_speakers,
             refine_threshold = refine_cfg.merge_threshold,
+            refine_mode = ?refine_mode,
             load_ms = started.elapsed().as_millis() as u64,
             "speaker embedder ready"
         );
         // Embedding accumulation lets the streaming pipeline run the
-        // offline refinement at end-of-session and emit SpeakersMerged.
-        let mut diarizer =
-            OnlineDiarizer::new(embedder, cluster_cfg).with_offline_refinement_config(refine_cfg);
+        // offline refinement at end-of-session and emit SpeakersMerged
+        // (merge-only) or SpeakersReassigned (re-segmentation).
+        let mut diarizer = OnlineDiarizer::new(embedder, cluster_cfg)
+            .with_offline_refinement_config(refine_cfg)
+            .with_refine_mode(refine_mode);
 
         // Attach pyannote segmenter if the model file is installed.
         if self.seg_model_path.exists() {
@@ -679,16 +693,25 @@ fn embedder_family(path: &Path) -> EmbedderFamily {
 
 /// Diarizer configuration for the embedder at `path`: the shared
 /// [`EmbedderFamily`] preset, with `similarity_override` (the dev-only
-/// `ECHO_DIAR_SIM_THRESHOLD`) replacing the online similarity threshold.
+/// `ECHO_DIAR_SIM_THRESHOLD`) replacing the online similarity threshold
+/// and `refine_override` (the dev-only `ECHO_DIAR_REFINE`) replacing the
+/// end-of-session refine mode.
 fn diarizer_preset(
     path: &Path,
     similarity_override: Option<f32>,
-) -> (EmbedderFamily, OnlineClusterConfig, OfflineRefineConfig) {
+    refine_override: Option<OfflineRefineMode>,
+) -> (
+    EmbedderFamily,
+    OnlineClusterConfig,
+    OfflineRefineConfig,
+    OfflineRefineMode,
+) {
     let family = embedder_family(path);
     (
         family,
         family.cluster_config(similarity_override),
         family.refine_config(),
+        refine_override.unwrap_or_else(|| family.refine_mode()),
     )
 }
 
@@ -1020,7 +1043,7 @@ mod embedder_selection_tests {
         for rel in [MULTI, CAM_EN, ERES2NET] {
             let path = Path::new("/data").join(rel);
             let family = embedder_family(&path);
-            let (got_family, cluster, refine) = diarizer_preset(&path, None);
+            let (got_family, cluster, refine, mode) = diarizer_preset(&path, None, None);
             assert_eq!(got_family, family, "{rel}");
             assert_eq!(cluster, family.cluster_config(None), "{rel}");
             assert_eq!(
@@ -1028,8 +1051,15 @@ mod embedder_selection_tests {
                 family.refine_config().merge_threshold,
                 "{rel}"
             );
-            let (_, overridden, _) = diarizer_preset(&path, Some(0.42));
+            assert_eq!(mode, family.refine_mode(), "{rel}");
+            let (_, overridden, _, _) = diarizer_preset(&path, Some(0.42), None);
             assert_eq!(overridden, family.cluster_config(Some(0.42)), "{rel}");
+            let (_, _, _, mode) = diarizer_preset(
+                &path,
+                None,
+                Some(echo_diarize::OfflineRefineMode::Resegment),
+            );
+            assert_eq!(mode, echo_diarize::OfflineRefineMode::Resegment, "{rel}");
         }
     }
 
