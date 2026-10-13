@@ -109,7 +109,7 @@ impl Plda {
     ///
     /// [`DomainError::DiarizationFailed`] for a wrong magic or version, a
     /// truncated or oversized file, zero or inconsistent dimensions, a
-    /// non-finite value or a negative `psi`.
+    /// non-finite value, or a negative or increasing `psi`.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, DomainError> {
         let mut r = Reader { bytes };
         if r.take(8)? != PLDA_MAGIC {
@@ -138,6 +138,11 @@ impl Plda {
         }
         if model.psi.iter().any(|&p| p < 0.0) {
             return Err(invalid("negative across-class variance"));
+        }
+        // VBx keeps the first `lda_dim` coordinates as the most
+        // speaker-discriminative ones, which holds only in this order.
+        if model.psi.windows(2).any(|w| w[1] > w[0]) {
+            return Err(invalid("across-class variances not in decreasing order"));
         }
         Ok(model)
     }
@@ -174,10 +179,20 @@ impl Plda {
     }
 
     /// Embedding moved to the length-normalised LDA space
-    /// (`y` in the module docs). `x` must have [`Self::dim`] values.
-    #[must_use]
-    pub fn transform(&self, x: &[f32]) -> Vec<f32> {
-        debug_assert_eq!(x.len(), self.dim);
+    /// (`y` in the module docs).
+    ///
+    /// # Errors
+    ///
+    /// [`DomainError::DiarizationFailed`] unless `x` has [`Self::dim`]
+    /// values.
+    pub fn transform(&self, x: &[f32]) -> Result<Vec<f32>, DomainError> {
+        if x.len() != self.dim {
+            return Err(DomainError::DiarizationFailed(format!(
+                "PLDA transform: {} values, the model expects {}",
+                x.len(),
+                self.dim
+            )));
+        }
         let mut centred: Vec<f64> = x
             .iter()
             .zip(&self.mean1)
@@ -195,21 +210,30 @@ impl Plda {
             *acc -= f64::from(*m);
         }
         normalise(&mut y);
-        y.into_iter().map(|v| v as f32).collect()
+        Ok(y.into_iter().map(|v| v as f32).collect())
     }
 
     /// First `out_dim` PLDA coordinates of a transformed vector `y`
-    /// (`f` in the module docs), `out_dim <= lda_dim`.
-    #[must_use]
-    pub fn project(&self, y: &[f32], out_dim: usize) -> Vec<f64> {
-        debug_assert_eq!(y.len(), self.lda_dim);
+    /// (`f` in the module docs).
+    ///
+    /// # Errors
+    ///
+    /// [`DomainError::DiarizationFailed`] unless `y` has
+    /// [`Self::lda_dim`] values and `out_dim <= lda_dim`.
+    pub fn project(&self, y: &[f32], out_dim: usize) -> Result<Vec<f64>, DomainError> {
         let k = self.lda_dim;
+        if y.len() != k || out_dim > k {
+            return Err(DomainError::DiarizationFailed(format!(
+                "PLDA project: {} values to {out_dim} dimensions, the model has {k}",
+                y.len()
+            )));
+        }
         let centred: Vec<f64> = y
             .iter()
             .zip(&self.mu)
             .map(|(a, m)| f64::from(*a) - f64::from(*m))
             .collect();
-        (0..out_dim.min(k))
+        Ok((0..out_dim)
             .map(|i| {
                 self.tr[i * k..(i + 1) * k]
                     .iter()
@@ -217,7 +241,7 @@ impl Plda {
                     .map(|(t, c)| f64::from(*t) * c)
                     .sum()
             })
-            .collect()
+            .collect())
     }
 }
 
@@ -294,19 +318,19 @@ pub(crate) mod tests {
     #[test]
     fn transform_and_project_match_the_vbx_formulas() {
         let p = small();
-        let y = p.transform(&[0.4, 0.3, -0.2]);
+        let y = p.transform(&[0.4, 0.3, -0.2]).unwrap();
         // numpy: l2_norm(lda.T @ l2_norm(x - mean1) - mean2)
         let expected_y = [-0.306_802_24_f32, 0.951_773_3];
         for (a, b) in y.iter().zip(expected_y) {
             assert!((a - b).abs() < 1e-5, "{y:?}");
         }
         // numpy: ((y - mu) @ tr.T)[:2]
-        let f = p.project(&y, 2);
+        let f = p.project(&y, 2).unwrap();
         let expected_f = [-0.182_717_84_f64, 1.510_700_6];
         for (a, b) in f.iter().zip(expected_f) {
             assert!((a - b).abs() < 1e-5, "{f:?}");
         }
-        assert_eq!(p.project(&y, 1).len(), 1);
+        assert_eq!(p.project(&y, 1).unwrap().len(), 1);
     }
 
     #[test]
@@ -343,12 +367,52 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn psi_out_of_decreasing_order_is_rejected() {
+        let model = |psi: &[f32]| {
+            Plda::from_bytes(&encode(
+                2,
+                2,
+                [
+                    &[0.0; 2],
+                    &[1.0, 0.0, 0.0, 1.0],
+                    &[0.0; 2],
+                    &[0.0; 2],
+                    &[1.0, 0.0, 0.0, 1.0],
+                    psi,
+                ],
+            ))
+        };
+        assert!(model(&[2.0, 1.0]).is_ok());
+        assert!(model(&[1.0, 1.0]).is_ok(), "ties are allowed");
+        assert!(model(&[1.0, 2.0]).is_err(), "increasing psi");
+    }
+
+    #[test]
+    fn wrong_input_lengths_are_errors_in_every_build() {
+        let p = small();
+        assert!(
+            p.transform(&[0.4, 0.3]).is_err(),
+            "transform: 2 of 3 values"
+        );
+        assert!(
+            p.transform(&[0.4, 0.3, -0.2, 0.0]).is_err(),
+            "transform: 4 of 3"
+        );
+        let y = p.transform(&[0.4, 0.3, -0.2]).unwrap();
+        assert!(p.project(&y[..1], 2).is_err(), "project: 1 of 2 values");
+        assert!(
+            p.project(&y, 3).is_err(),
+            "project: 3 of 2 output dimensions"
+        );
+    }
+
+    #[test]
     fn bundled_campplus_model_loads_with_sorted_psi() {
         let p = Plda::campplus_multilingual();
         assert_eq!(p.dim(), 192);
         assert!(p.lda_dim() <= 192);
         assert!(p.psi().windows(2).all(|w| w[0] >= w[1]));
-        let y = p.transform(&[0.1; 192]);
+        let y = p.transform(&[0.1; 192]).unwrap();
         let norm: f32 = y.iter().map(|v| v * v).sum::<f32>().sqrt();
         assert!((norm - 1.0).abs() < 1e-4);
     }
