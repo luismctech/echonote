@@ -146,6 +146,8 @@ Models are downloaded on-demand from the built-in model manager (**Settings → 
 
 **Third-party models.** Silero VAD is © Silero Team, released under the [MIT License](https://github.com/snakers4/silero-vad/blob/master/LICENSE); `scripts/inline-silero-vad.py` inlines its 16 kHz branch for tract ONNX inference.
 
+**Third-party code.** The VBx speaker re-segmentation (`crates/echo-diarize/src/vbx.rs`) is a Rust port of [BUTSpeechFIT VBx](https://github.com/BUTSpeechFIT/VBx), © Lukas Burget and Mireia Diez, released under the [Apache License 2.0](crates/echo-diarize/third_party/VBx-LICENSE).
+
 **Third-party data.** The bundled PLDA model of the multilingual CAM++ embedder (`crates/echo-diarize/assets/plda_campplus_multi.plda`) is derived from the train splits of [Multilingual LibriSpeech](https://huggingface.co/datasets/facebook/multilingual_librispeech) (Pratap et al., 2020), released under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/); it holds statistics only, no audio. See `crates/echo-diarize/assets/README.md`.
 
 <details>

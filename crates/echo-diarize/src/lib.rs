@@ -17,7 +17,9 @@
 //!   the end-of-session refine (never persisted or logged).
 //! - [`resegment`]: re-segmentation of that log into a span relabel
 //!   plan with stable speaker ids (ADR 0001).
-//! - [`plda`]: the PLDA back-end of the speaker re-segmentation.
+//! - [`vbx`] and [`plda`]: the VB-HMM clustering behind the
+//!   re-segmentation (a port of BUTSpeechFIT VBx, Apache-2.0) and its PLDA
+//!   back-end.
 //! - [`presets`]: [`EmbedderFamily`], the per-embedder loader and
 //!   clustering thresholds the app and the benchmarks share.
 //!
@@ -41,6 +43,7 @@ pub mod plda;
 pub mod presets;
 pub mod pyannote_segmenter;
 pub mod resegment;
+pub mod vbx;
 
 pub use cam_plus_plus::{
     CamPlusPlusConfig, CamPlusPlusEmbedder, CAMPP_EMBED_DIM, CAMPP_FBANK_DIM, CAMPP_MIN_SAMPLES,
@@ -64,3 +67,4 @@ pub use pyannote_segmenter::{
     PyannoteSegmenter, PyannoteSegmenterConfig, PYANNOTE_CHUNK_SAMPLES, PYANNOTE_HOP_SAMPLES,
     PYANNOTE_MAX_LOCAL_SPEAKERS, PYANNOTE_SAMPLE_RATE,
 };
+pub use vbx::VbxParams;
