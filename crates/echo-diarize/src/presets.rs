@@ -20,6 +20,35 @@ use crate::embedding::SpeakerEmbedder;
 use crate::eres2net::Eres2NetEmbedder;
 use crate::offline_refine::OfflineRefineConfig;
 
+/// End-of-session refinement the diarizer runs (ADR 0001, D6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OfflineRefineMode {
+    /// No offline pass; the embedding log is not kept.
+    Off,
+    /// Fold over-split online speakers together (legacy
+    /// `SpeakersMerged` path). The default until a re-segmenting
+    /// refine beats it on the held-out DER sets.
+    #[default]
+    MergeOnly,
+    /// Re-cluster every logged span and move segments between speakers
+    /// (`SpeakersReassigned` path).
+    Resegment,
+}
+
+impl OfflineRefineMode {
+    /// Parse a CLI or environment value: `off`, `merge` / `merge-only`,
+    /// `reseg` / `resegment` (case-insensitive). `None` otherwise.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "off" => Some(Self::Off),
+            "merge" | "merge-only" | "merge_only" => Some(Self::MergeOnly),
+            "reseg" | "resegment" => Some(Self::Resegment),
+            _ => None,
+        }
+    }
+}
+
 /// Speaker embedder families the app knows how to load.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EmbedderFamily {
@@ -147,6 +176,14 @@ impl EmbedderFamily {
         }
     }
 
+    /// End-of-session refinement mode for this family. `MergeOnly` for
+    /// every family until re-segmentation is shown to lower DER on the
+    /// held-out sets (ADR 0001, D6).
+    #[must_use]
+    pub fn refine_mode(self) -> OfflineRefineMode {
+        OfflineRefineMode::MergeOnly
+    }
+
     /// Load the embedder adapter for this family from `path`.
     ///
     /// # Errors
@@ -270,6 +307,32 @@ mod tests {
                 OfflineRefineConfig::default().min_embeddings
             );
         }
+    }
+
+    #[test]
+    fn every_family_defaults_to_merge_only_refine() {
+        for family in EmbedderFamily::ALL {
+            assert_eq!(
+                family.refine_mode(),
+                OfflineRefineMode::MergeOnly,
+                "{family:?}"
+            );
+        }
+        assert_eq!(OfflineRefineMode::default(), OfflineRefineMode::MergeOnly);
+    }
+
+    #[test]
+    fn refine_mode_parses_cli_and_env_spellings() {
+        for (text, mode) in [
+            ("off", OfflineRefineMode::Off),
+            ("merge", OfflineRefineMode::MergeOnly),
+            ("merge-only", OfflineRefineMode::MergeOnly),
+            ("RESEG", OfflineRefineMode::Resegment),
+            ("resegment", OfflineRefineMode::Resegment),
+        ] {
+            assert_eq!(OfflineRefineMode::parse(text), Some(mode), "{text}");
+        }
+        assert_eq!(OfflineRefineMode::parse("vbx"), None);
     }
 
     #[test]

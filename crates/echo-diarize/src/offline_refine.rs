@@ -48,9 +48,8 @@
 //!
 //! This pass only *merges* clusters; it does not split them.  A
 //! genuinely mis-merged pair from the online pass cannot be recovered
-//! here — splitting would need per-segment reassignment and a storage
-//! contract richer than the `(absorbed, surviving)` merge pairs this
-//! pass emits (roadmap item).
+//! here; [`crate::resegment`] relabels every span instead
+//! (`OfflineRefineMode::Resegment`, ADR 0001).
 
 use echo_domain::{Speaker, SpeakerId};
 use tracing::info;
@@ -132,8 +131,8 @@ fn average_linkage(sim: &[f32], n: usize, a: &[usize], b: &[usize]) -> f32 {
 /// The caller should walk the list and update segment speaker labels
 /// accordingly, replacing every occurrence of `absorbed_id` with
 /// `surviving_id`. The list may be empty when no merges were found.
-pub fn refine_speakers(
-    records: &[(Vec<f32>, SpeakerId)],
+pub fn refine_speakers<E: AsRef<[f32]>>(
+    records: &[(E, SpeakerId)],
     speakers: &[Speaker],
     config: OfflineRefineConfig,
 ) -> Vec<(SpeakerId, SpeakerId)> {
@@ -151,7 +150,7 @@ pub fn refine_speakers(
         let start = emb.len();
         for (e, sid) in records {
             if *sid == s.id {
-                emb.push(e.as_slice());
+                emb.push(e.as_ref());
             }
         }
         if emb.len() - start >= config.min_embeddings {
@@ -244,7 +243,7 @@ mod tests {
     #[test]
     fn no_records_returns_empty() {
         let speakers = vec![make_speaker(0), make_speaker(1)];
-        let result = refine_speakers(&[], &speakers, OfflineRefineConfig::default());
+        let result = refine_speakers::<Vec<f32>>(&[], &speakers, OfflineRefineConfig::default());
         assert!(result.is_empty());
     }
 

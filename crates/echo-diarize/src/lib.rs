@@ -13,6 +13,10 @@
 //!   adapter that wires an embedder to a cluster.
 //! - [`metrics`]: RTTM parsing and diarization error rate (DER) scoring
 //!   for offline benchmarks.
+//! - [`embedding_log`]: the in-RAM, timestamped embedding log behind
+//!   the end-of-session refine (never persisted or logged).
+//! - [`resegment`]: re-segmentation of that log into a span relabel
+//!   plan with stable speaker ids (ADR 0001).
 //! - [`presets`]: [`EmbedderFamily`], the per-embedder loader and
 //!   clustering thresholds the app and the benchmarks share.
 //!
@@ -27,12 +31,14 @@
 pub mod cam_plus_plus;
 pub mod cluster;
 pub mod embedding;
+pub mod embedding_log;
 pub mod eres2net;
 pub mod metrics;
 pub mod offline_refine;
 pub mod online_diarizer;
 pub mod presets;
 pub mod pyannote_segmenter;
+pub mod resegment;
 
 pub use cam_plus_plus::{
     CamPlusPlusConfig, CamPlusPlusEmbedder, CAMPP_EMBED_DIM, CAMPP_FBANK_DIM, CAMPP_MIN_SAMPLES,
@@ -49,7 +55,7 @@ pub use metrics::{
 };
 pub use offline_refine::{refine_speakers, OfflineRefineConfig};
 pub use online_diarizer::OnlineDiarizer;
-pub use presets::EmbedderFamily;
+pub use presets::{EmbedderFamily, OfflineRefineMode};
 pub use pyannote_segmenter::{
     PyannoteSegmenter, PyannoteSegmenterConfig, PYANNOTE_CHUNK_SAMPLES, PYANNOTE_HOP_SAMPLES,
     PYANNOTE_MAX_LOCAL_SPEAKERS, PYANNOTE_SAMPLE_RATE,
