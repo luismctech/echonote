@@ -257,6 +257,18 @@ pub struct SpeakerMerge {
     pub surviving: SpeakerId,
 }
 
+/// A speaker the offline pass left without segments, and the speaker
+/// that took most of its speech. The recipient may inherit its user
+/// label (ADR 0001, Q1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct SpeakerRetirement {
+    /// Retired speaker.
+    pub speaker: SpeakerId,
+    /// Speaker that received the majority of its duration, if any.
+    pub majority_recipient: Option<SpeakerId>,
+}
+
 impl TranscriptEvent {
     /// Session id this event belongs to. Convenient for routing in the UI.
     #[must_use]

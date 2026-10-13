@@ -26,9 +26,70 @@
 //!
 //! Adapter implementations live in `echo-diarize`.
 
+use std::time::Instant;
+
 use async_trait::async_trait;
 
+use crate::entities::streaming::SpeakerRetirement;
 use crate::{DomainError, Sample, Speaker, SpeakerId};
+
+/// Where a chunk sits in the session, passed to
+/// [`Diarizer::assign_spans_at`] so adapters can timestamp what they
+/// remember about it (ADR 0001, D1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ChunkContext {
+    /// 0-based chunk index, as carried by `TranscriptEvent::Chunk`.
+    pub chunk_index: u32,
+    /// Chunk start in session milliseconds (paused audio excluded).
+    pub offset_ms: u32,
+    /// 0 at start, incremented after every resume. Adapters must not
+    /// treat two chunks of different epochs as contiguous audio.
+    pub epoch: u16,
+}
+
+/// Identity of one span returned by [`Diarizer::assign_spans_at`]:
+/// the chunk it came from and its position in that call's result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct SpanRef {
+    /// Chunk index from the [`ChunkContext`].
+    pub chunk_index: u32,
+    /// Index into the `Vec<SpeakerSpan>` returned for that chunk.
+    pub span_index: u16,
+}
+
+/// Limits for [`Diarizer::refine_plan`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RefineBudget {
+    /// The refine must give up (and return an error) once this instant
+    /// has passed. It never returns a partial plan.
+    pub deadline: Instant,
+}
+
+/// Result of the end-of-session refinement.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RefineOutcome {
+    /// Nothing to change; the online result stands.
+    Unchanged,
+    /// Legacy merge-only result: `(absorbed, surviving)` pairs.
+    Merges(Vec<(SpeakerId, SpeakerId)>),
+    /// Span-level relabelling.
+    Relabel(SpanRelabelPlan),
+}
+
+/// Span-level relabelling produced by a re-segmenting refine.
+///
+/// Ids of speakers the online pass created are kept wherever a new
+/// cluster matches them, so their slot, colour and user label survive.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SpanRelabelPlan {
+    /// Final speaker for every logged span.
+    pub spans: Vec<(SpanRef, SpeakerId)>,
+    /// Speakers the plan introduces (fresh id, next free slot, no label).
+    pub created: Vec<Speaker>,
+    /// Online speakers left with no span, each with the speaker that
+    /// took most of its duration.
+    pub retired: Vec<SpeakerRetirement>,
+}
 
 /// One speaker-attributed span within an audio chunk.
 ///
@@ -154,7 +215,117 @@ pub trait Diarizer: Send + Sync {
     /// Default impl is a no-op (empty vec) so adapters without
     /// offline state — fakes, stubs, the in-memory test diarizer —
     /// satisfy the trait without extra code.
+    ///
+    /// Superseded by [`Diarizer::refine_plan`], which can also move
+    /// spans between speakers; this stays as the merge-only path.
     fn refine_offline(&self) -> Vec<(SpeakerId, SpeakerId)> {
         Vec::new()
+    }
+
+    /// Same as [`Diarizer::assign_spans`], with the chunk's place in the
+    /// session so the adapter can keep a timestamped record of it.
+    ///
+    /// Default impl ignores `ctx` and forwards to `assign_spans`, so
+    /// adapters without an offline pass need no change.
+    async fn assign_spans_at(
+        &mut self,
+        samples: &[Sample],
+        ctx: ChunkContext,
+    ) -> Result<Vec<SpeakerSpan>, DomainError> {
+        let _ = ctx;
+        self.assign_spans(samples).await
+    }
+
+    /// End-of-session refinement as a plan the pipeline can apply to
+    /// segments it already emitted.
+    ///
+    /// Implementations must check `budget.deadline` and return an error
+    /// when it passes, never a partial plan. Default impl wraps
+    /// [`Diarizer::refine_offline`]: [`RefineOutcome::Merges`], or
+    /// [`RefineOutcome::Unchanged`] when it found nothing to merge.
+    fn refine_plan(&self, budget: RefineBudget) -> Result<RefineOutcome, DomainError> {
+        let _ = budget;
+        let merges = self.refine_offline();
+        Ok(if merges.is_empty() {
+            RefineOutcome::Unchanged
+        } else {
+            RefineOutcome::Merges(merges)
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    /// Minimal diarizer: one speaker for every chunk, optional merges.
+    struct OneSpeaker {
+        speaker: Speaker,
+        merges: Vec<(SpeakerId, SpeakerId)>,
+    }
+
+    #[async_trait]
+    impl Diarizer for OneSpeaker {
+        fn sample_rate_hz(&self) -> u32 {
+            16_000
+        }
+        async fn assign(&mut self, _: &[Sample]) -> Result<Option<SpeakerId>, DomainError> {
+            Ok(Some(self.speaker.id))
+        }
+        fn speakers(&self) -> Vec<Speaker> {
+            vec![self.speaker.clone()]
+        }
+        fn rename(&mut self, _: SpeakerId, _: &str) -> Result<bool, DomainError> {
+            Ok(false)
+        }
+        fn reset(&mut self) {}
+        fn refine_offline(&self) -> Vec<(SpeakerId, SpeakerId)> {
+            self.merges.clone()
+        }
+    }
+
+    fn budget() -> RefineBudget {
+        RefineBudget {
+            deadline: Instant::now() + Duration::from_secs(1),
+        }
+    }
+
+    #[tokio::test]
+    async fn assign_spans_at_defaults_to_assign_spans() {
+        let mut d = OneSpeaker {
+            speaker: Speaker::anonymous(3),
+            merges: vec![],
+        };
+        let ctx = ChunkContext {
+            chunk_index: 7,
+            offset_ms: 35_000,
+            epoch: 1,
+        };
+        let spans = d.assign_spans_at(&[0.0; 160], ctx).await.unwrap();
+        assert_eq!(spans, d.assign_spans(&[0.0; 160]).await.unwrap());
+        assert_eq!(spans[0].slot, 3);
+    }
+
+    #[test]
+    fn refine_plan_defaults_to_unchanged_without_merges() {
+        let d = OneSpeaker {
+            speaker: Speaker::anonymous(0),
+            merges: vec![],
+        };
+        assert_eq!(d.refine_plan(budget()).unwrap(), RefineOutcome::Unchanged);
+    }
+
+    #[test]
+    fn refine_plan_defaults_to_the_legacy_merges() {
+        let pair = (SpeakerId::new(), SpeakerId::new());
+        let d = OneSpeaker {
+            speaker: Speaker::anonymous(0),
+            merges: vec![pair],
+        };
+        assert_eq!(
+            d.refine_plan(budget()).unwrap(),
+            RefineOutcome::Merges(vec![pair])
+        );
     }
 }

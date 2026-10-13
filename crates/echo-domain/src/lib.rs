@@ -28,7 +28,9 @@ pub use ports::audio::{
 pub use ports::chat::{
     render_chatml, ChatAssistant, ChatMessage, ChatOptions, ChatRequest, ChatRole, ChatToken,
 };
-pub use ports::diarizer::{Diarizer, SpeakerSpan};
+pub use ports::diarizer::{
+    ChunkContext, Diarizer, RefineBudget, RefineOutcome, SpanRef, SpanRelabelPlan, SpeakerSpan,
+};
 pub use ports::llm::{estimate_tokens, GenerateOptions, LlmModel, DEFAULT_CONTEXT_WINDOW};
 pub use ports::punctuator::Punctuator;
 pub use ports::resampler::Resampler;
@@ -43,7 +45,8 @@ pub use entities::note::{Note, NoteId};
 pub use entities::segment::{Segment, SegmentId};
 pub use entities::speaker::{Speaker, SpeakerId};
 pub use entities::streaming::{
-    SpeakerMerge, SpeakerRef, StreamingOptions, StreamingSessionId, TranscriptEvent,
+    SpeakerMerge, SpeakerRef, SpeakerRetirement, StreamingOptions, StreamingSessionId,
+    TranscriptEvent,
 };
 pub use entities::summary::{
     ActionItem, Definition, InterviewQuote, Summary, SummaryContent, SummaryId, TEMPLATE_IDS,
