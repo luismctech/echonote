@@ -348,9 +348,13 @@ flowchart LR
    extra is persisted; the notice is built from the `SpeakersReassigned` payload.
 3. **Q3. Extra window embeddings.** Resolved 2026-10-13: allowed. T10 may compute extra
    embeddings (for example 1.5 s windows inside spans longer than 3 s) during the session, at
-   roughly twice the embed cost. Condition: T10 must also bound the merge-only refine to at most
-   4 096 representatives, like the AHC/VBx path, so peak memory stays at about 35 MB for the log
-   plus about 35 MB transient at stop, regardless of meeting length or window density.
+   roughly twice the embed cost. Condition: T10 must also bound the merge-only refine's memory,
+   so peak memory stays at about 35 MB for the log plus about 35 MB transient at stop, regardless
+   of meeting length or window density. The bound was first phrased as at most 4 096
+   representatives, like the AHC/VBx path. T10 implements it as one vector sum per speaker
+   instead (average linkage of unit vectors is the dot product of the group sums divided by the
+   group sizes): O(speakers × dim) memory with exactly the same merges, so no representative cap
+   is needed.
 4. **Q4. Default flip criterion.** Resolved 2026-10-13: `Resegment` becomes the default only if,
    on the held-out T6 test sets with the calibrated preset, the weighted DER (2·ES + Vox)/3 is at
    least 0.5 points lower than merge-only (today 6.73) **and** the speaker over-count is no worse
@@ -358,6 +362,10 @@ flowchart LR
    **T10 outcome (2026-10-13): not met.** VBx reached 3.45 estimated Spanish speakers (met) but a
    weighted test DER of 9.31 against 6.73 for merge-only, 3.08 points short of the required 6.23.
    The default stays `MergeOnly` (`docs/spikes/2026-10-vbx.md`).
+   **T10b outcome (2026-10-13, second look at the test sets): not met.** The VBx initialisation
+   cut now lives entirely in the LDA space and was re-checked on dev; the calibrated preset kept
+   its dev lead, so the test run used the same preset and reproduced T10 exactly: weighted 9.31
+   against 6.73 (3.08 points short of 6.23), Spanish speakers 3.45 (met). `MergeOnly` stays.
 
 ## Implementation notes (T9)
 
@@ -414,7 +422,8 @@ Decisions taken while fixing the T9 review warnings:
   whatever the builder order; `with_offline_refinement` only selects `MergeOnly` when no mode was
   set. The re-segmentation AHC cut is its own preset value (`EmbedderFamily::resegment_threshold`,
   `with_resegment_threshold`), initially equal to the merge-only threshold, so the two passes can
-  be calibrated apart. `bench der --refine-threshold` sets both.
+  be calibrated apart. `bench der --refine-threshold` sets both. (Superseded in T10b: the cut is
+  part of `VbxConfig::init` in the LDA space; see the T10b notes.)
 - **Deadlines.** `RefineBudget::check` returns the documented `DiarizationFailed` error. The
   default `Diarizer::refine_plan` and the merge-only path check it before and after the
   uninterruptible `refine_offline`. The pipeline computes the deadline and the join wait with
@@ -473,3 +482,30 @@ met (`docs/spikes/2026-10-vbx.md`). Where the code differs from the sketches abo
 - **Not changed.** `RESEGMENT_MIN_ENTRIES` (4) and `RESEGMENT_MIN_SPEECH_MS` (10 s) keep their
   initial values. The VBx failures on test are on full 3-5 minute recordings, not short ones.
 
+## Implementation notes (T10b)
+
+T10b fixed the T10 review warnings and re-checked the VBx initialisation. The default stays
+`MergeOnly` (Q4 not met on the second look at the test sets, `docs/spikes/2026-10-vbx.md`).
+
+- **Initialisation cut in the LDA space.** The review suspected that the cut was calibrated on
+  raw cosines but applied to LDA-space cosines. On the production path that was not the case:
+  the two-Gaussian calibration already ran on the LDA-space similarities it cuts. Two inputs
+  were in the wrong space, though: the fixed cut and the calibration fallback came from the
+  raw-embedding `resegment_threshold` (0.50), and `bench der --refine-threshold` overrode the
+  VBx cut with a raw-space value. `VbxConfig::init` (`VbxInit::Calibrated { offset, fallback }`
+  or `VbxInit::Fixed`) now holds every cut, documented as an LDA-space similarity; the
+  multilingual CAM++ preset keeps offset +0.15 with an LDA-space fallback of 0.45.
+  `with_resegment_threshold`, `EmbedderFamily::resegment_threshold` and
+  `DEFAULT_RESEGMENT_THRESHOLD` are gone, and `--refine-threshold` only sets the merge-only
+  threshold. The calibrated cut is logged at `debug` (scalars only).
+- **Fail-safe (D6).** A failed re-segmentation (deadline, too many frames, a clustering or
+  parameter error) logs a warning and returns the merge-only plan. That plan checks the same
+  deadline, so a late refine still keeps the online result. The fallback log line tells a
+  missing PLDA model from one of the wrong dimension.
+- **Input validation.** `vbx()` rejects non-finite inputs, negative `phi`, non-positive `fa` or
+  `fb`, `loop_p` outside `0..=1`, and run starts that are not strictly increasing within
+  `1..T`. `Plda::transform`/`project` return an error on a length mismatch in release builds,
+  and `Plda::from_bytes` rejects `psi` that is not in decreasing order.
+- **Dense windows.** A window whose embedding fails is skipped; only a count is logged.
+- **No speaker-count fail-safe.** A guard that keeps merge-only when VBx finds more speakers than
+  merge-only never fired on dev, so dev gives no evidence for it and it was not added.
