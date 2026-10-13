@@ -130,7 +130,7 @@ pub struct SpanRelabelPlan {
     /// Speakers the plan introduces (fresh SpeakerId, next free slot, label None).
     pub created: Vec<Speaker>,
     /// Online speakers left with no span, each with the id that took most of its duration.
-    pub retired: Vec<Retirement>, // { speaker, majority_recipient: Option<SpeakerId> }
+    pub retired: Vec<SpeakerRetirement>, // { speaker, majority_recipient: Option<SpeakerId> }
 }
 ```
 
@@ -227,9 +227,8 @@ async fn reassign_speakers(
   fires on any `UPDATE`, so every reassigned segment's text is re-indexed. `merge_speakers`
   already pays this cost today, and it is acceptable for thousands of rows. Narrowing the
   trigger to `AFTER UPDATE OF text` would be a separate, optional migration.
-- `merge_speakers` stays for the legacy path. The fact that it drops the absorbed label is a
-  separate defect. T9 should apply the same label rule to it (follow-up, not required by this
-  ADR).
+- `merge_speakers` stays for the legacy path. Since T9 it applies the same label rule, so it
+  no longer drops the absorbed label.
 
 ### D6. Feature flag and how T10 plugs in
 
@@ -298,7 +297,7 @@ flowchart LR
   the lever T7 identified against the over-count.
 - No audio is retained. The only new retained state is a bounded, per-session vector log in RAM.
 - Storage gains an atomic, idempotent bulk operation that also protects user labels. The
-  legacy path loses labels.
+  legacy merge path follows the same label rule since T9.
 - The port changes are additive. Fakes, the bench decorator and the merge-only path keep working.
 
 **Negative / costs**
@@ -386,3 +385,49 @@ sketches above:
 - **Known limit (unchanged).** The merge-only refine still builds a full `n × n` similarity
   matrix over the log. At the 16 384-entry cap that is about 1 GB; T10 should bound it the way
   the AHC reclusterer is bounded.
+
+## Implementation notes (T9b review fixes)
+
+Decisions taken while fixing the T9 review warnings:
+
+- **Non-finite embeddings.** An embedding with a NaN or infinite value is still assigned online
+  but never logged. The AHC also maps any non-finite distance to the largest cosine distance
+  (2.0), so such an entry stays a singleton, and it returns `DiarizationFailed` instead of
+  panicking if it ever finds no merge candidate. The strided nearest-centroid pass checks the
+  deadline every 256 entries.
+- **Hard cap, strictly.** The log never holds more than `EMBEDDING_LOG_CAP` entries. Compaction
+  runs three O(n) passes: coalesce time-adjacent entries of the same speaker and epoch; if the log
+  is still above three quarters of the cap, pair each entry with the next unpaired entry of the
+  same speaker and epoch in one pass (a hash map of pending entries); if nothing could be
+  coalesced (every entry has its own speaker and epoch), drop the oldest entry, whose spans then
+  keep their online speaker. The first two passes usually free a large fraction of the cap, so
+  the cost is amortised over many pushes. This replaces the quadratic search of the T9 fallback.
+- **Speech duration.** A coalesced entry keeps `speech_ms`, the sum of its spans' speech, apart
+  from its time range, which can cover other speakers' turns. Hungarian weights, the
+  `min_speech_ms` floor, the majority recipient and the coalescing weights all use `speech_ms`.
+- **Refine mode is the single source of truth.** `OnlineDiarizer::with_refine_mode` always wins,
+  whatever the builder order; `with_offline_refinement` only selects `MergeOnly` when no mode was
+  set. The re-segmentation AHC cut is its own preset value (`EmbedderFamily::resegment_threshold`,
+  `with_resegment_threshold`), initially equal to the merge-only threshold, so the two passes can
+  be calibrated apart. `bench der --refine-threshold` sets both.
+- **Deadlines.** `RefineBudget::check` returns the documented `DiarizationFailed` error. The
+  default `Diarizer::refine_plan` and the merge-only path check it before and after the
+  uninterruptible `refine_offline`. The pipeline computes the deadline and the join wait with
+  overflow-safe arithmetic, so even `Duration::MAX` ends in `Stopped`. The DER bench decorator
+  turns a plan returned after the deadline into an error, so it never scores a plan the app would
+  have discarded.
+- **Payload consistency.** `retired` is sorted by speaker id. A created speaker that owns no
+  segment is not sent, and chunk rows naming it are dropped (those live lines keep their online
+  colour), so the event never names a speaker the store was not told to create. A plan that moves
+  no segment still emits nothing, even if a chunk's dominant speaker changed: chunk rows only
+  recolour live lines.
+- **Store integrity.** `reassign_speakers` returns `Invariant` for a retired speaker or a created
+  id that belongs to another meeting. An id unknown everywhere is a replay and is skipped.
+- **Recorder retry.** A `Storage` error from `reassign_speakers` (for example SQLite busy) is
+  retried once after 100 ms; an `Invariant` or `NotFound` error is not. Logs carry ids and counts,
+  never vectors.
+- **Empty labelled speakers.** Under the Q1 label rule, a labelled speaker can remain with zero
+  segments. The speakers panel already lists every stored speaker with its talk-time share, so it
+  shows such a speaker at 0 % where it can still be renamed; no UI change was needed.
+- **Live pane merges.** `applySpeakerMerges` follows merge chains to the final survivor and
+  leaves speakers in a merge cycle unchanged.
