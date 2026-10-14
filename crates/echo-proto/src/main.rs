@@ -364,8 +364,9 @@ enum BenchKind {
         /// it each chunk is embedded whole.
         #[arg(long)]
         segmenter: Option<PathBuf>,
-        /// Override the preset online-cluster similarity threshold.
-        #[arg(long)]
+        /// Override the preset online-cluster similarity threshold (a
+        /// cosine similarity in -1..=1).
+        #[arg(long, value_parser = bench_der::parse_cosine_threshold)]
         threshold: Option<f32>,
         /// Override the preset online speaker cap (at least 1).
         #[arg(long, value_parser = bench_der::parse_max_speakers)]
@@ -1740,5 +1741,17 @@ mod tests {
         assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
         assert!(bench_der(&["--no-refine"]).is_ok());
         assert!(bench_der(&["--refine-mode", "off"]).is_ok());
+    }
+
+    #[test]
+    fn online_threshold_must_be_a_finite_cosine() {
+        // `--flag=value` so clap does not read a negative value as a flag.
+        for ok in ["-1", "0.45", "1"] {
+            assert!(bench_der(&[&format!("--threshold={ok}")]).is_ok(), "{ok}");
+        }
+        for bad in ["NaN", "inf", "1.01", "-1.5", "x"] {
+            let err = bench_der(&[&format!("--threshold={bad}")]).unwrap_err();
+            assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation, "{bad}");
+        }
     }
 }

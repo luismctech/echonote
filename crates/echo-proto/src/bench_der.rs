@@ -194,8 +194,8 @@ pub(crate) fn parse_max_speakers(raw: &str) -> Result<usize, String> {
     Ok(cap)
 }
 
-/// Parse a cosine-similarity threshold (`--refine-threshold`): a finite
-/// value in `-1..=1`.
+/// Parse a cosine-similarity threshold (`--threshold`,
+/// `--refine-threshold`): a finite value in `-1..=1`.
 ///
 /// # Errors
 ///
@@ -580,8 +580,13 @@ fn unique_names(pairs: &[(PathBuf, PathBuf)]) -> Vec<String> {
 /// recordings is filtered by file id (and must contain `file_id`); a
 /// single-recording RTTM must carry `file_id` too, so a manifest line
 /// that pairs a wav with the wrong RTTM fails instead of scoring
-/// against another recording's turns.
+/// against another recording's turns. An RTTM without turns (a
+/// recording without speech) names no recording and is an empty
+/// reference.
 fn reference_for(segments: Vec<RttmSegment>, file_id: &str) -> Result<Vec<RttmSegment>> {
+    if segments.is_empty() {
+        return Ok(segments);
+    }
     let first = segments.first().map(|s| s.file_id.clone());
     if let Some(only) = first.filter(|f| segments.iter().all(|s| &s.file_id == f)) {
         ensure!(
@@ -1072,6 +1077,13 @@ mod tests {
         let other = vec![seg("other", "x"), seg("other", "y")];
         let err = reference_for(other, "rec").unwrap_err().to_string();
         assert!(err.contains("other") && err.contains("rec"), "{err}");
+    }
+
+    #[test]
+    fn empty_rttm_is_an_empty_reference() {
+        // A recording without speech has an RTTM with no turns; it scores
+        // as an empty reference instead of failing the file-id filter.
+        assert!(reference_for(Vec::new(), "rec").unwrap().is_empty());
     }
 
     #[test]
