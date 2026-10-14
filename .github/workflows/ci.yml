@@ -249,6 +249,10 @@ jobs:
 
     - name: cargo deny check
       uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+      env:
+        # .cargo/config.toml routes rustc through sccache, which the action
+        # container lacks; cargo-deny only reads metadata, so drop the wrapper.
+        RUSTC_WRAPPER: ""
       with:
         # The action image ships an older Rust; rust-toolchain.toml pins 1.99.0,
         # so cargo metadata fails unless the container installs that version.
