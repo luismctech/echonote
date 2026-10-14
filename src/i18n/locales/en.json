@@ -181,7 +181,8 @@
       "llm-gemma4-12b": "Large Google model · about 10 GB RAM in use, 24 GB or more recommended",
       "vad-silero": "Detects when someone is speaking",
       "embedder-eres2net": "Speaker identification · general purpose",
-      "embedder-camplusplus": "Speaker identification · ideal for Spanish",
+      "embedder-camplusplus": "Speaker identification · trained on English",
+      "embedder-campplus-multi": "Speaker identification · multilingual, recommended for Spanish",
       "segmenter-pyannote": "Detects speaker changes in conversation"
     },
     "connecting": "Connecting…",

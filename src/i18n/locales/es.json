@@ -181,7 +181,8 @@
       "llm-gemma4-12b": "Modelo grande de Google · usa unos 10 GB de RAM, se recomiendan 24 GB o más",
       "vad-silero": "Detecta cuándo alguien está hablando",
       "embedder-eres2net": "Identificación de hablantes · propósito general",
-      "embedder-camplusplus": "Identificación de hablantes · ideal para español",
+      "embedder-camplusplus": "Identificación de hablantes · entrenado en inglés",
+      "embedder-campplus-multi": "Identificación de hablantes · multilingüe, recomendado para español",
       "segmenter-pyannote": "Detecta cambios de hablante en la conversación"
     },
     "connecting": "Conectando…",
