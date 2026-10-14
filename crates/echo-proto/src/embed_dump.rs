@@ -9,7 +9,8 @@
 //! Output format (little-endian): the 8-byte magic `ECHOEMB1`, `u32` row
 //! count, `u32` dimension, then `rows x dim` `f32` values in row order. A
 //! sidecar `<out>.labels.txt` holds one class label per row. Both files
-//! are written to a temporary name and renamed into place. Files that
+//! are written to temporary names first, then the labels and finally the
+//! dump are renamed into place (see `write_pair`). Files that
 //! cannot be read or have the wrong format are skipped and listed; clips
 //! the embedder declines (shorter than its minimum) and non-finite
 //! embeddings are skipped and counted separately.
@@ -133,17 +134,43 @@ fn collect<'a>(
     Ok(c)
 }
 
-/// Write `bytes` to a temporary file next to `path`, then rename it over
-/// `path`, so an interrupted run never leaves a truncated file behind.
-fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+/// Temporary name next to `path` (`<path>.tmp`).
+fn temp_path(path: &Path) -> PathBuf {
     let mut tmp = path.as_os_str().to_owned();
     tmp.push(".tmp");
-    let tmp = PathBuf::from(tmp);
-    std::fs::write(&tmp, bytes).with_context(|| format!("write {}", tmp.display()))?;
-    std::fs::rename(&tmp, path).with_context(|| {
-        let _ = std::fs::remove_file(&tmp);
+    PathBuf::from(tmp)
+}
+
+/// Rename `tmp` over `path`, removing `tmp` when that fails.
+fn rename(tmp: &Path, path: &Path) -> Result<()> {
+    std::fs::rename(tmp, path).with_context(|| {
+        let _ = std::fs::remove_file(tmp);
         format!("rename {} to {}", tmp.display(), path.display())
     })
+}
+
+/// Write the labels sidecar and the dump as a pair: both temporaries are
+/// written before anything is renamed (a failed write replaces neither
+/// file), then the labels are renamed and the dump last. Only a crash
+/// between the two renames can leave new labels beside an old dump, and
+/// `scripts/fit-plda.py` rejects a pair whose row counts disagree.
+fn write_pair(labels: (&Path, &[u8]), dump: (&Path, &[u8])) -> Result<()> {
+    let (labels_tmp, dump_tmp) = (temp_path(labels.0), temp_path(dump.0));
+    let written = std::fs::write(&labels_tmp, labels.1)
+        .with_context(|| format!("write {}", labels_tmp.display()))
+        .and_then(|()| {
+            std::fs::write(&dump_tmp, dump.1)
+                .with_context(|| format!("write {}", dump_tmp.display()))
+        });
+    if let Err(e) = written {
+        let _ = std::fs::remove_file(&labels_tmp);
+        let _ = std::fs::remove_file(&dump_tmp);
+        return Err(e);
+    }
+    rename(&labels_tmp, labels.0).inspect_err(|_| {
+        let _ = std::fs::remove_file(&dump_tmp);
+    })?;
+    rename(&dump_tmp, dump.0)
 }
 
 /// Entry point of `echo-proto bench embed-dump`.
@@ -171,8 +198,10 @@ pub(crate) fn run(args: &EmbedDumpArgs) -> Result<()> {
     let mut sidecar = args.out.clone().into_os_string();
     sidecar.push(".labels.txt");
     let labels: String = c.labels.iter().map(|l| format!("{l}\n")).collect();
-    write_atomic(Path::new(&sidecar), labels.as_bytes())?;
-    write_atomic(&args.out, &encode(&c.rows, dim)?)?;
+    write_pair(
+        (Path::new(&sidecar), labels.as_bytes()),
+        (&args.out, &encode(&c.rows, dim)?),
+    )?;
     eprintln!(
         "{} embeddings (dim {dim}) written; skipped: {} bad files, {} declined clips, {} non-finite embeddings",
         c.rows.len(),
@@ -262,24 +291,37 @@ mod tests {
     }
 
     #[test]
-    fn atomic_write_replaces_the_file_and_leaves_no_temporary() {
-        let dir = std::env::temp_dir().join(format!("echo-embed-dump-{}", std::process::id()));
+    fn a_failed_dump_write_leaves_the_old_labels_in_place() {
+        let dir = std::env::temp_dir().join(format!("echo-embed-pair-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let out = dir.join("dump.bin");
-        std::fs::write(&out, b"old").unwrap();
-        write_atomic(&out, b"new").unwrap();
-        assert_eq!(std::fs::read(&out).unwrap(), b"new");
+        let labels = dir.join("dump.bin.labels.txt");
+        std::fs::write(&labels, b"old\n").unwrap();
+        // The dump's directory does not exist, so its temporary write fails.
+        let dump = dir.join("no-such-dir").join("dump.bin");
+        let err = write_pair((&labels, b"new\n"), (&dump, b"x")).unwrap_err();
+        assert!(format!("{err:#}").contains("no-such-dir"), "{err:#}");
+        assert_eq!(std::fs::read(&labels).unwrap(), b"old\n");
         let names: Vec<_> = std::fs::read_dir(&dir)
             .unwrap()
             .map(|e| e.unwrap().file_name())
             .collect();
-        assert_eq!(names, vec![std::ffi::OsString::from("dump.bin")]);
-        std::fs::remove_file(&out).unwrap();
+        assert_eq!(names, vec![std::ffi::OsString::from("dump.bin.labels.txt")]);
+        std::fs::remove_file(&labels).unwrap();
         std::fs::remove_dir(&dir).unwrap();
+    }
 
-        let missing = dir.join("no-such-dir").join("dump.bin");
-        let err = write_atomic(&missing, b"x").unwrap_err();
-        assert!(format!("{err:#}").contains("no-such-dir"), "{err:#}");
+    #[test]
+    fn a_pair_write_replaces_both_files_and_leaves_no_temporary() {
+        let dir = std::env::temp_dir().join(format!("echo-embed-both-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (labels, dump) = (dir.join("d.bin.labels.txt"), dir.join("d.bin"));
+        std::fs::write(&labels, b"old").unwrap();
+        std::fs::write(&dump, b"old").unwrap();
+        write_pair((&labels, b"a\n"), (&dump, b"rows")).unwrap();
+        assert_eq!(std::fs::read(&labels).unwrap(), b"a\n");
+        assert_eq!(std::fs::read(&dump).unwrap(), b"rows");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 2);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
