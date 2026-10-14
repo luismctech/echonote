@@ -39,8 +39,10 @@ pub struct EmbeddingLogEntry {
     /// Speech the entry's spans hold, in milliseconds. Equal to
     /// `end_ms - start_ms` for one span; after coalescing entries that
     /// were not adjacent, the time range also covers other speakers'
-    /// turns, so this sum is what weights the entry.
-    pub speech_ms: u32,
+    /// turns, so this sum is what weights the entry. Private so it only
+    /// comes from [`Self::new`] (the range length) or coalescing (the
+    /// sum); read it with [`Self::duration_ms`].
+    speech_ms: u32,
     /// Capture run: 0 at start, +1 after every resume.
     pub epoch: u16,
     /// Window-local segmenter speaker hint; `None` on the whole-chunk
@@ -88,8 +90,8 @@ impl EmbeddingLogEntry {
         self
     }
 
-    /// Logged speech duration in milliseconds ([`Self::speech_ms`]), not
-    /// the time range: the weight of this entry in every duration-based
+    /// Logged speech duration in milliseconds (the summed speech of the
+    /// entry's spans), not the time range: the weight of this entry in every duration-based
     /// decision of the refine.
     #[must_use]
     pub fn duration_ms(&self) -> u32 {
@@ -254,12 +256,22 @@ impl EmbeddingLog {
             dropped = self.entries.len() + 1 - self.cap;
             self.entries.drain(..dropped);
         }
-        tracing::debug!(
-            before,
-            after = self.entries.len(),
-            dropped,
-            "embedding log compacted"
-        );
+        if dropped > 0 {
+            // Counts only: the dropped spans keep their online speaker,
+            // so the refine silently covers less of the session.
+            tracing::warn!(
+                before,
+                after = self.entries.len(),
+                dropped,
+                "embedding log full after compaction; oldest entries dropped"
+            );
+        } else {
+            tracing::debug!(
+                before,
+                after = self.entries.len(),
+                "embedding log compacted"
+            );
+        }
     }
 }
 
@@ -284,28 +296,28 @@ fn coalesce_adjacent(entries: Vec<EmbeddingLogEntry>) -> Vec<EmbeddingLogEntry> 
 /// pending (unpaired) entry; a coalesced entry stays at the earlier
 /// entry's position, so the output keeps the order of the first spans.
 fn coalesce_same_run(entries: Vec<EmbeddingLogEntry>) -> Vec<EmbeddingLogEntry> {
-    let mut out: Vec<Option<EmbeddingLogEntry>> = Vec::with_capacity(entries.len());
+    let mut out: Vec<EmbeddingLogEntry> = Vec::with_capacity(entries.len());
     let mut pending: HashMap<(SpeakerId, u16), usize> = HashMap::new();
     for entry in entries {
         let key = (entry.online_speaker, entry.epoch);
         match pending.remove(&key) {
-            Some(at) => {
-                let merged = match out[at].take() {
-                    Some(earlier) => coalesce(earlier, entry),
-                    None => entry,
-                };
-                out[at] = Some(merged);
-            }
+            Some(at) => absorb(&mut out[at], entry),
             None => {
                 pending.insert(key, out.len());
-                out.push(Some(entry));
+                out.push(entry);
             }
         }
     }
-    out.into_iter().flatten().collect()
+    out
 }
 
-fn coalesce(a: EmbeddingLogEntry, b: EmbeddingLogEntry) -> EmbeddingLogEntry {
+fn coalesce(mut a: EmbeddingLogEntry, b: EmbeddingLogEntry) -> EmbeddingLogEntry {
+    absorb(&mut a, b);
+    a
+}
+
+/// Fold `b` into `a` (same speaker and epoch, `b` later in time).
+fn absorb(a: &mut EmbeddingLogEntry, b: EmbeddingLogEntry) {
     let (wa, wb) = (a.speech_ms.max(1) as f32, b.speech_ms.max(1) as f32);
     let mut embedding: Vec<f32> = a
         .embedding
@@ -314,24 +326,14 @@ fn coalesce(a: EmbeddingLogEntry, b: EmbeddingLogEntry) -> EmbeddingLogEntry {
         .map(|(x, y)| (x * wa + y * wb) / (wa + wb))
         .collect();
     l2_normalize(&mut embedding);
-    let mut spans = a.spans;
-    spans.extend(b.spans);
-    let mut windows = a.windows;
-    windows.extend(b.windows);
-    EmbeddingLogEntry {
-        spans,
-        start_ms: a.start_ms.min(b.start_ms),
-        end_ms: a.end_ms.max(b.end_ms),
-        speech_ms: a.speech_ms.saturating_add(b.speech_ms),
-        epoch: a.epoch,
-        local_speaker: if a.local_speaker == b.local_speaker {
-            a.local_speaker
-        } else {
-            None
-        },
-        online_speaker: a.online_speaker,
-        embedding: embedding.into_boxed_slice(),
-        windows,
+    a.embedding = embedding.into_boxed_slice();
+    a.spans.extend(b.spans);
+    a.windows.extend(b.windows);
+    a.start_ms = a.start_ms.min(b.start_ms);
+    a.end_ms = a.end_ms.max(b.end_ms);
+    a.speech_ms = a.speech_ms.saturating_add(b.speech_ms);
+    if a.local_speaker != b.local_speaker {
+        a.local_speaker = None;
     }
 }
 

@@ -628,11 +628,21 @@ mod tests {
         let a = SpeakerId::new();
         let three: Vec<_> = (0..3).map(|i| entry(i, a, 0.0)).collect();
         assert!(too_short(&three), "fewer than 4 entries");
-        let mut four: Vec<_> = (0..4).map(|i| entry(i, a, 0.0)).collect();
+        let four: Vec<_> = (0..4).map(|i| entry(i, a, 0.0)).collect();
         assert!(!too_short(&four), "4 x 3 s = 12 s of speech");
-        for e in &mut four {
-            e.speech_ms = 2_000;
-        }
-        assert!(too_short(&four), "4 x 2 s = 8 s < 10 s");
+        let short: Vec<_> = four
+            .iter()
+            .map(|e| {
+                EmbeddingLogEntry::new(
+                    e.spans.clone(),
+                    e.start_ms..e.start_ms + 2_000,
+                    e.epoch,
+                    e.local_speaker,
+                    e.online_speaker,
+                    e.embedding.clone(),
+                )
+            })
+            .collect();
+        assert!(too_short(&short), "4 x 2 s = 8 s < 10 s");
     }
 }
