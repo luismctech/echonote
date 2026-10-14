@@ -153,6 +153,9 @@ pub struct AppState {
     /// When the file exists, `build_diarizer` attaches a
     /// `PyannoteSegmenter` to the `OnlineDiarizer` automatically.
     pub(crate) seg_model_path: PathBuf,
+    /// `true` when `seg_model_path` came from `ECHO_SEG_MODEL`; such a
+    /// path is never swapped for the tract file at session start.
+    pub(crate) seg_model_explicit: bool,
     pub(crate) store: Arc<dyn MeetingStore>,
     /// Per-meeting segment search the chat uses on transcripts that do not
     /// fit the context window; backed by the same database as `store`.
@@ -318,9 +321,11 @@ impl AppState {
             env_override("ECHO_EMBED_MODEL"),
             preferred_embed_model(&data_root),
         );
+        let seg_override = env_override("ECHO_SEG_MODEL").filter(|s| !s.trim().is_empty());
+        let seg_model_explicit = seg_override.is_some();
         let seg_model_path = resolve_asset_path(
             &data_root,
-            env_override("ECHO_SEG_MODEL"),
+            seg_override,
             preferred_segmenter_model(&data_root),
         );
         let llm_model_path = resolve_asset_path(
@@ -362,6 +367,7 @@ impl AppState {
             model_path: std::sync::RwLock::new(model_path),
             embed_model_path: std::sync::RwLock::new(embed_model_path),
             seg_model_path,
+            seg_model_explicit,
             store,
             retriever,
             recorder,
@@ -508,7 +514,11 @@ impl AppState {
         }
 
         // Attach pyannote segmenter if the model file is installed.
-        let seg_path = session_segmenter_path(&self.data_root, &self.seg_model_path);
+        let seg_path = session_segmenter_path(
+            &self.data_root,
+            &self.seg_model_path,
+            self.seg_model_explicit,
+        );
         if seg_path.exists() {
             match PyannoteSegmenter::new(&seg_path) {
                 Ok(seg) => {
@@ -787,10 +797,11 @@ fn preferred_segmenter_model(root: &Path) -> &'static str {
 /// Segmenter path for a new session. The startup path is kept, except
 /// when it is the default upstream export and the tract file has been
 /// installed since (e.g. downloaded from the Models panel): then the
-/// tract file wins. An explicit `ECHO_SEG_MODEL` path is never replaced.
-fn session_segmenter_path(root: &Path, configured: &Path) -> PathBuf {
+/// tract file wins. An `explicit` path (from `ECHO_SEG_MODEL`) is never
+/// replaced, even when it names the default upstream file.
+fn session_segmenter_path(root: &Path, configured: &Path, explicit: bool) -> PathBuf {
     let tract = root.join(SEGMENTER_TRACT);
-    if configured == root.join(SEGMENTER_UPSTREAM) && tract.exists() {
+    if !explicit && configured == root.join(SEGMENTER_UPSTREAM) && tract.exists() {
         tract
     } else {
         configured.to_path_buf()
@@ -1173,15 +1184,28 @@ mod model_upgrade_tests {
         let root = Root::new("seg-late");
         root.install(UPSTREAM);
         let configured = root.0.join(UPSTREAM);
-        assert_eq!(session_segmenter_path(&root.0, &configured), configured);
+        assert_eq!(
+            session_segmenter_path(&root.0, &configured, false),
+            configured
+        );
         root.install(TRACT);
         assert_eq!(
-            session_segmenter_path(&root.0, &configured),
+            session_segmenter_path(&root.0, &configured, false),
             root.0.join(TRACT)
         );
-        // An explicit override (ECHO_SEG_MODEL) is never replaced.
         let custom = root.0.join("custom.onnx");
-        assert_eq!(session_segmenter_path(&root.0, &custom), custom);
+        assert_eq!(session_segmenter_path(&root.0, &custom, false), custom);
+    }
+
+    #[test]
+    fn an_explicit_segmenter_override_is_never_replaced() {
+        // ECHO_SEG_MODEL pointing at the upstream export stays, even once
+        // the tract file is installed.
+        let root = Root::new("seg-explicit");
+        root.install(UPSTREAM);
+        root.install(TRACT);
+        let explicit = root.0.join(UPSTREAM);
+        assert_eq!(session_segmenter_path(&root.0, &explicit, true), explicit);
     }
 
     #[test]
