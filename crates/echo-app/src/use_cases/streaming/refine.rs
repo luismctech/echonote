@@ -105,8 +105,9 @@ impl AttributionLedger {
     /// The payload is self-consistent: `retired` is in speaker-id order,
     /// and every speaker a chunk row or a recipient names is either known
     /// online or listed in `created`. A created speaker that owns no
-    /// segment is not sent, and chunk rows naming it are dropped (those
-    /// live-pane lines keep their online colour).
+    /// segment is not sent, and no chunk row names it or a retired
+    /// speaker: such a live-pane line takes the speaker owning most of
+    /// its segment time (no speaker when it has no attributed segment).
     pub(super) fn reassign(
         &self,
         plan: &SpanRelabelPlan,
@@ -120,7 +121,9 @@ impl AttributionLedger {
             .collect();
 
         let mut segments = Vec::new();
-        let mut chunks = Vec::new();
+        // Per chunk: (index, online speaker, span-dominant speaker and
+        // slot, speaker owning most of its segment time after the plan).
+        let mut chunk_views = Vec::with_capacity(self.chunks.len());
         // Per speaker: segment duration (samples) owned before and after.
         let mut before: HashMap<SpeakerId, usize> = HashMap::new();
         let mut after: HashMap<SpeakerId, usize> = HashMap::new();
@@ -148,9 +151,13 @@ impl AttributionLedger {
                 })
                 .collect();
 
+            let mut owned: HashMap<SpeakerId, usize> = HashMap::new();
             for seg in &chunk.segments {
                 let new = dominant_span(&spans, seg.start, seg.end).or(seg.speaker);
                 let len = seg.end.saturating_sub(seg.start).max(1);
+                if let Some(new) = new {
+                    *owned.entry(new).or_default() += len;
+                }
                 if let Some(old) = seg.speaker {
                     *before.entry(old).or_default() += len;
                     if let Some(new) = new {
@@ -168,14 +175,16 @@ impl AttributionLedger {
                 }
             }
 
-            let dominant = chunk_dominant_speaker(&spans);
-            if dominant.map(|(id, _)| id) != chunk.speaker {
-                chunks.push(ChunkSpeaker {
-                    chunk_index: chunk.chunk_index,
-                    speaker_id: dominant.map(|(id, _)| id),
-                    speaker_slot: dominant.map(|(_, slot)| slot),
-                });
-            }
+            let by_segments = owned
+                .into_iter()
+                .max_by_key(|(id, len)| (*len, std::cmp::Reverse(id.0)))
+                .map(|(id, _)| id);
+            chunk_views.push((
+                chunk.chunk_index,
+                chunk.speaker,
+                chunk_dominant_speaker(&spans),
+                by_segments,
+            ));
         }
 
         if segments.is_empty() {
@@ -234,12 +243,28 @@ impl AttributionLedger {
                 r.majority_recipient = None;
             }
         }
-        let unsent = |id: Option<SpeakerId>| {
-            id.is_some_and(|id| {
-                plan.created.iter().any(|c| c.id == id) && !created.iter().any(|c| c.id == id)
-            })
+        // A line's span-dominant speaker stands unless it is a created
+        // speaker that is not sent or a retired one; the line then takes
+        // the speaker owning most of its segment time, which owns a
+        // segment and so is neither.
+        let unusable = |id: SpeakerId| {
+            retired.iter().any(|r| r.speaker == id)
+                || (plan.created.iter().any(|c| c.id == id) && !created.iter().any(|c| c.id == id))
         };
-        chunks.retain(|c| !unsent(c.speaker_id));
+        let mut chunks = Vec::new();
+        for (chunk_index, online_speaker, dominant, by_segments) in chunk_views {
+            let target = match dominant {
+                Some((id, slot)) if !unusable(id) => Some((id, slot)),
+                _ => by_segments.map(|id| (id, slot_of.get(&id).copied().unwrap_or_default())),
+            };
+            if target.map(|(id, _)| id) != online_speaker {
+                chunks.push(ChunkSpeaker {
+                    chunk_index,
+                    speaker_id: target.map(|(id, _)| id),
+                    speaker_slot: target.map(|(_, slot)| slot),
+                });
+            }
+        }
 
         Some(Reassignment {
             created,
@@ -504,6 +529,46 @@ mod tests {
             r.chunks.iter().all(|c| c.speaker_id != Some(fresh.id)),
             "{:?}",
             r.chunks
+        );
+    }
+
+    #[test]
+    fn live_pane_lines_never_keep_a_retired_speaker() {
+        let (a, b) = (Speaker::anonymous(0), Speaker::anonymous(1));
+        let fresh = Speaker::anonymous(2);
+        let mut ledger = AttributionLedger::default();
+        // Chunk 0 is a's only chunk: a short span with a segment, then a
+        // long span with none.
+        ledger.record(
+            0,
+            &[span(a.id, 0, 0, 100), span(a.id, 0, 100, 400)],
+            [(SegmentId::new(), 0, 100, Some(a.id))],
+            Some(a.id),
+        );
+        ledger.record(
+            1,
+            &[span(b.id, 1, 0, 100)],
+            [(SegmentId::new(), 0, 100, Some(b.id))],
+            Some(b.id),
+        );
+        // a's segment moves to b and a is retired; the long span's new
+        // speaker owns no segment and is not sent, so chunk 0's line
+        // takes the speaker that owns its segments instead of keeping a.
+        let plan = SpanRelabelPlan {
+            spans: vec![(at(0, 0), b.id), (at(0, 1), fresh.id), (at(1, 0), b.id)],
+            created: vec![fresh.clone()],
+            retired: vec![],
+        };
+        let r = ledger.reassign(&plan, &[a.clone(), b.clone()]).unwrap();
+        assert_eq!(r.retired.len(), 1);
+        assert_eq!(r.retired[0].speaker, a.id);
+        assert_eq!(
+            r.chunks,
+            vec![ChunkSpeaker {
+                chunk_index: 0,
+                speaker_id: Some(b.id),
+                speaker_slot: Some(1)
+            }]
         );
     }
 
