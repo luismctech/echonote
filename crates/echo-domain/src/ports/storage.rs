@@ -169,8 +169,8 @@ pub trait MeetingStore: Send + Sync {
     /// Returns [`DomainError::NotFound`] when the meeting does not
     /// exist and [`DomainError::Invariant`] when a listed segment, a
     /// referenced speaker, a retired speaker or a created speaker id
-    /// belongs to another meeting; nothing is written in either case. Applying the same plan twice leaves the same
-    /// state.
+    /// belongs to another meeting; nothing is written in either case.
+    /// Applying the same plan twice leaves the same state.
     async fn reassign_speakers(
         &self,
         meeting_id: MeetingId,
