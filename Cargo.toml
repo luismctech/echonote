@@ -79,7 +79,7 @@ screencapturekit = "1.5"
 # adapter (Sprint 1 day 4). Avoids the FFI / shared-lib dance of
 # onnxruntime — fine for tiny models. We may swap to `ort` for larger
 # diarization / TTS models if performance becomes an issue.
-tract-onnx = { version = "0.22", default-features = false }
+tract-onnx = { version = "0.23", default-features = false }
 
 # Speaker-embedding feature extraction. Pure-Rust port of kaldi-native-fbank
 # providing 80-mel filterbank features compatible with the 3D-Speaker
