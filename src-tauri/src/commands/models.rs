@@ -786,9 +786,13 @@ mod tests {
 
     impl TempRoot {
         fn new(name: &str) -> Self {
+            // The counter keeps two roots of one test binary apart even
+            // when their names and clock readings coincide.
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
             let dir = std::env::temp_dir().join(format!(
-                "echonote-models-{name}-{}-{}",
+                "echonote-models-{name}-{}-{}-{}",
                 std::process::id(),
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map_or(0, |d| d.as_nanos())
@@ -996,7 +1000,7 @@ mod tests {
     fn an_upstream_only_segmenter_install_is_not_reported_present() {
         // Users who downloaded the upstream export before v0.6.0 never had
         // a working segmenter: the catalog must offer the tract file.
-        let root = TempRoot::new("seg-upstream");
+        let root = TempRoot::new("catalog-seg-upstream-only");
         let upstream = root.0.join("models/segmenter/pyannote_segmentation_3.onnx");
         std::fs::create_dir_all(upstream.parent().unwrap()).unwrap();
         std::fs::write(&upstream, b"x").unwrap();

@@ -978,9 +978,13 @@ mod llm_selection_tests {
 
     impl Root {
         pub(super) fn new(name: &str) -> Self {
+            // The counter keeps two roots of one test binary apart even
+            // when their names and clock readings coincide.
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
             let dir = std::env::temp_dir().join(format!(
-                "echonote-llm-{name}-{}-{}",
+                "echonote-llm-{name}-{}-{}-{}",
                 std::process::id(),
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map_or(0, |d| d.as_nanos())
@@ -1172,7 +1176,7 @@ mod model_upgrade_tests {
 
     #[test]
     fn the_upstream_segmenter_is_used_only_when_it_is_all_there_is() {
-        let root = Root::new("seg-upstream");
+        let root = Root::new("seg-upstream-only");
         root.install(UPSTREAM);
         assert_eq!(preferred_segmenter_model(&root.0), UPSTREAM);
         root.install(TRACT);
