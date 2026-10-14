@@ -26,6 +26,8 @@ use echo_domain::{
     DomainError, Sample,
 };
 
+use super::stream_error::{classify, Severity};
+
 /// Synthetic device ID for the default monitor source.
 pub const SYSTEM_OUTPUT_DEVICE_ID: &str = "linux:pulseaudio:monitor-default";
 
@@ -311,7 +313,12 @@ fn run_audio_thread(
     ready_tx: std::sync::mpsc::Sender<Result<(), DomainError>>,
 ) {
     let start = std::time::Instant::now();
-    let err_fn = |err: cpal::StreamError| error!(error = %err, "PulseAudio monitor stream error");
+    // `poll()` timeouts and xruns are routine on the PipeWire/PulseAudio
+    // ALSA plugin and leave the stream running — see `stream_error`.
+    let err_fn = |err: cpal::StreamError| match classify(&err) {
+        Severity::Transient => debug!(error = %err, "transient PulseAudio monitor stream error"),
+        Severity::Fatal => error!(error = %err, "PulseAudio monitor stream error"),
+    };
 
     let build_result: Result<cpal::Stream, DomainError> = match sample_format {
         SampleFormat::F32 => device

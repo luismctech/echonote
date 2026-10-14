@@ -10,12 +10,16 @@ import { ModelsStep } from "./steps/ModelsStep";
 import { TestRecordingStep } from "./steps/TestRecordingStep";
 import { CompletionStep } from "./steps/CompletionStep";
 
+// `permissions` runs *after* `models`: the mic probe starts a real
+// streaming session, which the backend refuses with `modelNotReady`
+// until an ASR model is on disk. Probing earlier reported every fresh
+// install as "microphone denied".
 const STEPS = [
   "welcome",
   "privacy",
-  "permissions",
   "hardware",
   "models",
+  "permissions",
   "test-recording",
   "completion",
 ] as const;

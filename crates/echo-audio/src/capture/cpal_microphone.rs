@@ -29,6 +29,8 @@ use echo_domain::{
     DomainError, Sample,
 };
 
+use super::stream_error::{classify, Severity};
+
 /// Number of frames buffered between the audio thread and consumers
 /// before warnings fire. Sized for 5 s of 48 kHz stereo (~2 MB).
 const CHANNEL_CAPACITY_HINT: usize = 512;
@@ -362,6 +364,9 @@ fn pick_config(
     Ok(cfg.with_sample_rate(rate))
 }
 
+/// How often a repeating transient stream error is logged (1 in N).
+const TRANSIENT_LOG_EVERY: u64 = 100;
+
 /// Maximum number of consecutive reconnection attempts before giving up.
 const MAX_RECONNECT_ATTEMPTS: u32 = 10;
 
@@ -582,9 +587,25 @@ fn build_and_play_stream(
 ) -> Result<cpal::Stream, DomainError> {
     let make_err_fn = || {
         let flag = stream_error.clone();
-        move |err: cpal::StreamError| {
-            error!(error = %err, "cpal stream error — will attempt reconnect");
-            flag.store(true, Ordering::Release);
+        // Transient errors fire several times per second on some hosts
+        // (see `stream_error`); log the first one per stream and then
+        // only every TRANSIENT_LOG_EVERY-th to keep the journal usable.
+        let transient_seen = Arc::new(AtomicU64::new(0));
+        move |err: cpal::StreamError| match classify(&err) {
+            Severity::Transient => {
+                let seen = transient_seen.fetch_add(1, Ordering::Relaxed);
+                if seen.is_multiple_of(TRANSIENT_LOG_EVERY) {
+                    debug!(
+                        error = %err,
+                        occurrences = seen + 1,
+                        "transient cpal stream error — stream still live, not reconnecting"
+                    );
+                }
+            }
+            Severity::Fatal => {
+                error!(error = %err, "cpal stream error — will attempt reconnect");
+                flag.store(true, Ordering::Release);
+            }
         }
     };
 
