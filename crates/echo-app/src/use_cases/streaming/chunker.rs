@@ -23,6 +23,8 @@
 //! All positions are sample indices into the pipeline buffer (device
 //! rate, interleaved), so cuts map 1:1 to buffer drains.
 
+use std::ops::Range;
+
 use echo_domain::VoiceState;
 
 /// Chunk length bounds and cut tuning, in buffer samples.
@@ -167,6 +169,23 @@ impl SpeechTimeline {
         }
     }
 
+    /// The speech region still open at the end of the analysed audio:
+    /// from where the next [`Cut::Speech`] would start (after any
+    /// leading silence cut, pre-roll kept) to the analysed end. `None`
+    /// when no speech onset was seen or when the region holds less
+    /// than `bounds.min_speech` of confident speech, i.e. when the
+    /// final cut would be skipped as silence too.
+    ///
+    /// Call it after draining every ready cut, so the region is the
+    /// one the next speech chunk will hold.
+    pub fn open_region(&self, bounds: &ChunkBounds) -> Option<Range<usize>> {
+        let onset = self.speech_onset()?;
+        let start = self.last_end_at_or_before(onset.saturating_sub(bounds.pre_roll));
+        let end = self.analyzed();
+        let confident = self.confident_speech(end) - self.confident_speech(start);
+        (start < end && confident >= bounds.min_speech).then_some(start..end)
+    }
+
     /// Classify the speech chunk `[0, n)`: [`Cut::Speech`] when it holds
     /// at least `bounds.min_speech` samples of confident speech,
     /// [`Cut::Silence`] otherwise.
@@ -244,6 +263,20 @@ impl SpeechTimeline {
             })
             .unwrap_or(bounds.max)
     }
+}
+
+/// Whether an open speech `region` is due for a provisional (draft)
+/// transcription: at least `interval` samples were analysed since the
+/// end of the last draft of this region (`last_draft_end`), or since
+/// the region start when it has none yet. A zero `interval` disables
+/// drafts.
+pub(super) fn draft_due(
+    region: &Range<usize>,
+    last_draft_end: Option<usize>,
+    interval: usize,
+) -> bool {
+    let since = last_draft_end.unwrap_or(region.start);
+    interval > 0 && region.end.saturating_sub(since) >= interval
 }
 
 #[cfg(test)]
@@ -423,5 +456,53 @@ mod tests {
         // One confident second clears the half-second floor.
         let t = then_silence(voiced_with(&[0.4, 0.5]), 1);
         assert_eq!(t.next_cut(&bounds()), Some(Cut::Speech(2 * SEC)));
+    }
+
+    #[test]
+    fn open_region_starts_after_the_leading_silence_cut() {
+        // Onset at 20, pre-roll 3 ⇒ the silence cut ends at 10.
+        let t = timeline(&[S, S, V, V]);
+        assert_eq!(t.open_region(&bounds()), Some(SEC..4 * SEC));
+    }
+
+    #[test]
+    fn open_region_starts_at_zero_once_the_leading_silence_is_drained() {
+        let mut t = timeline(&[S, S, V, V]);
+        t.consume(SEC);
+        assert_eq!(t.open_region(&bounds()), Some(0..3 * SEC));
+    }
+
+    #[test]
+    fn no_open_region_in_pure_silence() {
+        assert_eq!(timeline(&[S, S, S]).open_region(&bounds()), None);
+        assert_eq!(SpeechTimeline::default().open_region(&bounds()), None);
+    }
+
+    #[test]
+    fn no_open_region_below_the_confident_speech_floor() {
+        assert_eq!(voiced_with(&[0.4, 0.4]).open_region(&bounds()), None);
+        // Hesitant speech after a pause stays below the floor too.
+        let mut t = timeline(&[S, S]);
+        for end in [3 * SEC, 4 * SEC] {
+            t.push(TimedFrame {
+                end,
+                probability: 0.4,
+                state: V,
+            });
+        }
+        assert_eq!(t.open_region(&bounds()), None);
+    }
+
+    #[test]
+    fn draft_is_due_every_interval_of_newly_analysed_audio() {
+        let region = 0..4 * SEC;
+        assert!(draft_due(&region, None, 4 * SEC));
+        assert!(!draft_due(&(0..4 * SEC - 1), None, 4 * SEC));
+        // Measured from the region start, not from the buffer start.
+        assert!(!draft_due(&(SEC..4 * SEC), None, 4 * SEC));
+        assert!(!draft_due(&(0..7 * SEC), Some(4 * SEC), 4 * SEC));
+        assert!(draft_due(&(0..8 * SEC), Some(4 * SEC), 4 * SEC));
+        // A zero interval disables drafts.
+        assert!(!draft_due(&region, None, 0));
     }
 }

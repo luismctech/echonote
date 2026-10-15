@@ -78,10 +78,31 @@ pub struct StreamingOptions {
     /// decodes up to 30 s windows).
     #[serde(default = "default_max_chunk_ms")]
     pub max_chunk_ms: u32,
+    /// Raise quiet capture to a normal speech level before anything
+    /// else sees it (VAD, ASR, diarizer, saved audio). The gain follows
+    /// the speech level over the last seconds, never attenuates, is
+    /// capped at about +30 dB and ignores steady noise, so loud input
+    /// passes through unchanged. Default `true`: a mic at -54 dBFS made
+    /// the VAD drop real speech as silence.
+    #[serde(default = "default_auto_gain")]
+    pub auto_gain: bool,
+    /// Speech-aligned mode: while a chunk is still open, transcribe what
+    /// it holds so far every this many milliseconds of new audio and
+    /// emit it as a [`TranscriptEvent::Draft`], so text shows up long
+    /// before the chunk closes at a pause. Drafts never change the
+    /// final chunks and are skipped while transcription runs behind
+    /// capture. `0` disables them; fixed chunks never draft. Default
+    /// 4000.
+    #[serde(default = "default_draft_interval_ms")]
+    pub draft_interval_ms: u32,
 }
 
 /// Default for [`StreamingOptions::speech_aligned_chunks`].
 const DEFAULT_SPEECH_ALIGNED_CHUNKS: bool = true;
+/// Default for [`StreamingOptions::auto_gain`].
+const DEFAULT_AUTO_GAIN: bool = true;
+/// Default for [`StreamingOptions::draft_interval_ms`].
+const DEFAULT_DRAFT_INTERVAL_MS: u32 = 4_000;
 /// Default for [`StreamingOptions::min_chunk_ms`].
 const DEFAULT_MIN_CHUNK_MS: u32 = 4_000;
 /// Default for [`StreamingOptions::max_chunk_ms`].
@@ -89,6 +110,14 @@ const DEFAULT_MAX_CHUNK_MS: u32 = 20_000;
 
 fn default_speech_aligned_chunks() -> bool {
     DEFAULT_SPEECH_ALIGNED_CHUNKS
+}
+
+fn default_auto_gain() -> bool {
+    DEFAULT_AUTO_GAIN
+}
+
+fn default_draft_interval_ms() -> u32 {
+    DEFAULT_DRAFT_INTERVAL_MS
 }
 
 fn default_min_chunk_ms() -> u32 {
@@ -108,6 +137,8 @@ impl Default for StreamingOptions {
             speech_aligned_chunks: DEFAULT_SPEECH_ALIGNED_CHUNKS,
             min_chunk_ms: DEFAULT_MIN_CHUNK_MS,
             max_chunk_ms: DEFAULT_MAX_CHUNK_MS,
+            auto_gain: DEFAULT_AUTO_GAIN,
+            draft_interval_ms: DEFAULT_DRAFT_INTERVAL_MS,
         }
     }
 }
@@ -257,6 +288,38 @@ pub enum TranscriptEvent {
         /// Session id.
         session_id: StreamingSessionId,
     },
+    /// How far transcription runs behind capture. Emitted after every
+    /// chunk or skipped span, so the UI can tell a slow transcriber
+    /// (growing lag, no audio lost) apart from a stalled one. Not
+    /// persisted.
+    #[serde(rename_all = "camelCase")]
+    Progress {
+        /// Session id.
+        session_id: StreamingSessionId,
+        /// Active (non-paused) capture time minus the session audio
+        /// already emitted, in milliseconds; never negative.
+        lag_ms: u32,
+        /// Captured audio queued for the pipeline but not yet buffered
+        /// for chunking, in milliseconds.
+        backlog_ms: u32,
+    },
+    /// Provisional text of the speech chunk still open at the end of
+    /// the captured audio (speech-aligned mode only). Each draft
+    /// replaces the previous one; the [`TranscriptEvent::Chunk`] with
+    /// the same `chunk_index` replaces it for good. Drafts carry no
+    /// speaker, timestamps or segments and are never persisted.
+    #[serde(rename_all = "camelCase")]
+    Draft {
+        /// Session id.
+        session_id: StreamingSessionId,
+        /// Index the final chunk of this speech will be emitted with.
+        chunk_index: u32,
+        /// Session-time start of that chunk, in milliseconds since
+        /// `Started`.
+        offset_ms: u32,
+        /// Text transcribed so far, punctuated like final segments.
+        text: String,
+    },
 }
 
 /// A speaker referenced by a [`TranscriptEvent::Chunk`]: its stable id
@@ -330,7 +393,9 @@ impl TranscriptEvent {
             | Self::Stopped { session_id, .. }
             | Self::Failed { session_id, .. }
             | Self::Paused { session_id, .. }
-            | Self::Resumed { session_id, .. } => *session_id,
+            | Self::Resumed { session_id, .. }
+            | Self::Progress { session_id, .. }
+            | Self::Draft { session_id, .. } => *session_id,
         }
     }
 }
@@ -348,6 +413,8 @@ mod tests {
         assert!(opts.language.is_none());
         assert!(opts.speech_aligned_chunks);
         assert_eq!((opts.min_chunk_ms, opts.max_chunk_ms), (4_000, 20_000));
+        assert!(opts.auto_gain);
+        assert_eq!(opts.draft_interval_ms, 4_000);
     }
 
     #[test]
@@ -355,6 +422,38 @@ mod tests {
         let json = r#"{"language":null,"chunk_ms":5000,"silence_rms_threshold":0.02}"#;
         let opts: StreamingOptions = serde_json::from_str(json).unwrap();
         assert_eq!(opts, StreamingOptions::default());
+    }
+
+    #[test]
+    fn progress_serializes_lag_and_backlog_in_camel_case() {
+        let evt = TranscriptEvent::Progress {
+            session_id: StreamingSessionId::new(),
+            lag_ms: 12_000,
+            backlog_ms: 3_500,
+        };
+        let json = serde_json::to_value(&evt).unwrap();
+        assert_eq!(json["type"], "progress");
+        assert_eq!(json["lagMs"], 12_000);
+        assert_eq!(json["backlogMs"], 3_500);
+        let back: TranscriptEvent = serde_json::from_value(json).unwrap();
+        assert_eq!(back, evt);
+    }
+
+    #[test]
+    fn draft_serializes_in_camel_case_and_round_trips() {
+        let evt = TranscriptEvent::Draft {
+            session_id: StreamingSessionId::new(),
+            chunk_index: 3,
+            offset_ms: 12_000,
+            text: "hola a todos".into(),
+        };
+        let json = serde_json::to_value(&evt).unwrap();
+        assert_eq!(json["type"], "draft");
+        assert_eq!(json["chunkIndex"], 3);
+        assert_eq!(json["offsetMs"], 12_000);
+        assert_eq!(json["text"], "hola a todos");
+        let back: TranscriptEvent = serde_json::from_value(json).unwrap();
+        assert_eq!(back, evt);
     }
 
     #[test]

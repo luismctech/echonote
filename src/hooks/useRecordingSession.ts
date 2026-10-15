@@ -5,6 +5,7 @@
  *
  *   - the recording state machine (`RecordingState` reducer)
  *   - the rolling list of transcript lines + session stats
+ *   - the single provisional (draft) line of the chunk still open
  *   - the auto-scrolling list ref
  *   - the `handleEvent` translator from `TranscriptEvent` → state
  *   - `start` / `stop` / `dismissError` / `reset` actions
@@ -41,6 +42,7 @@ import type { TranscriptEvent } from "../types/streaming";
 import type { Note } from "../types/meeting";
 import type { StreamLine } from "../types/view";
 import { streamingOptionsFor, type StartOptions } from "../lib/streamingOptions";
+import { applyDraftEvent, type DraftLine } from "../lib/draft";
 import {
   applyChunkSpeakers,
   applySpeakerMerges,
@@ -51,9 +53,11 @@ export type RecordingStats = {
   chunks: number;
   skipped: number;
   audioMs: number;
+  /** Latest processing lag reported by the backend (ms); 0 when idle. */
+  lagMs: number;
 };
 
-const ZERO_STATS: RecordingStats = { chunks: 0, skipped: 0, audioMs: 0 };
+const ZERO_STATS: RecordingStats = { chunks: 0, skipped: 0, audioMs: 0, lagMs: 0 };
 
 /** Max transcript lines kept in memory during a live session. */
 const MAX_LIVE_LINES = 500;
@@ -77,6 +81,7 @@ export function useRecordingSession({
   );
   const [lines, setLines] = useState<StreamLine[]>([]);
   const [stats, setStats] = useState<RecordingStats>(ZERO_STATS);
+  const [draft, setDraft] = useState<DraftLine | null>(null);
   const [notes, setNotes] = useState<Note[]>([]);
   const sessionStartedAtRef = useRef<number | null>(null);
   const meetingIdRef = useRef<string | null>(null);
@@ -95,11 +100,11 @@ export function useRecordingSession({
     onOpenModelsRef.current = onOpenModels;
   }, [onOpenModels]);
 
-  // Auto-scroll the live transcript list as new lines arrive.
+  // Auto-scroll the live transcript list as new lines or drafts arrive.
   useEffect(() => {
     const el = listRef.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [lines]);
+  }, [lines, draft]);
 
   // Surface state-machine errors AND the success "saved" event as
   // toasts (single source of truth). The reducer is the only place
@@ -176,6 +181,9 @@ export function useRecordingSession({
   );
 
   const handleEvent = useCallback((evt: TranscriptEvent) => {
+    // Drafts are replaced by later drafts and cleared by the final
+    // chunk, a skip, or the end of the session (see `applyDraftEvent`).
+    setDraft((d) => applyDraftEvent(d, evt));
     switch (evt.type) {
       case "started":
         sessionStartedAtRef.current = Date.now();
@@ -245,7 +253,14 @@ export function useRecordingSession({
             : next;
         });
         break;
+      case "draft":
+        // Handled by `applyDraftEvent` above.
+        break;
+      case "progress":
+        setStats((s) => (s.lagMs === evt.lagMs ? s : { ...s, lagMs: evt.lagMs }));
+        break;
       case "stopped":
+        setStats((s) => ({ ...s, lagMs: 0 }));
         dispatch({
           type: "STREAMING_STOPPED",
           totalSegments: evt.totalSegments,
@@ -256,6 +271,7 @@ export function useRecordingSession({
         onSessionFinishedRef.current();
         break;
       case "failed":
+        setStats((s) => ({ ...s, lagMs: 0 }));
         dispatch({ type: "STREAMING_FAILED", message: evt.message });
         onSessionFinishedRef.current();
         break;
@@ -286,6 +302,7 @@ export function useRecordingSession({
     async (options: StartOptions) => {
       setLines([]);
       setStats(ZERO_STATS);
+      setDraft(null);
       setNotes([]);
       sessionStartedAtRef.current = null;
       meetingIdRef.current = null;
@@ -369,6 +386,7 @@ export function useRecordingSession({
       dispatch({ type: "ACKNOWLEDGE" });
       setLines([]);
       setStats(ZERO_STATS);
+      setDraft(null);
       setNotes([]);
       sessionStartedAtRef.current = null;
       meetingIdRef.current = null;
@@ -438,6 +456,7 @@ export function useRecordingSession({
     stream,
     lines,
     stats,
+    draft,
     notes,
     listRef,
     canStart,

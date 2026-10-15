@@ -310,6 +310,7 @@ export function App() {
               onToggleDiarize={setDiarize}
               saveAudio={saveAudio}
               onToggleSaveAudio={setSaveAudio}
+              draft={recording.draft}
               language={language}
               onChangeLanguage={setLanguage}
               audioSource={audioSource}

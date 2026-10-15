@@ -8,6 +8,7 @@
 
 mod commands;
 mod ipc_error;
+mod logging;
 
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
 use tauri::tray::TrayIconEvent;
@@ -113,7 +114,7 @@ fn export_bindings(builder: &tauri_specta::Builder<tauri::Wry>) {
 /// Entry point invoked by `main.rs`. Kept library-friendly so mobile
 /// targets (Tauri 2 iOS/Android) can reuse the same builder.
 pub fn run() {
-    echo_telemetry::init();
+    logging::init();
 
     tracing::info!(
         version = env!("CARGO_PKG_VERSION"),
@@ -130,10 +131,10 @@ pub fn run() {
     #[cfg(debug_assertions)]
     export_bindings(&specta_builder);
 
-    // NOTE: `tauri-plugin-log` conflicts with `echo_telemetry::init`,
-    // which already installs a global `log → tracing` bridge. Logging
-    // is delivered through that subscriber. Reintroduce the plugin only
-    // if we move telemetry off `tracing-subscriber`.
+    // NOTE: `tauri-plugin-log` conflicts with `logging::init`, which
+    // already installs a global `log → tracing` bridge. Logging is
+    // delivered through that subscriber (console + file). Reintroduce
+    // the plugin only if we move off `tracing-subscriber`.
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
@@ -145,6 +146,21 @@ pub fn run() {
             show_main_window(app);
         }))
         .setup(|app| {
+            // Logs to a file in the OS app log directory, so a session
+            // can be diagnosed afterwards. Best-effort: without it the
+            // console still gets every line.
+            match app.path().app_log_dir() {
+                Ok(dir) => match logging::attach_file(&dir) {
+                    Ok(path) => tracing::info!(
+                        path = %path.display(),
+                        version = env!("CARGO_PKG_VERSION"),
+                        commit = env!("ECHO_GIT_HASH"),
+                        "logging to file"
+                    ),
+                    Err(e) => tracing::warn!(error = %e, "cannot open the log file"),
+                },
+                Err(e) => tracing::warn!(error = %e, "no app log directory"),
+            }
             // ── System tray menu ─────────────────────────────────
             let show = MenuItemBuilder::with_id("show", "Show EchoNote").build(app)?;
             let quit = MenuItemBuilder::with_id("quit", "Quit").build(app)?;

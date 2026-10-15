@@ -228,7 +228,19 @@ impl Diarizer for FakeDiarizer {
     }
 }
 
+/// Every event up to `Stopped`/`Failed`, except the `Progress`
+/// telemetry (covered by its own tests), so lifecycle assertions stay
+/// readable.
 async fn drain_until_stopped(handle: &mut StreamingHandle) -> Vec<TranscriptEvent> {
+    drain_with_progress(handle)
+        .await
+        .into_iter()
+        .filter(|e| !matches!(e, TranscriptEvent::Progress { .. }))
+        .collect()
+}
+
+/// Every event up to `Stopped`/`Failed`, `Progress` included.
+async fn drain_with_progress(handle: &mut StreamingHandle) -> Vec<TranscriptEvent> {
     let mut events = Vec::new();
     while let Some(evt) = handle.next_event().await {
         let stop = matches!(
@@ -792,12 +804,16 @@ impl Vad for ScriptedVad {
 const V: (VoiceState, f32) = (VoiceState::Voiced, 0.9);
 const S: (VoiceState, f32) = (VoiceState::Silence, 0.1);
 
+/// Speech-aligned options with drafts disabled, so the chunking tests
+/// pin final chunks and exact transcriber call counts; the draft tests
+/// opt in through [`draft_options`].
 fn aligned_options(min_chunk_ms: u32, max_chunk_ms: u32) -> StreamingOptions {
     StreamingOptions {
         chunk_ms: 1_000,
         silence_rms_threshold: 0.005,
         min_chunk_ms,
         max_chunk_ms,
+        draft_interval_ms: 0,
         ..StreamingOptions::default()
     }
 }
@@ -937,6 +953,142 @@ async fn speech_aligned_bounds_are_validated_at_start() {
         let result = pipeline.start(aligned_options(min, max)).await;
         assert!(result.is_err(), "min={min} max={max} must be rejected");
     }
+}
+
+// ---------------------------------------------------------------------------
+// Provisional (draft) text for the open speech chunk
+// ---------------------------------------------------------------------------
+
+/// Speech-aligned 4 s / 20 s bounds with a draft every 4 s.
+fn draft_options() -> StreamingOptions {
+    StreamingOptions {
+        draft_interval_ms: 4_000,
+        ..aligned_options(4_000, 20_000)
+    }
+}
+
+/// Two seconds of silence, 12 s of speech, two seconds of silence.
+fn draft_script() -> Vec<(VoiceState, f32)> {
+    let mut script = vec![S, S];
+    script.extend(std::iter::repeat_n(V, 12));
+    script.extend([S, S]);
+    script
+}
+
+/// `(chunk_index, offset_ms, text)` of every `Draft` event.
+fn drafts(events: &[TranscriptEvent]) -> Vec<(u32, u32, String)> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            TranscriptEvent::Draft {
+                chunk_index,
+                offset_ms,
+                text,
+                ..
+            } => Some((*chunk_index, *offset_ms, text.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Events with the drafts removed.
+fn without_drafts(events: &[TranscriptEvent]) -> Vec<&TranscriptEvent> {
+    events
+        .iter()
+        .filter(|e| !matches!(e, TranscriptEvent::Draft { .. }))
+        .collect()
+}
+
+/// Like [`run_aligned`], also saving the session audio; returns the
+/// number of samples the sink received.
+async fn run_aligned_saving(
+    script: Vec<(VoiceState, f32)>,
+    options: StreamingOptions,
+) -> (Vec<TranscriptEvent>, Arc<FakeTranscriber>, usize) {
+    let frames = script.iter().map(|_| sine(SEC, 0.5)).collect();
+    let capture = FakeCapture::new(AudioFormat::WHISPER, frames);
+    let transcriber = FakeTranscriber::new();
+    let (vad, _) = ScriptedVad::new(script);
+    let (sink, log) = RecordingSink::new(false);
+    let pipeline =
+        StreamingPipeline::new(capture, Arc::new(PassThroughResampler), transcriber.clone())
+            .with_vad(Box::new(vad))
+            .with_audio_sink(Box::new(sink));
+    let mut handle = pipeline.start(options).await.unwrap();
+    let events = drain_until_stopped(&mut handle).await;
+    let saved = log.lock().unwrap().samples.len();
+    (events, transcriber, saved)
+}
+
+#[tokio::test]
+async fn open_speech_chunk_emits_drafts_before_its_final_chunk() {
+    let (events, _) = run_aligned(draft_script(), draft_options()).await;
+
+    // The leading second of silence is cut first (one second of
+    // pre-roll kept), so the speech chunk is chunk 1 at 1 s; it is
+    // drafted after 4, 8 and 12 s of analysed audio.
+    assert_eq!(
+        spans(&events),
+        vec![
+            Span::Skip(0, 1_000),
+            Span::Chunk(1_000, 13_000),
+            Span::Skip(14_000, 2_000),
+        ]
+    );
+    let drafts = drafts(&events);
+    assert_eq!(
+        drafts.iter().map(|(i, o, _)| (*i, *o)).collect::<Vec<_>>(),
+        vec![(1, 1_000), (1, 1_000), (1, 1_000)],
+        "events: {events:#?}"
+    );
+    assert!(drafts.iter().all(|(_, _, text)| !text.is_empty()));
+    let last_draft = events
+        .iter()
+        .rposition(|e| matches!(e, TranscriptEvent::Draft { .. }))
+        .unwrap();
+    let chunk = events
+        .iter()
+        .position(|e| matches!(e, TranscriptEvent::Chunk { .. }))
+        .unwrap();
+    assert!(last_draft < chunk, "drafts precede their final chunk");
+}
+
+#[tokio::test]
+async fn drafts_never_change_final_chunks_audio_or_totals() {
+    let disabled = StreamingOptions {
+        draft_interval_ms: 0,
+        ..draft_options()
+    };
+    let (with, with_asr, with_saved) = run_aligned_saving(draft_script(), draft_options()).await;
+    let (without, without_asr, without_saved) = run_aligned_saving(draft_script(), disabled).await;
+
+    assert_eq!(drafts(&without), vec![], "interval 0 disables drafts");
+    let draft_count = drafts(&with).len() as u32;
+    assert_eq!(draft_count, 3);
+    assert_eq!(spans(&with), spans(&without));
+    assert_eq!(stopped_totals(&with), stopped_totals(&without));
+    assert_eq!(
+        without_drafts(&with).len(),
+        without.len(),
+        "drafts add no other event"
+    );
+    // Drafts are transcribed but never saved as session audio.
+    assert_eq!(
+        with_asr.call_count(),
+        without_asr.call_count() + draft_count
+    );
+    assert_eq!(with_saved, without_saved);
+    assert_eq!(with_saved, draft_script().len() * SEC);
+}
+
+#[tokio::test]
+async fn fixed_chunks_never_draft() {
+    let options = StreamingOptions {
+        speech_aligned_chunks: false,
+        ..draft_options()
+    };
+    let (events, _) = run_aligned(vec![V; 10], options).await;
+    assert_eq!(drafts(&events), vec![]);
 }
 
 /// Item of a [`SteppedStream`]: a frame, or a pause-flag flip applied
@@ -1510,4 +1662,343 @@ async fn audio_sink_skips_paused_audio() {
     let log = log.lock().unwrap();
     assert_eq!(log.samples.len(), 2 * SEC);
     assert!(log.samples.iter().all(|&s| s != 0.25));
+}
+
+/// 440 Hz bursts at `voiced_rms` (200 ms on, 100 ms off, silent gaps),
+/// cut into 100 ms capture frames: speech-like dynamics at a level a
+/// quiet microphone delivers (-50 dBFS).
+fn quiet_speech_frames(seconds: usize, voiced_rms: f32) -> Vec<Vec<f32>> {
+    let amplitude = voiced_rms * std::f32::consts::SQRT_2;
+    let samples: Vec<f32> = (0..seconds * 16_000)
+        .map(|i| {
+            if i % 4_800 < 3_200 {
+                amplitude * (2.0 * std::f32::consts::PI * 440.0 * i as f32 / 16_000.0).sin()
+            } else {
+                0.0
+            }
+        })
+        .collect();
+    samples.chunks(1_600).map(<[f32]>::to_vec).collect()
+}
+
+async fn run_quiet_speech(auto_gain: bool) -> (usize, usize) {
+    let capture = FakeCapture::new(AudioFormat::WHISPER, quiet_speech_frames(6, 0.003));
+    let resampler = Arc::new(PassThroughResampler) as Arc<dyn Resampler>;
+    let pipeline = StreamingPipeline::new(capture, resampler, FakeTranscriber::new());
+    let mut handle = pipeline
+        .start(StreamingOptions {
+            chunk_ms: 1_000,
+            auto_gain,
+            ..StreamingOptions::default()
+        })
+        .await
+        .unwrap();
+    let events = drain_until_stopped(&mut handle).await;
+    let count = |f: fn(&TranscriptEvent) -> bool| events.iter().filter(|e| f(e)).count();
+    (
+        count(|e| matches!(e, TranscriptEvent::Chunk { .. })),
+        count(|e| matches!(e, TranscriptEvent::Skipped { .. })),
+    )
+}
+
+#[tokio::test]
+async fn auto_gain_lets_quiet_speech_past_the_rms_gate() {
+    // Default RMS gate (0.02) against 0.003 RMS speech: only the first
+    // second, while the gain is still rising, may be skipped.
+    let (chunks, skipped) = run_quiet_speech(true).await;
+    assert!(chunks >= 5, "chunks {chunks}, skipped {skipped}");
+    assert!(skipped <= 1, "chunks {chunks}, skipped {skipped}");
+}
+
+#[tokio::test]
+async fn without_auto_gain_quiet_speech_is_skipped_as_before() {
+    let (chunks, skipped) = run_quiet_speech(false).await;
+    assert_eq!((chunks, skipped), (0, 6));
+}
+
+// ---------------------------------------------------------------------------
+// Capture decoupled from transcription, processing lag
+// ---------------------------------------------------------------------------
+
+/// Models a real capture device: a producer pushes one frame per
+/// `cadence` into a small bounded queue with `try_send` and drops the
+/// frame when the queue is full, like the cpal adapters do.
+struct HotStream {
+    rx: tokio::sync::mpsc::Receiver<Vec<f32>>,
+    producer: tokio::task::JoinHandle<()>,
+}
+
+/// Device-side queue capacity of a [`HotStream`]: small, so a consumer
+/// that stops reading for a few frames loses audio.
+const HOT_STREAM_CAPACITY: usize = 2;
+
+impl HotStream {
+    /// Produce `frames` frames of `frame_samples` loud samples, one per
+    /// `cadence`. With `end_when_done` the stream then ends; otherwise
+    /// it stays open (silent) until stopped. Returns the stream and
+    /// the number of frames produced so far.
+    fn new(
+        frames: usize,
+        frame_samples: usize,
+        cadence: Duration,
+        end_when_done: bool,
+    ) -> (Self, Arc<AtomicU32>) {
+        let (tx, rx) = tokio::sync::mpsc::channel(HOT_STREAM_CAPACITY);
+        let produced = Arc::new(AtomicU32::new(0));
+        let counter = Arc::clone(&produced);
+        let producer = tokio::spawn(async move {
+            for _ in 0..frames {
+                tokio::time::sleep(cadence).await;
+                // A full queue drops the frame, exactly like the device.
+                let _ = tx.try_send(sine(frame_samples, 0.5));
+                counter.fetch_add(1, Ordering::SeqCst);
+            }
+            if !end_when_done {
+                std::future::pending::<()>().await;
+            }
+        });
+        (Self { rx, producer }, produced)
+    }
+}
+
+#[async_trait]
+impl AudioStream for HotStream {
+    fn format(&self) -> AudioFormat {
+        AudioFormat::WHISPER
+    }
+    async fn next_frame(&mut self) -> Option<AudioFrame> {
+        let samples = self.rx.recv().await?;
+        Some(AudioFrame {
+            samples,
+            format: AudioFormat::WHISPER,
+            captured_at_ns: 0,
+        })
+    }
+    async fn stop(&mut self) -> Result<(), DomainError> {
+        self.producer.abort();
+        self.rx.close();
+        Ok(())
+    }
+}
+
+/// Transcriber that takes `delay` (real time) per call.
+struct SlowTranscriber {
+    delay: Duration,
+    inner: Arc<FakeTranscriber>,
+}
+
+#[async_trait]
+impl Transcriber for SlowTranscriber {
+    async fn transcribe(
+        &self,
+        samples: &[Sample],
+        options: &TranscribeOptions,
+    ) -> Result<Transcript, DomainError> {
+        tokio::time::sleep(self.delay).await;
+        self.inner.transcribe(samples, options).await
+    }
+}
+
+/// 50 ms frames, one every 50 ms (real time).
+const HOT_FRAME_MS: u64 = 50;
+const HOT_FRAME_SAMPLES: usize = 800;
+const HOT_FRAMES: usize = 16;
+
+fn hot_options() -> StreamingOptions {
+    StreamingOptions {
+        chunk_ms: 100,
+        silence_rms_threshold: 0.005,
+        ..StreamingOptions::default()
+    }
+}
+
+/// Start a pipeline over a fresh [`HotStream`] with a transcriber that
+/// takes `asr_delay` per 100 ms chunk.
+async fn start_hot(
+    asr_delay: Duration,
+    end_when_done: bool,
+) -> (StreamingHandle, Arc<AtomicU32>, Arc<FakeTranscriber>) {
+    let (stream, produced) = HotStream::new(
+        HOT_FRAMES,
+        HOT_FRAME_SAMPLES,
+        Duration::from_millis(HOT_FRAME_MS),
+        end_when_done,
+    );
+    let inner = FakeTranscriber::new();
+    let transcriber = Arc::new(SlowTranscriber {
+        delay: asr_delay,
+        inner: Arc::clone(&inner),
+    });
+    let capture = FakeCapture::new(AudioFormat::WHISPER, vec![]);
+    let pipeline = StreamingPipeline::new(capture, Arc::new(PassThroughResampler), transcriber);
+    let handle = pipeline
+        .start_with_stream(Box::new(stream), hot_options())
+        .await
+        .unwrap();
+    (handle, produced, inner)
+}
+
+const FED_MS: u32 = (HOT_FRAMES as u64 * HOT_FRAME_MS) as u32;
+
+#[tokio::test]
+async fn transcriber_slower_than_real_time_loses_no_captured_audio() {
+    // 200 ms of ASR per 100 ms chunk: twice slower than real time.
+    let (mut handle, produced, inner) = start_hot(Duration::from_millis(200), true).await;
+    let events = drain_until_stopped(&mut handle).await;
+    assert_eq!(produced.load(Ordering::SeqCst), HOT_FRAMES as u32);
+    assert_eq!(stopped_totals(&events).1, FED_MS, "events: {events:#?}");
+    assert_eq!(inner.call_count(), FED_MS / 100);
+}
+
+#[tokio::test]
+async fn stop_processes_the_audio_still_queued() {
+    let (mut handle, produced, inner) = start_hot(Duration::from_millis(200), false).await;
+    while produced.load(Ordering::SeqCst) < HOT_FRAMES as u32 {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    // Let the capture reader pick up the last frame, then stop while
+    // the slow transcriber still has most of the session queued.
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    assert!(inner.call_count() < FED_MS / 100, "nothing was queued");
+    handle.stop().await.unwrap();
+    let events = drain_until_stopped(&mut handle).await;
+    assert_eq!(stopped_totals(&events).1, FED_MS, "events: {events:#?}");
+    assert_eq!(inner.call_count(), FED_MS / 100);
+}
+
+/// `(lag_ms, backlog_ms)` of every `Progress` event.
+fn progress(events: &[TranscriptEvent]) -> Vec<(u32, u32)> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            TranscriptEvent::Progress {
+                lag_ms, backlog_ms, ..
+            } => Some((*lag_ms, *backlog_ms)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn progress_reports_growing_lag_when_the_transcriber_is_slow() {
+    let (mut handle, _, _) = start_hot(Duration::from_millis(200), true).await;
+    let events = drain_with_progress(&mut handle).await;
+    let progress = progress(&events);
+    // One report per emitted chunk.
+    assert_eq!(progress.len(), (FED_MS / 100) as usize, "{progress:?}");
+    let max_lag = progress.iter().map(|p| p.0).max().unwrap();
+    // Chunk k lands at ~100 + 200·k ms holding 100·k ms of audio, so
+    // the lag peaks near 500 ms when capture ends.
+    assert!(max_lag >= 300, "lag never grew: {progress:?}");
+    assert!(
+        progress.iter().any(|p| p.1 > 0),
+        "audio queued behind the transcriber must show as backlog: {progress:?}"
+    );
+}
+
+#[tokio::test]
+async fn progress_reports_no_lag_when_the_transcriber_keeps_up() {
+    let (mut handle, _, _) = start_hot(Duration::ZERO, true).await;
+    let events = drain_with_progress(&mut handle).await;
+    let progress = progress(&events);
+    assert_eq!(progress.len(), (FED_MS / 100) as usize, "{progress:?}");
+    // Each chunk is emitted as soon as its second frame arrives; only
+    // timer jitter adds lag.
+    assert!(
+        progress.iter().all(|p| p.0 <= 250),
+        "lag without a slow transcriber: {progress:?}"
+    );
+}
+
+#[tokio::test]
+async fn pause_applies_to_frames_by_capture_time_not_dequeue_time() {
+    // The stream races ahead of a slow transcriber, so the pipeline
+    // dequeues the paused frames after the flag is already cleared.
+    let loud = || Step::Frame(sine(SEC, 0.5));
+    let steps = vec![
+        loud(),
+        loud(),
+        Step::Pause,
+        Step::Frame(vec![0.25; SEC]), // captured while paused
+        Step::Frame(vec![0.25; SEC]), // captured while paused
+        Step::Resume,
+        loud(),
+        loud(),
+    ];
+    let paused_slot = Arc::new(std::sync::OnceLock::new());
+    let stream = SteppedStream {
+        steps: steps.into_iter(),
+        paused: Arc::clone(&paused_slot),
+    };
+    let inner = FakeTranscriber::new();
+    let transcriber = Arc::new(SlowTranscriber {
+        delay: Duration::from_millis(100),
+        inner: Arc::clone(&inner),
+    });
+    let capture = FakeCapture::new(AudioFormat::WHISPER, vec![]);
+    let (sink, log) = RecordingSink::new(false);
+    let pipeline = StreamingPipeline::new(capture, Arc::new(PassThroughResampler), transcriber)
+        .with_audio_sink(Box::new(sink));
+    let mut handle = pipeline
+        .start_with_stream(
+            Box::new(stream),
+            StreamingOptions {
+                chunk_ms: 1_000,
+                silence_rms_threshold: 0.005,
+                auto_gain: false,
+                ..StreamingOptions::default()
+            },
+        )
+        .await
+        .unwrap();
+    paused_slot.set(handle.paused_flag()).unwrap();
+
+    let events = drain_until_stopped(&mut handle).await;
+    let lifecycle: Vec<&str> = events
+        .iter()
+        .filter_map(|e| match e {
+            TranscriptEvent::Chunk { .. } => Some("chunk"),
+            TranscriptEvent::Paused { .. } => Some("paused"),
+            TranscriptEvent::Resumed { .. } => Some("resumed"),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        lifecycle,
+        vec!["chunk", "chunk", "paused", "resumed", "chunk", "chunk"]
+    );
+    assert_eq!(stopped_totals(&events).1, 4_000);
+    assert_eq!(inner.call_count(), 4);
+    let log = log.lock().unwrap();
+    assert!(
+        log.samples.iter().all(|&s| s != 0.25),
+        "paused audio was saved"
+    );
+}
+
+#[tokio::test]
+async fn stop_without_reading_events_does_not_deadlock_on_a_large_backlog() {
+    // 200 chunks queued: ~400 events (chunk + progress) emitted while
+    // the caller awaits `stop()` and reads nothing, as the shell does.
+    let frames = (0..200).map(|_| sine(1_600, 0.5)).collect();
+    let capture = FakeCapture::new(AudioFormat::WHISPER, frames);
+    let pipeline = StreamingPipeline::new(
+        capture,
+        Arc::new(PassThroughResampler),
+        FakeTranscriber::new(),
+    );
+    let mut handle = pipeline.start(hot_options()).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    tokio::time::timeout(Duration::from_secs(10), handle.stop())
+        .await
+        .expect("stop() deadlocked on a full event channel")
+        .unwrap();
+    let events = drain_until_stopped(&mut handle).await;
+    // Stop discards whatever the stream had not yet handed over, so the
+    // total depends on scheduling; every frame that was read is processed
+    // (asserted exactly in `stop_processes_the_audio_still_queued`). This
+    // test only pins the absence of a deadlock and whole-frame accounting.
+    let total_ms = stopped_totals(&events).1;
+    assert!(total_ms > 0 && total_ms <= 20_000, "total {total_ms} ms");
+    assert_eq!(total_ms % 100, 0, "whole 100 ms frames, got {total_ms} ms");
 }

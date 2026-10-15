@@ -387,12 +387,10 @@ pub async fn stop_streaming(
     // holding the handle lock — unpause first so the loop spins,
     // releases the lock, and sees the stop signal.
     entry.paused.store(false, Ordering::Release);
-    {
-        let mut guard = entry.handle.lock().await;
-        guard.stop().await.map_err(|e| {
-            IpcError::new(ErrorCode::Audio, format!("failed to stop pipeline: {e}"))
-        })?;
-    }
+    // Only signal while holding the lock: the pipeline still transcribes
+    // the audio queued before stop, and the drain task must keep
+    // reading (and persisting) those events. It ends at `Stopped`.
+    entry.handle.lock().await.request_stop();
     let _ = entry.join.await;
     Ok(true)
 }

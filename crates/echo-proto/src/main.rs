@@ -167,6 +167,10 @@ enum Command {
         /// is sneaking past, lower it for very quiet speakers.
         #[arg(long, default_value_t = 0.02)]
         silence_threshold: f32,
+        /// Disable the automatic gain stage that raises quiet capture
+        /// to a normal speech level (e.g. to reproduce raw levels).
+        #[arg(long, default_value_t = false)]
+        no_auto_gain: bool,
         /// Attach a speaker diarizer to the pipeline. Each chunk is
         /// also fed through ERes2Net + online clustering and the
         /// resulting speaker is printed alongside the transcript.
@@ -499,6 +503,7 @@ async fn main() -> Result<()> {
             max_chunk_ms,
             fixed_chunks,
             silence_threshold,
+            no_auto_gain,
             diarize,
             embed_model,
             vad_model,
@@ -515,6 +520,7 @@ async fn main() -> Result<()> {
                     min_chunk_ms,
                     max_chunk_ms,
                     fixed_chunks,
+                    auto_gain: !no_auto_gain,
                 },
                 silence_threshold,
                 diarize,
@@ -796,6 +802,8 @@ struct ChunkArgs {
     min_chunk_ms: u32,
     max_chunk_ms: u32,
     fixed_chunks: bool,
+    /// Run the automatic gain stage (`--no-auto-gain` clears it).
+    auto_gain: bool,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -857,6 +865,10 @@ async fn run_stream(
         speech_aligned_chunks: !chunks.fixed_chunks,
         min_chunk_ms: chunks.min_chunk_ms,
         max_chunk_ms: chunks.max_chunk_ms,
+        auto_gain: chunks.auto_gain,
+        // Provisional text is for the live view; the CLI prints final
+        // chunks only, so drafts would just cost ASR time.
+        draft_interval_ms: 0,
     };
 
     let store: Arc<dyn MeetingStore> = Arc::new(open_cli_store().await?);
@@ -1060,6 +1072,11 @@ async fn run_stream(
                     retired.len()
                 );
             }
+            // Lag telemetry for the app's UI; the CLI already prints
+            // every chunk as it lands.
+            Some(TranscriptEvent::Progress { .. }) => {}
+            // The CLI disables drafts in its options; it prints final chunks only.
+            Some(TranscriptEvent::Draft { .. }) => {}
             None => break,
         }
     }

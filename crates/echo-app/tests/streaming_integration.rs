@@ -266,6 +266,8 @@ async fn speech_aligned_cuts_map_back_to_48khz_stereo_frames() {
         .start(StreamingOptions {
             min_chunk_ms: 3_000,
             max_chunk_ms: 15_000,
+            // Drafts add transcriber calls; this test counts final chunks.
+            draft_interval_ms: 0,
             ..StreamingOptions::default()
         })
         .await
