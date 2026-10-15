@@ -140,8 +140,13 @@ split-debuginfo = "unpacked"
 
 # Third-party crates: strip debug info entirely — you never step into
 # tract-onnx, objc2, tauri internals, etc. This alone saves ~2 GB.
+# Optimize them: unoptimized tract (VAD, segmenter, speaker embedder)
+# made `pnpm tauri dev` fall 15-30 s behind a live conversation that
+# the same code handles in real time when optimized. Workspace crates
+# stay at opt-level 0, so edit-compile cycles keep their speed; the
+# dependencies compile optimized once and are cached.
 [profile.dev.package."*"]
-opt-level = 0
+opt-level = 3
 debug = false
 
 [profile.release]
