@@ -5,6 +5,7 @@ import {
   indexSpeakers,
   paletteFor,
   shortTag,
+  speakersWithSegments,
   SPEAKER_PALETTE,
 } from "./speakers";
 import type { Speaker } from "../types/speaker";
@@ -71,5 +72,20 @@ describe("indexSpeakers", () => {
     expect(map.get("a")).toBe(a);
     expect(map.get("b")).toBe(b);
     expect(map.get("missing")).toBeUndefined();
+  });
+});
+
+describe("speakersWithSegments", () => {
+  const seg = (speakerId: string | null) => ({ speakerId });
+
+  it("drops speakers that own no segment, keeping order and slots", () => {
+    const s1 = speaker("a", 0, null);
+    const s2 = speaker("b", 1, null);
+    const s3 = speaker("c", 2, "Ana");
+    expect(speakersWithSegments([s1, s2, s3], [seg("a"), seg("c"), seg(null)])).toEqual([s1, s3]);
+  });
+
+  it("returns nothing when no segment has a speaker", () => {
+    expect(speakersWithSegments([speaker("a", 0, null)], [seg(null)])).toEqual([]);
   });
 });

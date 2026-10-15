@@ -82,3 +82,20 @@ export function indexSpeakers(speakers: readonly Speaker[]): Map<string, Speaker
   for (const s of speakers) m.set(s.id, s);
   return m;
 }
+
+/**
+ * Speakers that own at least one segment, in their original order.
+ * The diarizer records every speaker it heard in a chunk, but a speaker
+ * whose audio never won a segment (or was merged into another) has no
+ * talk time and would show as an empty entry.
+ */
+export function speakersWithSegments<S extends { id: string }>(
+  speakers: readonly S[],
+  segments: readonly { speakerId?: string | null }[],
+): S[] {
+  const owners = new Set<string>();
+  for (const seg of segments) {
+    if (seg.speakerId) owners.add(seg.speakerId);
+  }
+  return speakers.filter((sp) => owners.has(sp.id));
+}
