@@ -1333,3 +1333,181 @@ async fn an_unbounded_refine_timeout_does_not_overflow_and_still_stops() {
         Some(TranscriptEvent::Stopped { .. })
     ));
 }
+
+/// Records what the pipeline writes to its session audio sink.
+#[derive(Default)]
+struct SinkLog {
+    samples: Vec<f32>,
+    formats: Vec<AudioFormat>,
+    accepts: u32,
+    finishes: u32,
+}
+
+/// [`crate::FrameSink`] that appends to a shared [`SinkLog`]; with
+/// `fail` set, every write errors.
+struct RecordingSink {
+    log: Arc<Mutex<SinkLog>>,
+    fail: bool,
+}
+
+impl RecordingSink {
+    fn new(fail: bool) -> (Self, Arc<Mutex<SinkLog>>) {
+        let log = Arc::new(Mutex::new(SinkLog::default()));
+        (
+            Self {
+                log: Arc::clone(&log),
+                fail,
+            },
+            log,
+        )
+    }
+}
+
+impl crate::FrameSink for RecordingSink {
+    fn accept(&mut self, frame: &AudioFrame) -> Result<(), DomainError> {
+        let mut log = self.log.lock().unwrap();
+        log.accepts += 1;
+        if self.fail {
+            return Err(DomainError::AudioDeviceUnavailable("disk full".into()));
+        }
+        log.samples.extend_from_slice(&frame.samples);
+        log.formats.push(frame.format);
+        Ok(())
+    }
+    fn finish(&mut self) -> Result<(), DomainError> {
+        self.log.lock().unwrap().finishes += 1;
+        Ok(())
+    }
+}
+
+/// Stereo → mono by keeping the left channel; enough to tell resampled
+/// audio from device audio.
+struct LeftChannelResampler;
+impl Resampler for LeftChannelResampler {
+    fn to_whisper(
+        &self,
+        samples: &[Sample],
+        input: AudioFormat,
+    ) -> Result<Vec<Sample>, DomainError> {
+        Ok(samples
+            .iter()
+            .step_by(usize::from(input.channels))
+            .copied()
+            .collect())
+    }
+}
+
+#[tokio::test]
+async fn audio_sink_receives_every_emitted_chunk_as_16k_mono() {
+    let stereo = AudioFormat {
+        sample_rate_hz: 16_000,
+        channels: 2,
+    };
+    // Loud, silent (skipped by the RMS gate), loud: 1 s each, stereo.
+    let frames = vec![sine(32_000, 0.5), vec![0.0; 32_000], sine(32_000, 0.5)];
+    let capture = FakeCapture::new(stereo, frames);
+    let transcriber = FakeTranscriber::new();
+    let (sink, log) = RecordingSink::new(false);
+    let pipeline =
+        StreamingPipeline::new(capture, Arc::new(LeftChannelResampler), transcriber.clone())
+            .with_audio_sink(Box::new(sink));
+    let mut handle = pipeline
+        .start(StreamingOptions {
+            chunk_ms: 1_000,
+            silence_rms_threshold: 0.01,
+            ..StreamingOptions::default()
+        })
+        .await
+        .unwrap();
+
+    let events = drain_until_stopped(&mut handle).await;
+    assert!(matches!(
+        events.last(),
+        Some(TranscriptEvent::Stopped { .. })
+    ));
+
+    let log = log.lock().unwrap();
+    // Skipped silence is saved too, so file time equals session time.
+    assert_eq!(log.samples.len(), 3 * 16_000);
+    assert!(log.samples[16_000..32_000].iter().all(|&s| s == 0.0));
+    assert!(log.formats.iter().all(|&f| f == AudioFormat::WHISPER));
+    assert_eq!(log.finishes, 1);
+    assert_eq!(transcriber.call_count(), 2);
+}
+
+#[tokio::test]
+async fn failing_audio_sink_never_stops_transcription() {
+    let frames = vec![sine(16_000, 0.5), sine(16_000, 0.5), sine(16_000, 0.5)];
+    let capture = FakeCapture::new(AudioFormat::WHISPER, frames);
+    let transcriber = FakeTranscriber::new();
+    let (sink, log) = RecordingSink::new(true);
+    let pipeline =
+        StreamingPipeline::new(capture, Arc::new(PassThroughResampler), transcriber.clone())
+            .with_audio_sink(Box::new(sink));
+    let mut handle = pipeline
+        .start(StreamingOptions {
+            chunk_ms: 1_000,
+            silence_rms_threshold: 0.005,
+            ..StreamingOptions::default()
+        })
+        .await
+        .unwrap();
+
+    let events = drain_until_stopped(&mut handle).await;
+    assert!(matches!(
+        events.last(),
+        Some(TranscriptEvent::Stopped {
+            total_segments: 3,
+            ..
+        })
+    ));
+    assert_eq!(transcriber.call_count(), 3);
+    let log = log.lock().unwrap();
+    assert_eq!(
+        log.accepts, 1,
+        "the sink is dropped after its first failure"
+    );
+}
+
+#[tokio::test]
+async fn audio_sink_skips_paused_audio() {
+    let loud = || Step::Frame(sine(SEC, 0.5));
+    let quiet = || Step::Frame(vec![0.25; SEC]);
+    let steps = vec![
+        loud(),
+        Step::Pause,
+        quiet(), // discarded while paused
+        Step::Resume,
+        loud(),
+    ];
+    let paused_slot = Arc::new(std::sync::OnceLock::new());
+    let stream = SteppedStream {
+        steps: steps.into_iter(),
+        paused: Arc::clone(&paused_slot),
+    };
+    let capture = FakeCapture::new(AudioFormat::WHISPER, vec![]);
+    let (sink, log) = RecordingSink::new(false);
+    let pipeline = StreamingPipeline::new(
+        capture,
+        Arc::new(PassThroughResampler),
+        FakeTranscriber::new(),
+    )
+    .with_audio_sink(Box::new(sink));
+    let mut handle = pipeline
+        .start_with_stream(
+            Box::new(stream),
+            StreamingOptions {
+                chunk_ms: 1_000,
+                silence_rms_threshold: 0.005,
+                ..StreamingOptions::default()
+            },
+        )
+        .await
+        .unwrap();
+    paused_slot.set(handle.paused_flag()).unwrap();
+
+    drain_until_stopped(&mut handle).await;
+    let log = log.lock().unwrap();
+    assert_eq!(log.samples.len(), 2 * SEC);
+    assert!(log.samples.iter().all(|&s| s != 0.25));
+}
