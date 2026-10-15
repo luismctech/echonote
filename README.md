@@ -204,6 +204,7 @@ Models are downloaded on-demand from the built-in model manager (**Settings → 
 - **Zero network access** during meetings — all AI runs locally.
 - **No telemetry.** No usage data, analytics, or crash reports.
 - **Local storage only.** Meetings live in a SQLite database on your machine.
+- **Logs stay local and hold no transcript text.** The app writes `echonote.log` (rotated at 10 MB, one previous copy) to the OS app log directory, e.g. `~/Library/Logs/app.echonote.desktop/` on macOS.
 - **No audio is kept by default.** Turn on **Save audio** before a session to keep its audio as a 16 kHz mono WAV (about 115 MB per hour) in a `recordings/` folder next to the database. Deleting the meeting deletes its audio.
 - **Open source.** Audit every line of code in this repository.
 
