@@ -358,6 +358,9 @@ impl MeetingRecorder {
             TranscriptEvent::Paused { .. } | TranscriptEvent::Resumed { .. } => Ok(None),
             // Processing lag is live telemetry for the UI, not meeting data.
             TranscriptEvent::Progress { .. } => Ok(None),
+            // Provisional text: the final `Chunk` for the same speech
+            // carries what is persisted, so drafts never are.
+            TranscriptEvent::Draft { .. } => Ok(None),
         }
     }
 

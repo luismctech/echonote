@@ -791,6 +791,8 @@ async fn diarize_file(
         speech_aligned_chunks: args.vad.is_some(),
         min_chunk_ms: args.min_chunk_ms,
         max_chunk_ms: args.max_chunk_ms,
+        // Drafts never change final chunks; skip their ASR cost.
+        draft_interval_ms: 0,
         ..StreamingOptions::default()
     };
     let mut handle = pipeline.start(options).await?;

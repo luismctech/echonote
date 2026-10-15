@@ -866,6 +866,9 @@ async fn run_stream(
         min_chunk_ms: chunks.min_chunk_ms,
         max_chunk_ms: chunks.max_chunk_ms,
         auto_gain: chunks.auto_gain,
+        // Provisional text is for the live view; the CLI prints final
+        // chunks only, so drafts would just cost ASR time.
+        draft_interval_ms: 0,
     };
 
     let store: Arc<dyn MeetingStore> = Arc::new(open_cli_store().await?);
@@ -1072,6 +1075,8 @@ async fn run_stream(
             // Lag telemetry for the app's UI; the CLI already prints
             // every chunk as it lands.
             Some(TranscriptEvent::Progress { .. }) => {}
+            // The CLI disables drafts in its options; it prints final chunks only.
+            Some(TranscriptEvent::Draft { .. }) => {}
             None => break,
         }
     }

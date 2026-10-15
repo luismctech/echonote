@@ -136,6 +136,21 @@ export type TranscriptEvent =
     }
   | {
       /**
+       * Provisional text of the speech chunk still open (speech-aligned
+       * mode). Each draft replaces the previous one; the `chunk` with
+       * the same `chunkIndex` replaces it for good. Never persisted.
+       */
+      type: "draft";
+      sessionId: StreamingSessionId;
+      /** Index the final chunk of this speech will arrive with. */
+      chunkIndex: number;
+      /** Session-time start of that chunk (ms). */
+      offsetMs: number;
+      /** Text transcribed so far. */
+      text: string;
+    }
+  | {
+      /**
        * Offline diarization refinement applied at end-of-session.
        * Carries `(absorbed, surviving)` SpeakerId pairs; the recorder
        * has already rewritten persisted segments and dropped absorbed

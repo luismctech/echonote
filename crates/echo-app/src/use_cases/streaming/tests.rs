@@ -804,12 +804,16 @@ impl Vad for ScriptedVad {
 const V: (VoiceState, f32) = (VoiceState::Voiced, 0.9);
 const S: (VoiceState, f32) = (VoiceState::Silence, 0.1);
 
+/// Speech-aligned options with drafts disabled, so the chunking tests
+/// pin final chunks and exact transcriber call counts; the draft tests
+/// opt in through [`draft_options`].
 fn aligned_options(min_chunk_ms: u32, max_chunk_ms: u32) -> StreamingOptions {
     StreamingOptions {
         chunk_ms: 1_000,
         silence_rms_threshold: 0.005,
         min_chunk_ms,
         max_chunk_ms,
+        draft_interval_ms: 0,
         ..StreamingOptions::default()
     }
 }
@@ -949,6 +953,142 @@ async fn speech_aligned_bounds_are_validated_at_start() {
         let result = pipeline.start(aligned_options(min, max)).await;
         assert!(result.is_err(), "min={min} max={max} must be rejected");
     }
+}
+
+// ---------------------------------------------------------------------------
+// Provisional (draft) text for the open speech chunk
+// ---------------------------------------------------------------------------
+
+/// Speech-aligned 4 s / 20 s bounds with a draft every 4 s.
+fn draft_options() -> StreamingOptions {
+    StreamingOptions {
+        draft_interval_ms: 4_000,
+        ..aligned_options(4_000, 20_000)
+    }
+}
+
+/// Two seconds of silence, 12 s of speech, two seconds of silence.
+fn draft_script() -> Vec<(VoiceState, f32)> {
+    let mut script = vec![S, S];
+    script.extend(std::iter::repeat_n(V, 12));
+    script.extend([S, S]);
+    script
+}
+
+/// `(chunk_index, offset_ms, text)` of every `Draft` event.
+fn drafts(events: &[TranscriptEvent]) -> Vec<(u32, u32, String)> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            TranscriptEvent::Draft {
+                chunk_index,
+                offset_ms,
+                text,
+                ..
+            } => Some((*chunk_index, *offset_ms, text.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Events with the drafts removed.
+fn without_drafts(events: &[TranscriptEvent]) -> Vec<&TranscriptEvent> {
+    events
+        .iter()
+        .filter(|e| !matches!(e, TranscriptEvent::Draft { .. }))
+        .collect()
+}
+
+/// Like [`run_aligned`], also saving the session audio; returns the
+/// number of samples the sink received.
+async fn run_aligned_saving(
+    script: Vec<(VoiceState, f32)>,
+    options: StreamingOptions,
+) -> (Vec<TranscriptEvent>, Arc<FakeTranscriber>, usize) {
+    let frames = script.iter().map(|_| sine(SEC, 0.5)).collect();
+    let capture = FakeCapture::new(AudioFormat::WHISPER, frames);
+    let transcriber = FakeTranscriber::new();
+    let (vad, _) = ScriptedVad::new(script);
+    let (sink, log) = RecordingSink::new(false);
+    let pipeline =
+        StreamingPipeline::new(capture, Arc::new(PassThroughResampler), transcriber.clone())
+            .with_vad(Box::new(vad))
+            .with_audio_sink(Box::new(sink));
+    let mut handle = pipeline.start(options).await.unwrap();
+    let events = drain_until_stopped(&mut handle).await;
+    let saved = log.lock().unwrap().samples.len();
+    (events, transcriber, saved)
+}
+
+#[tokio::test]
+async fn open_speech_chunk_emits_drafts_before_its_final_chunk() {
+    let (events, _) = run_aligned(draft_script(), draft_options()).await;
+
+    // The leading second of silence is cut first (one second of
+    // pre-roll kept), so the speech chunk is chunk 1 at 1 s; it is
+    // drafted after 4, 8 and 12 s of analysed audio.
+    assert_eq!(
+        spans(&events),
+        vec![
+            Span::Skip(0, 1_000),
+            Span::Chunk(1_000, 13_000),
+            Span::Skip(14_000, 2_000),
+        ]
+    );
+    let drafts = drafts(&events);
+    assert_eq!(
+        drafts.iter().map(|(i, o, _)| (*i, *o)).collect::<Vec<_>>(),
+        vec![(1, 1_000), (1, 1_000), (1, 1_000)],
+        "events: {events:#?}"
+    );
+    assert!(drafts.iter().all(|(_, _, text)| !text.is_empty()));
+    let last_draft = events
+        .iter()
+        .rposition(|e| matches!(e, TranscriptEvent::Draft { .. }))
+        .unwrap();
+    let chunk = events
+        .iter()
+        .position(|e| matches!(e, TranscriptEvent::Chunk { .. }))
+        .unwrap();
+    assert!(last_draft < chunk, "drafts precede their final chunk");
+}
+
+#[tokio::test]
+async fn drafts_never_change_final_chunks_audio_or_totals() {
+    let disabled = StreamingOptions {
+        draft_interval_ms: 0,
+        ..draft_options()
+    };
+    let (with, with_asr, with_saved) = run_aligned_saving(draft_script(), draft_options()).await;
+    let (without, without_asr, without_saved) = run_aligned_saving(draft_script(), disabled).await;
+
+    assert_eq!(drafts(&without), vec![], "interval 0 disables drafts");
+    let draft_count = drafts(&with).len() as u32;
+    assert_eq!(draft_count, 3);
+    assert_eq!(spans(&with), spans(&without));
+    assert_eq!(stopped_totals(&with), stopped_totals(&without));
+    assert_eq!(
+        without_drafts(&with).len(),
+        without.len(),
+        "drafts add no other event"
+    );
+    // Drafts are transcribed but never saved as session audio.
+    assert_eq!(
+        with_asr.call_count(),
+        without_asr.call_count() + draft_count
+    );
+    assert_eq!(with_saved, without_saved);
+    assert_eq!(with_saved, draft_script().len() * SEC);
+}
+
+#[tokio::test]
+async fn fixed_chunks_never_draft() {
+    let options = StreamingOptions {
+        speech_aligned_chunks: false,
+        ..draft_options()
+    };
+    let (events, _) = run_aligned(vec![V; 10], options).await;
+    assert_eq!(drafts(&events), vec![]);
 }
 
 /// Item of a [`SteppedStream`]: a frame, or a pause-flag flip applied

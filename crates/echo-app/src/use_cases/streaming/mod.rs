@@ -33,6 +33,14 @@
 //! - **Fixed**: a chunk every [`StreamingOptions::chunk_ms`], gated by
 //!   the VAD per chunk when one is attached, by the RMS floor otherwise.
 //!
+//! Draft text (speech-aligned mode, [`StreamingOptions::draft_interval_ms`]):
+//! a speech chunk only closes at a pause, up to `max_chunk_ms` after
+//! its first word, so while it is open the pipeline transcribes what it
+//! holds so far every `draft_interval_ms` of new audio and emits it as
+//! [`TranscriptEvent::Draft`]. Drafts skip the diarizer, the session
+//! clock and the audio sink, are shed while transcription runs behind
+//! capture, and never change how final chunks are cut or transcribed.
+//!
 //! Chunk offsets are derived from the device frames actually emitted,
 //! so segment timestamps stay exact with variable-length chunks.
 //! Pausing flushes the buffered audio first; paused audio is not part
@@ -60,7 +68,7 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tracing::{debug, error, info, warn};
 
-use chunker::{ChunkBounds, Cut, SpeechTimeline, TimedFrame};
+use chunker::{draft_due, ChunkBounds, Cut, SpeechTimeline, TimedFrame};
 use echo_domain::{
     AudioCapture, AudioFormat, AudioFrame, AudioStream, CaptureSpec, ChunkContext, Diarizer,
     DomainError, Punctuator, RefineOutcome, Resampler, Sample, SpeakerId, SpeakerMerge, SpeakerRef,
@@ -89,6 +97,16 @@ const LAG_WARN_MS: u32 = 30_000;
 
 /// Minimum spacing between two lag warnings.
 const LAG_WARN_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Capture backlog above which a due draft is skipped: the queued
+/// audio must reach a final chunk first.
+const DRAFT_MAX_BACKLOG_MS: u32 = 2_000;
+
+/// How far the buffered audio may trail capture before a due draft is
+/// skipped. Measured to the end of the buffer, not of the emitted
+/// audio (the `Progress` lag), because the open chunk itself is
+/// buffered and would count as lag.
+const DRAFT_MAX_BEHIND_MS: u32 = 3_000;
 
 /// Errors specific to the streaming pipeline.
 #[derive(Debug, thiserror::Error)]
@@ -807,6 +825,11 @@ struct SpeechChunker {
     /// Buffer samples already pushed to the VAD.
     analyzed: usize,
     timeline: SpeechTimeline,
+    /// New audio between two drafts of the open chunk; 0 disables them.
+    draft_interval: usize,
+    /// Buffer position the open chunk was last drafted up to; reset by
+    /// every cut, since a cut closes the drafted region.
+    last_draft_end: Option<usize>,
 }
 
 impl SpeechChunker {
@@ -824,6 +847,8 @@ impl SpeechChunker {
             block: samples(ANALYSIS_BLOCK_MS).max(1),
             analyzed: 0,
             timeline: SpeechTimeline::default(),
+            draft_interval: samples(options.draft_interval_ms),
+            last_draft_end: None,
         }
     }
 
@@ -834,6 +859,32 @@ impl SpeechChunker {
         while let Some(cut) = self.timeline.next_cut(&self.bounds) {
             self.emit(cut, buffer, emitter).await;
         }
+        self.draft_open_region(buffer, emitter).await;
+    }
+
+    /// Emit a draft of the speech chunk still open after every ready
+    /// cut, when one is due (see [`draft_due`]) and transcription keeps
+    /// up with capture. Finals always win: a due draft is skipped, not
+    /// postponed, when the pipeline runs behind.
+    async fn draft_open_region(&mut self, buffer: &[Sample], emitter: &ChunkEmitter) {
+        let Some(region) = self.timeline.open_region(&self.bounds) else {
+            return;
+        };
+        if !draft_due(&region, self.last_draft_end, self.draft_interval) {
+            return;
+        }
+        self.last_draft_end = Some(region.end);
+        let end = region.end.min(buffer.len());
+        if region.start >= end {
+            return;
+        }
+        if let Some((backlog_ms, behind_ms)) = emitter.draft_shed(buffer.len()) {
+            debug!(session_id = %emitter.session_id, backlog_ms, behind_ms, "skipping draft: transcription is behind capture");
+            return;
+        }
+        emitter
+            .draft(&buffer[region.start..end], region.start)
+            .await;
     }
 
     async fn flush(&mut self, buffer: &mut Vec<Sample>, emitter: &mut ChunkEmitter) {
@@ -846,6 +897,7 @@ impl SpeechChunker {
         buffer.clear();
         self.timeline.clear();
         self.analyzed = 0;
+        self.last_draft_end = None;
     }
 
     /// Push the unanalysed tail of `buffer` through the VAD and record
@@ -913,6 +965,7 @@ impl SpeechChunker {
         buffer.drain(..n);
         self.analyzed = self.analyzed.saturating_sub(n);
         self.timeline.consume(n);
+        self.last_draft_end = None;
     }
 }
 
@@ -990,13 +1043,90 @@ impl ChunkEmitter {
         self.chunk_index = self.chunk_index.saturating_add(1);
     }
 
+    /// Active (non-paused) capture time so far, in milliseconds.
+    fn active_ms(&self) -> u64 {
+        self.meter.active_us.load(Ordering::Relaxed) / 1_000
+    }
+
+    /// Captured audio queued but not yet buffered, in milliseconds.
+    fn backlog_ms(&self) -> u32 {
+        let backlog = self.meter.backlog_samples.load(Ordering::Relaxed);
+        samples_to_ms(usize::try_from(backlog).unwrap_or(usize::MAX), self.format)
+    }
+
+    /// `Some((backlog_ms, behind_ms))` when a draft must be skipped
+    /// because transcription runs behind capture: more than
+    /// [`DRAFT_MAX_BACKLOG_MS`] queued, or the end of the `buffered`
+    /// samples more than [`DRAFT_MAX_BEHIND_MS`] behind capture time.
+    fn draft_shed(&self, buffered: usize) -> Option<(u32, u32)> {
+        let backlog_ms = self.backlog_ms();
+        let buffered_end =
+            u64::from(self.offset_ms()) + u64::from(samples_to_ms(buffered, self.format));
+        let behind_ms =
+            u32::try_from(self.active_ms().saturating_sub(buffered_end)).unwrap_or(u32::MAX);
+        (backlog_ms > DRAFT_MAX_BACKLOG_MS || behind_ms > DRAFT_MAX_BEHIND_MS)
+            .then_some((backlog_ms, behind_ms))
+    }
+
+    /// Transcribe and punctuate `raw`, the open speech chunk starting
+    /// `start` samples into the buffer, and emit it as a draft. Only the
+    /// transcriber and the punctuator run: no diarizer, attribution,
+    /// session clock, chunk index or audio sink. A failure or empty
+    /// text emits nothing; the final chunk follows anyway.
+    async fn draft(&self, raw: &[Sample], start: usize) {
+        let session_id = self.session_id;
+        let resampled = match self.resampler.to_whisper(raw, self.format) {
+            Ok(s) if !s.is_empty() => s,
+            Ok(_) => return,
+            Err(e) => {
+                debug!(%session_id, error = %e, "resampler failed; no draft");
+                return;
+            }
+        };
+        let transcript = match self
+            .transcriber
+            .transcribe(&resampled, &self.transcribe_options)
+            .await
+        {
+            Ok(t) => t,
+            Err(e) => {
+                debug!(%session_id, error = %e, "draft transcription failed");
+                return;
+            }
+        };
+        let language = transcript.language.as_deref();
+        let text = transcript
+            .segments
+            .iter()
+            .map(|seg| match self.punctuator.as_deref() {
+                Some(p) => p.punctuate(&seg.text, language),
+                None => seg.text.clone(),
+            })
+            .map(|t| t.trim().to_owned())
+            .filter(|t| !t.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
+        if text.is_empty() {
+            return;
+        }
+        let channels = u64::from(self.format.channels.max(1));
+        let offset_ms = frames_to_ms(self.emitted_frames + start as u64 / channels, self.format);
+        let _ = self
+            .events
+            .send(TranscriptEvent::Draft {
+                session_id,
+                chunk_index: self.chunk_index,
+                offset_ms,
+                text,
+            })
+            .await;
+    }
+
     /// Report how far the emitted audio trails active capture time.
     async fn report_progress(&mut self) {
-        let active_ms = self.meter.active_us.load(Ordering::Relaxed) / 1_000;
-        let lag_ms = u32::try_from(active_ms.saturating_sub(u64::from(self.offset_ms())))
+        let lag_ms = u32::try_from(self.active_ms().saturating_sub(u64::from(self.offset_ms())))
             .unwrap_or(u32::MAX);
-        let backlog = self.meter.backlog_samples.load(Ordering::Relaxed);
-        let backlog_ms = samples_to_ms(usize::try_from(backlog).unwrap_or(usize::MAX), self.format);
+        let backlog_ms = self.backlog_ms();
         self.lag_alarm.observe(self.session_id, lag_ms, backlog_ms);
         let _ = self
             .events
