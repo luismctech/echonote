@@ -331,7 +331,12 @@ export function App() {
               refineStage={recording.refineStage}
             />
           ) : (
-            <MeetingDetail view={view} onRenameSpeaker={renameSpeaker} onRenameMeeting={renameMeeting} />
+            <MeetingDetail
+              view={view}
+              onRenameSpeaker={renameSpeaker}
+              onRenameMeeting={renameMeeting}
+              onMeetingEdited={refreshMeetings}
+            />
           )}
         </section>
       </div>

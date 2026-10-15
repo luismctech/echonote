@@ -99,7 +99,20 @@
     "editTitle": "Clic para renombrar",
     "sectionsNav": "Secciones de la reunión",
     "filterStatus": "Mostrando {{shown}} de {{total}} segmentos",
-    "clearFilter": "Quitar filtro"
+    "clearFilter": "Quitar filtro",
+    "select": "Seleccionar",
+    "selectionToolbar": "Segmentos seleccionados",
+    "selectedCount_one": "{{count}} seleccionado",
+    "selectedCount_other": "{{count}} seleccionados",
+    "selectAllVisible": "Seleccionar todo lo visible",
+    "assignTo": "Asignar a ▾",
+    "noSpeaker": "Sin hablante",
+    "deleteSelected": "Borrar ({{count}})",
+    "deleteTitle": "Borrar segmentos",
+    "deleteConfirm_one": "¿Borrar {{count}} segmento? No se puede deshacer.",
+    "deleteConfirm_other": "¿Borrar {{count}} segmentos? No se puede deshacer.",
+    "selectSegment": "Seleccionar segmento en {{time}}",
+    "dismissError": "Cerrar"
   },
   "export": {
     "markdown": "Markdown (.md)",
@@ -113,7 +126,12 @@
     "speaker": "Hablante {{n}}",
     "rename": "Renombrar {{name}}",
     "slot": "Hablante slot {{n}}",
-    "filterBy": "Mostrar solo a {{name}}"
+    "filterBy": "Mostrar solo a {{name}}",
+    "actions": "Acciones de {{name}}",
+    "mergeInto": "Fusionar con…",
+    "mergeTitle": "Fusionar hablantes",
+    "mergeConfirm": "¿Fusionar {{from}} en {{to}}? Sus segmentos pasarán a {{to}}. No se puede deshacer.",
+    "mergeAction": "Fusionar"
   },
   "summary": {
     "label": "Resumen",
@@ -385,5 +403,8 @@
       "addNote": "Agregar nota",
       "deleteNote": "Eliminar nota"
     }
+  },
+  "confirm": {
+    "cancel": "Cancelar"
   }
 }
