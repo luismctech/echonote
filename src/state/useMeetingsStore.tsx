@@ -60,6 +60,7 @@ import type {
 } from "../types/meeting";
 import type { SpeakerId } from "../types/speaker";
 import type { MainView } from "../types/view";
+import { errorMessage } from "../types/ipc-error";
 
 // ---------------------------------------------------------------------------
 // Context shape
@@ -175,7 +176,7 @@ export function MeetingsProvider({ children }: { children: ReactNode }) {
       })
       .catch((err: unknown) => {
         if (cancelled) return;
-        const message = err instanceof Error ? err.message : String(err);
+        const message = errorMessage(err);
         setSearchError(message);
         setSearchHits([]);
         setSearchLoading(false);

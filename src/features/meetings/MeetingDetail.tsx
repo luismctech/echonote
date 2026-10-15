@@ -9,7 +9,7 @@ import { useChat } from "../../hooks/useChat";
 import { useMeetingSummary } from "../../hooks/useMeetingSummary";
 import { LogoAnimated } from "../../components/Logo";
 import { formatDate, formatDurationMs, formatTimestamp } from "../../lib/format";
-import { displayName, indexSpeakers } from "../../lib/speakers";
+import { displayName, indexSpeakers, speakersWithSegments } from "../../lib/speakers";
 import type { Note, NoteId } from "../../types/meeting";
 import type { SegmentId } from "../../types/chat";
 import type { SpeakerId } from "../../types/speaker";
@@ -125,6 +125,13 @@ export function MeetingDetail({
     () => (m ? indexSpeakers(m.speakers) : new Map()),
     [m?.speakers],
   );
+  // Speakers without a segment have no talk time: keep them out of the panel.
+  const allSpeakers = m?.speakers;
+  const segments = m?.segments;
+  const activeSpeakers = useMemo(
+    () => (allSpeakers && segments ? speakersWithSegments(allSpeakers, segments) : []),
+    [allSpeakers, segments],
+  );
 
   // Local notes state allows optimistic deletes without refetching.
   const [notes, setNotes] = useState<Note[]>(m?.notes ?? []);
@@ -206,8 +213,8 @@ export function MeetingDetail({
       </header>
 
       {/* ── Speakers (inline, compact) ── */}
-      {m.speakers.length > 0 && (
-        <SpeakersPanel speakers={m.speakers} segments={m.segments} onRename={onRenameSpeaker} />
+      {activeSpeakers.length > 0 && (
+        <SpeakersPanel speakers={activeSpeakers} segments={m.segments} onRename={onRenameSpeaker} />
       )}
 
       {/* ── Tab bar ── */}

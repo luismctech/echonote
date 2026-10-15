@@ -290,6 +290,7 @@
     "streamingFailed": "Streaming failed — you can retry.",
     "streamingStopFailed": "Streaming failed mid-stop. Some audio may not have been persisted.",
     "summaryFailed": "Couldn't generate summary.",
+    "noLanguageModel": "No language model is installed. Download one in the Models panel to use summaries and chat.",
     "modelMissing": "Required model not installed",
     "modelMissingDetail": "Download the missing model from the Models panel to use this feature.",
     "openModels": "Open Models",

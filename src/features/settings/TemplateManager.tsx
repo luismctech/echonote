@@ -16,6 +16,7 @@ import {
   updateCustomTemplate,
   deleteCustomTemplate,
 } from "../../ipc/client";
+import { errorMessage } from "../../types/ipc-error";
 
 type FormState = {
   name: string;
@@ -46,7 +47,7 @@ export function TemplateManager({
     setLoading(true);
     listCustomTemplates()
       .then(setTemplates)
-      .catch((err) => setError(String(err)))
+      .catch((err) => setError(errorMessage(err)))
       .finally(() => setLoading(false));
   }, []);
 
@@ -93,7 +94,7 @@ export function TemplateManager({
       refresh();
       onChanged?.();
     } catch (err) {
-      setError(String(err));
+      setError(errorMessage(err));
     } finally {
       setSaving(false);
     }
@@ -107,7 +108,7 @@ export function TemplateManager({
         refresh();
         onChanged?.();
       } catch (err) {
-        setError(String(err));
+        setError(errorMessage(err));
       }
     },
     [refresh, onChanged],

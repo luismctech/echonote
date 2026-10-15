@@ -19,6 +19,7 @@ import {
   uninstallMcpClient,
   getMcpConfigSnippet,
 } from "../../ipc/client";
+import { errorMessage } from "../../types/ipc-error";
 
 interface McpClient {
   id: string;
@@ -59,7 +60,7 @@ export function McpInstaller({
     setLoading(true);
     detectMcpClients()
       .then(setClients)
-      .catch((e) => setError(String(e)))
+      .catch((e) => setError(errorMessage(e)))
       .finally(() => setLoading(false));
   }, []);
 
@@ -80,7 +81,7 @@ export function McpInstaller({
           refresh();
         }
       } catch (e) {
-        setError(String(e));
+        setError(errorMessage(e));
       } finally {
         setBusy(null);
       }
@@ -100,7 +101,7 @@ export function McpInstaller({
           refresh();
         }
       } catch (e) {
-        setError(String(e));
+        setError(errorMessage(e));
       } finally {
         setBusy(null);
       }

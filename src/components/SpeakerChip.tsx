@@ -21,13 +21,17 @@ export function SpeakerChip({
 }) {
   const { t } = useTranslation();
   const palette = paletteFor(slot);
-  const sizing = compact ? "px-1.5 py-0 text-micro" : "px-2 py-0.5 text-ui-sm";
+  const slotTitle = t("speakers.slot", { n: slot + 1 });
+  // Compact chips sit inline with transcript text: cap long names.
+  const sizing = compact
+    ? "max-w-40 px-1.5 py-0 text-micro"
+    : "px-2 py-0.5 text-ui-sm";
   return (
     <span
       className={`inline-flex shrink-0 items-center rounded-full font-medium tabular-nums ring-1 ring-inset ${palette.bg} ${palette.text} ${palette.ring} ${sizing}`}
-      title={t("speakers.slot", { n: slot + 1 })}
+      title={slotTitle === label || label === `S${slot + 1}` ? slotTitle : `${label} · ${slotTitle}`}
     >
-      {label}
+      <span className="truncate">{label}</span>
     </span>
   );
 }

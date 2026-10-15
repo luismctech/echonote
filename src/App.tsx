@@ -35,6 +35,7 @@ import { useModelManager } from "./hooks/useModelManager";
 import { useOnboardingState } from "./hooks/useOnboardingState";
 import { useRecordingSession } from "./hooks/useRecordingSession";
 import { useMeetings } from "./state/useMeetingsStore";
+import { errorMessage } from "./types/ipc-error";
 
 function dotColor(downloading: boolean, allGood: boolean): string {
   if (downloading) return "animate-pulse bg-blue-500";
@@ -208,7 +209,7 @@ export function App() {
             toast.push({
               kind: "error",
               message: t("update.failed"),
-              detail: String(err),
+              detail: errorMessage(err),
             });
           });
         },

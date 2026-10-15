@@ -4,6 +4,7 @@ import { save } from "@tauri-apps/plugin-dialog";
 
 import { exportMeeting, type ExportFormat } from "../../ipc/client";
 import type { MeetingId } from "../../types/meeting";
+import { errorMessage } from "../../types/ipc-error";
 
 const FORMATS: ReadonlyArray<{ id: ExportFormat; labelKey: string; ext: string }> =
   [
@@ -33,7 +34,7 @@ export function ExportButton({
       try {
         await exportMeeting(meetingId, format, path);
       } catch (e) {
-        setError(String(e));
+        setError(errorMessage(e));
       } finally {
         setExporting(false);
       }

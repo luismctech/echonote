@@ -19,10 +19,12 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import { askAboutMeeting } from "../ipc/client";
 import type { ChatEvent, ChatMessage, SegmentId } from "../types/chat";
 import type { MeetingId } from "../types/meeting";
+import { userErrorMessage } from "../types/ipc-error";
 
 /** A single message in the local conversation history. */
 export type DisplayMessage = {
@@ -44,6 +46,7 @@ export type UseChat = {
 };
 
 export function useChat(meetingId: MeetingId | null): UseChat {
+  const { t } = useTranslation();
   const [messages, setMessages] = useState<DisplayMessage[]>([]);
   const [streaming, setStreaming] = useState(false);
   const [streamingText, setStreamingText] = useState("");
@@ -137,13 +140,13 @@ export function useChat(meetingId: MeetingId | null): UseChat {
 
       askAboutMeeting(meetingId, history, trimmed, onEvent).catch((err) => {
         if (activeMeetingRef.current !== meetingId) return;
-        const detail = err instanceof Error ? err.message : String(err);
+        const detail = userErrorMessage(err, t);
         setError(detail);
         setStreaming(false);
         setStreamingText("");
       });
     },
-    [meetingId, streaming],
+    [meetingId, streaming, t],
   );
 
   return { messages, streaming, streamingText, error, model, send };

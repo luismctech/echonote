@@ -67,6 +67,15 @@ export function displayName(
   return `Speaker ${speaker.slot + 1}`;
 }
 
+/**
+ * Chip text for a speaker in transcript rows: the name the user gave
+ * it, or its short `S{n}` tag while it has none.
+ */
+export function chipLabel(speaker: Pick<Speaker, "slot" | "label">): string {
+  const label = speaker.label?.trim();
+  return label && label.length > 0 ? label : shortTag(speaker.slot);
+}
+
 /** Short tag used in dense rows (live transcript): `S1`, `S2`, … */
 export function shortTag(slot: number): string {
   return `S${(slot >>> 0) + 1}`;
@@ -81,4 +90,21 @@ export function indexSpeakers(speakers: readonly Speaker[]): Map<string, Speaker
   const m = new Map<string, Speaker>();
   for (const s of speakers) m.set(s.id, s);
   return m;
+}
+
+/**
+ * Speakers that own at least one segment, in their original order.
+ * The diarizer records every speaker it heard in a chunk, but a speaker
+ * whose audio never won a segment (or was merged into another) has no
+ * talk time and would show as an empty entry.
+ */
+export function speakersWithSegments<S extends { id: string }>(
+  speakers: readonly S[],
+  segments: readonly { speakerId?: string | null }[],
+): S[] {
+  const owners = new Set<string>();
+  for (const seg of segments) {
+    if (seg.speakerId) owners.add(seg.speakerId);
+  }
+  return speakers.filter((sp) => owners.has(sp.id));
 }

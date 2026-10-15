@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  chipLabel,
   displayName,
   indexSpeakers,
   paletteFor,
   shortTag,
+  speakersWithSegments,
   SPEAKER_PALETTE,
 } from "./speakers";
 import type { Speaker } from "../types/speaker";
@@ -52,6 +54,17 @@ describe("displayName", () => {
   });
 });
 
+describe("chipLabel", () => {
+  it("shows the name given to the speaker", () => {
+    expect(chipLabel(speaker("a", 2, "  Ana López "))).toBe("Ana López");
+  });
+
+  it("keeps the S tag while the speaker has no name", () => {
+    expect(chipLabel(speaker("a", 2, null))).toBe("S3");
+    expect(chipLabel(speaker("a", 0, "   "))).toBe("S1");
+  });
+});
+
 describe("shortTag", () => {
   it("formats as S{slot+1}", () => {
     expect(shortTag(0)).toBe("S1");
@@ -71,5 +84,20 @@ describe("indexSpeakers", () => {
     expect(map.get("a")).toBe(a);
     expect(map.get("b")).toBe(b);
     expect(map.get("missing")).toBeUndefined();
+  });
+});
+
+describe("speakersWithSegments", () => {
+  const seg = (speakerId: string | null) => ({ speakerId });
+
+  it("drops speakers that own no segment, keeping order and slots", () => {
+    const s1 = speaker("a", 0, null);
+    const s2 = speaker("b", 1, null);
+    const s3 = speaker("c", 2, "Ana");
+    expect(speakersWithSegments([s1, s2, s3], [seg("a"), seg("c"), seg(null)])).toEqual([s1, s3]);
+  });
+
+  it("returns nothing when no segment has a speaker", () => {
+    expect(speakersWithSegments([speaker("a", 0, null)], [seg(null)])).toEqual([]);
   });
 });
