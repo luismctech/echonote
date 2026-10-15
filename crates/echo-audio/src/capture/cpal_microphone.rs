@@ -29,6 +29,7 @@ use echo_domain::{
     DomainError, Sample,
 };
 
+use super::sample_convert::{self, rank_format};
 use super::stream_error::{classify, Severity};
 
 /// Number of frames buffered between the audio thread and consumers
@@ -300,7 +301,8 @@ fn pick_device(host: &cpal::Host, device_id: Option<&str>) -> Result<Device, Dom
 /// 1. Pick the supported config whose channel count matches or is
 ///    minimal.
 /// 2. Use the **highest** supported sample rate (closest to native).
-/// 3. Prefer `f32` sample format.
+/// 3. Prefer `f32`, then the order in
+///    [`sample_convert::SUPPORTED_FORMATS`].
 fn pick_config(
     device: &Device,
     _preferred: AudioFormat,
@@ -327,16 +329,6 @@ fn pick_config(
         return Err(DomainError::AudioFormatUnsupported(
             "device exposes no input configurations".into(),
         ));
-    }
-
-    // Preference order on sample format.
-    fn rank_format(f: SampleFormat) -> u8 {
-        match f {
-            SampleFormat::F32 => 0,
-            SampleFormat::I16 => 1,
-            SampleFormat::U16 => 2,
-            _ => 9,
-        }
     }
 
     // Prefer minimum channel count (mono if possible).
@@ -403,7 +395,7 @@ fn run_audio_thread(
     // Build and start the initial stream.
     let stream = match build_and_play_stream(
         &device,
-        &config,
+        config,
         sample_format,
         format,
         &tx,
@@ -554,7 +546,7 @@ fn reconnect_stream(
 
         match build_and_play_stream(
             &device,
-            &new_config,
+            new_config,
             new_sample_format,
             format,
             tx,
@@ -577,7 +569,7 @@ fn reconnect_stream(
 /// reconnection logic.
 fn build_and_play_stream(
     device: &Device,
-    config: &StreamConfig,
+    config: StreamConfig,
     sample_format: SampleFormat,
     format: AudioFormat,
     tx: &FrameSender,
@@ -591,7 +583,7 @@ fn build_and_play_stream(
         // (see `stream_error`); log the first one per stream and then
         // only every TRANSIENT_LOG_EVERY-th to keep the journal usable.
         let transient_seen = Arc::new(AtomicU64::new(0));
-        move |err: cpal::StreamError| match classify(&err) {
+        move |err: cpal::Error| match classify(&err) {
             Severity::Transient => {
                 let seen = transient_seen.fetch_add(1, Ordering::Relaxed);
                 if seen.is_multiple_of(TRANSIENT_LOG_EVERY) {
@@ -609,79 +601,24 @@ fn build_and_play_stream(
         }
     };
 
-    let stream = match sample_format {
-        SampleFormat::F32 => device
-            .build_input_stream(
-                config,
-                {
-                    let tx = tx.clone();
-                    let error_flag = stream_error.clone();
-                    let frame_ts = last_frame_ms.clone();
-                    move |data: &[f32], _info: &cpal::InputCallbackInfo| {
-                        if error_flag.load(Ordering::Acquire) {
-                            return;
-                        }
-                        push_frame(&tx, format, start, &frame_ts, data.iter().copied());
-                    }
-                },
-                make_err_fn(),
-                Some(BUFFER_PERIOD),
-            )
-            .map_err(|e| DomainError::AudioCaptureFailed(format!("build f32 stream: {e}")))?,
-        SampleFormat::I16 => device
-            .build_input_stream(
-                config,
-                {
-                    let tx = tx.clone();
-                    let error_flag = stream_error.clone();
-                    let frame_ts = last_frame_ms.clone();
-                    move |data: &[i16], _info: &cpal::InputCallbackInfo| {
-                        if error_flag.load(Ordering::Acquire) {
-                            return;
-                        }
-                        push_frame(
-                            &tx,
-                            format,
-                            start,
-                            &frame_ts,
-                            data.iter().map(|s| f32::from(*s) / f32::from(i16::MAX)),
-                        );
-                    }
-                },
-                make_err_fn(),
-                Some(BUFFER_PERIOD),
-            )
-            .map_err(|e| DomainError::AudioCaptureFailed(format!("build i16 stream: {e}")))?,
-        SampleFormat::U16 => device
-            .build_input_stream(
-                config,
-                {
-                    let tx = tx.clone();
-                    let error_flag = stream_error.clone();
-                    let frame_ts = last_frame_ms.clone();
-                    move |data: &[u16], _info: &cpal::InputCallbackInfo| {
-                        if error_flag.load(Ordering::Acquire) {
-                            return;
-                        }
-                        push_frame(
-                            &tx,
-                            format,
-                            start,
-                            &frame_ts,
-                            data.iter().map(|s| (f32::from(*s) - 32_768.0) / 32_768.0),
-                        );
-                    }
-                },
-                make_err_fn(),
-                Some(BUFFER_PERIOD),
-            )
-            .map_err(|e| DomainError::AudioCaptureFailed(format!("build u16 stream: {e}")))?,
-        other => {
-            return Err(DomainError::AudioFormatUnsupported(format!(
-                "unsupported sample format: {other:?}"
-            )));
-        }
-    };
+    let stream = sample_convert::build_input_stream(
+        device,
+        config,
+        sample_format,
+        {
+            let tx = tx.clone();
+            let error_flag = stream_error.clone();
+            let frame_ts = last_frame_ms.clone();
+            move |samples: Vec<Sample>| {
+                if error_flag.load(Ordering::Acquire) {
+                    return;
+                }
+                push_frame(&tx, format, start, &frame_ts, samples.into_iter());
+            }
+        },
+        make_err_fn(),
+        Some(BUFFER_PERIOD),
+    )?;
 
     stream
         .play()
