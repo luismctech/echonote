@@ -35,6 +35,7 @@ import { useIpcAction } from "../ipc/useIpcAction";
 import type { MeetingId } from "../types/meeting";
 import type { SpeakerId } from "../types/speaker";
 import type { MainView } from "../types/view";
+import { errorMessage } from "../types/ipc-error";
 
 export type MeetingsView = MainView;
 
@@ -95,7 +96,7 @@ export function useMeetingDetail({
         }
       } catch (err) {
         if (lastRequestedRef.current !== id) return;
-        const message = err instanceof Error ? err.message : String(err);
+        const message = errorMessage(err);
         setView({
           kind: "meeting",
           id,
@@ -146,7 +147,7 @@ export function useMeetingDetail({
         );
         await refreshMeetings();
       } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
+        const message = errorMessage(err);
         toast.push({
           kind: "error",
           message: t("toast.renameFailed"),
@@ -178,7 +179,7 @@ export function useMeetingDetail({
               },
         );
       } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
+        const message = errorMessage(err);
         setMeetingsError(message);
         toast.push({
           kind: "error",

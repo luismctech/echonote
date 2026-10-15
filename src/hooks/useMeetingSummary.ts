@@ -31,6 +31,7 @@ import { useIpcAction } from "../ipc/useIpcAction";
 import type { MeetingId } from "../types/meeting";
 import type { Summary, TemplateId } from "../types/summary";
 import type { CustomTemplateId } from "../types/custom-template";
+import { userErrorMessage } from "../types/ipc-error";
 
 /** The template selector can pick a built-in or a custom template. */
 export type SelectedTemplate =
@@ -52,6 +53,7 @@ export type UseMeetingSummary = {
 };
 
 export function useMeetingSummary(meetingId: MeetingId | null): UseMeetingSummary {
+  const { t, i18n } = useTranslation();
   const [summary, setSummary] = useState<Summary | null>(null);
   const [loading, setLoading] = useState(false);
   const [generating, setGenerating] = useState(false);
@@ -96,7 +98,7 @@ export function useMeetingSummary(meetingId: MeetingId | null): UseMeetingSummar
         }
       } catch (err) {
         if (cancelled || requestedRef.current !== meetingId) return;
-        const message = err instanceof Error ? err.message : String(err);
+        const message = userErrorMessage(err, t);
         setError(message);
       } finally {
         if (!cancelled && requestedRef.current === meetingId) {
@@ -107,9 +109,8 @@ export function useMeetingSummary(meetingId: MeetingId | null): UseMeetingSummar
     return () => {
       cancelled = true;
     };
-  }, [meetingId]);
+  }, [meetingId, t]);
 
-  const { t, i18n } = useTranslation();
 
   const generateCustomCall = useIpcAction(
     t("errors.summaryFailed"),
@@ -155,14 +156,14 @@ export function useMeetingSummary(meetingId: MeetingId | null): UseMeetingSummar
       }
       return fresh;
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
+      const message = userErrorMessage(err, t);
       setError(message);
       return undefined;
     } finally {
       setGenerating(false);
       setStreamingText("");
     }
-  }, [meetingId, selectedTemplate, includeNotes, generateCustomCall, i18n.language]);
+  }, [meetingId, selectedTemplate, includeNotes, generateCustomCall, i18n.language, t]);
 
   return {
     summary,

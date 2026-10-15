@@ -290,6 +290,7 @@
     "streamingFailed": "El streaming falló — puedes reintentar.",
     "streamingStopFailed": "El streaming falló al detener. Puede que no se haya guardado todo el audio.",
     "summaryFailed": "No se pudo generar el resumen.",
+    "noLanguageModel": "No hay ningún modelo de lenguaje instalado. Descarga uno en el panel Modelos para usar el resumen y el chat.",
     "modelMissing": "Modelo requerido no instalado",
     "modelMissingDetail": "Descarga el modelo faltante desde el panel de Modelos para usar esta función.",
     "openModels": "Abrir Modelos",
