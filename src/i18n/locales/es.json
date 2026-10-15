@@ -97,7 +97,9 @@
     "copyTranscript": "Copiar transcripción",
     "copyNotes": "Copiar notas",
     "editTitle": "Clic para renombrar",
-    "sectionsNav": "Secciones de la reunión"
+    "sectionsNav": "Secciones de la reunión",
+    "filterStatus": "Mostrando {{shown}} de {{total}} segmentos",
+    "clearFilter": "Quitar filtro"
   },
   "export": {
     "markdown": "Markdown (.md)",
@@ -110,7 +112,8 @@
     "label": "Hablantes",
     "speaker": "Hablante {{n}}",
     "rename": "Renombrar {{name}}",
-    "slot": "Hablante slot {{n}}"
+    "slot": "Hablante slot {{n}}",
+    "filterBy": "Mostrar solo a {{name}}"
   },
   "summary": {
     "label": "Resumen",

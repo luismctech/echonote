@@ -10,6 +10,11 @@ import { useMeetingSummary } from "../../hooks/useMeetingSummary";
 import { LogoAnimated } from "../../components/Logo";
 import { formatDate, formatDurationMs, formatTimestamp } from "../../lib/format";
 import { displayName, indexSpeakers, speakersWithSegments } from "../../lib/speakers";
+import {
+  filterSegmentsBySpeakers,
+  pruneSpeakerFilter,
+  toggleSpeaker,
+} from "../../lib/speakerFilter";
 import type { Note, NoteId } from "../../types/meeting";
 import type { SegmentId } from "../../types/chat";
 import type { SpeakerId } from "../../types/speaker";
@@ -22,6 +27,9 @@ import { SpeakersPanel } from "./SpeakersPanel";
 import { SummaryPanel } from "./SummaryPanel";
 
 type DetailTab = "summary" | "transcript" | "chat";
+
+/** Shared empty speaker filter (stable identity for memoisation). */
+const NO_FILTER: ReadonlySet<SpeakerId> = new Set();
 
 /** Inline-editable meeting title. Click to edit, Enter/blur to save. */
 function EditableTitle({
@@ -133,6 +141,33 @@ export function MeetingDetail({
     [allSpeakers, segments],
   );
 
+  // Transcript filter by speaker (empty = every segment). It is stored
+  // with the meeting it belongs to, so navigating to another meeting
+  // starts unfiltered, and ids that disappear (a speaker merged away)
+  // are pruned so the filter never hides everything.
+  const [filterState, setFilterState] = useState<{
+    meetingId: string | null;
+    ids: ReadonlySet<SpeakerId>;
+  }>({ meetingId: null, ids: NO_FILTER });
+  const ownFilter = filterState.meetingId === meetingId ? filterState.ids : NO_FILTER;
+  const speakerFilter = useMemo(
+    () => pruneSpeakerFilter(ownFilter, activeSpeakers.map((sp) => sp.id)),
+    [ownFilter, activeSpeakers],
+  );
+  const setSpeakerFilter = useCallback(
+    (ids: ReadonlySet<SpeakerId>) => setFilterState({ meetingId, ids }),
+    [meetingId],
+  );
+  const handleToggleSpeaker = useCallback(
+    (speakerId: SpeakerId) => setSpeakerFilter(toggleSpeaker(speakerFilter, speakerId)),
+    [setSpeakerFilter, speakerFilter],
+  );
+  const clearSpeakerFilter = useCallback(() => setSpeakerFilter(NO_FILTER), [setSpeakerFilter]);
+  const visibleSegments = useMemo(
+    () => (segments ? filterSegmentsBySpeakers(segments, speakerFilter) : []),
+    [segments, speakerFilter],
+  );
+
   // Local notes state allows optimistic deletes without refetching.
   const [notes, setNotes] = useState<Note[]>(m?.notes ?? []);
   useEffect(() => {
@@ -155,7 +190,7 @@ export function MeetingDetail({
   }, [m, speakerIndex]);
 
   const virtualizer = useVirtualizer({
-    count: m?.segments.length ?? 0,
+    count: visibleSegments.length,
     getScrollElement: () => scrollRef.current,
     estimateSize: () => 36,
     overscan: 8,
@@ -163,13 +198,18 @@ export function MeetingDetail({
 
   const handleScrollToSegment = useCallback((segmentId: SegmentId) => {
     if (!m) return;
-    const idx = m.segments.findIndex((s) => s.id === segmentId);
+    let idx = visibleSegments.findIndex((s) => s.id === segmentId);
+    if (idx < 0) {
+      // The cited segment is hidden by the speaker filter: show all.
+      idx = m.segments.findIndex((s) => s.id === segmentId);
+      if (idx >= 0) setSpeakerFilter(NO_FILTER);
+    }
     if (idx >= 0) {
       setActiveTab("transcript");
       // Small delay so the tab renders the virtualizer first
       requestAnimationFrame(() => virtualizer.scrollToIndex(idx, { align: "center" }));
     }
-  }, [m, virtualizer]);
+  }, [m, visibleSegments, virtualizer, setSpeakerFilter]);
 
   if (view.loading) {
     return (
@@ -214,7 +254,13 @@ export function MeetingDetail({
 
       {/* ── Speakers (inline, compact) ── */}
       {activeSpeakers.length > 0 && (
-        <SpeakersPanel speakers={activeSpeakers} segments={m.segments} onRename={onRenameSpeaker} />
+        <SpeakersPanel
+          speakers={activeSpeakers}
+          segments={m.segments}
+          filter={speakerFilter}
+          onToggleFilter={handleToggleSpeaker}
+          onRename={onRenameSpeaker}
+        />
       )}
 
       {/* ── Tab bar ── */}
@@ -281,6 +327,22 @@ export function MeetingDetail({
                   <CopyButton getText={getTranscriptText} title={t("meeting.copyTranscript")} />
                 )}
               </div>
+              {speakerFilter.size > 0 && (
+                <p className="px-1 text-ui-xs text-content-tertiary" aria-live="polite">
+                  {t("meeting.filterStatus", {
+                    shown: visibleSegments.length,
+                    total: m.segments.length,
+                  })}
+                  {" · "}
+                  <button
+                    type="button"
+                    onClick={clearSpeakerFilter}
+                    className="font-medium text-content-secondary underline-offset-2 hover:underline"
+                  >
+                    {t("meeting.clearFilter")}
+                  </button>
+                </p>
+              )}
               <div
                 ref={scrollRef}
                 className="min-h-0 flex-1 overflow-y-auto rounded-md border border-subtle bg-surface-sunken p-3 text-ui-md leading-relaxed"
@@ -293,7 +355,7 @@ export function MeetingDetail({
                     style={{ height: `${virtualizer.getTotalSize()}px` }}
                   >
                     {virtualizer.getVirtualItems().map((vItem) => {
-                      const seg = m.segments[vItem.index]!;
+                      const seg = visibleSegments[vItem.index]!;
                       const speaker = seg.speakerId
                         ? speakerIndex.get(seg.speakerId)
                         : undefined;

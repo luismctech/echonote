@@ -97,7 +97,9 @@
     "copyTranscript": "Copy transcript",
     "copyNotes": "Copy notes",
     "editTitle": "Click to rename",
-    "sectionsNav": "Meeting sections"
+    "sectionsNav": "Meeting sections",
+    "filterStatus": "Showing {{shown}} of {{total}} segments",
+    "clearFilter": "Clear filter"
   },
   "export": {
     "markdown": "Markdown (.md)",
@@ -110,7 +112,8 @@
     "label": "Speakers",
     "speaker": "Speaker {{n}}",
     "rename": "Rename {{name}}",
-    "slot": "Speaker slot {{n}}"
+    "slot": "Speaker slot {{n}}",
+    "filterBy": "Show only {{name}}"
   },
   "summary": {
     "label": "Summary",
