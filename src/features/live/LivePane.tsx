@@ -9,6 +9,7 @@ import type { RecordingState } from "../../state/recording";
 import type { AudioSourceKind } from "../../types/streaming";
 import type { Note } from "../../types/meeting";
 import type { StreamLine } from "../../types/view";
+import { lagIndicatorSeconds } from "../../lib/lag";
 import { NoteInput } from "./NoteInput";
 import { NoteList } from "./NoteList";
 import { TranscriptRow } from "./TranscriptRow";
@@ -95,7 +96,8 @@ export function LivePane({
   refineStage,
 }: Readonly<{
   stream: RecordingState;
-  stats: { chunks: number; skipped: number; audioMs: number };
+  /** `lagMs`: latest processing lag reported by the backend. */
+  stats: { chunks: number; skipped: number; audioMs: number; lagMs?: number };
   lines: StreamLine[];
   notes: Note[];
   listRef: RefObject<HTMLDivElement>;
@@ -132,6 +134,8 @@ export function LivePane({
   const { t } = useTranslation();
 
   const [bannerDismissed, setBannerDismissed] = useState(false);
+  const lagSeconds =
+    stream.kind === "recording" ? lagIndicatorSeconds(stats.lagMs ?? 0) : null;
   const showExternalBanner =
     externalDeviceName !== null && !bannerDismissed && audioSource !== "mixed";
 
@@ -236,6 +240,17 @@ export function LivePane({
           {(isActive || stream.kind === "stopping") && (
             <span className="font-mono text-ui-sm tabular-nums text-content-secondary">
               {formatTimer(stats.audioMs)}
+            </span>
+          )}
+
+          {/* Processing lag: transcription slower than real time. */}
+          {lagSeconds !== null && (
+            <span
+              className="text-ui-xs tabular-nums text-amber-600 dark:text-amber-400"
+              title={t("live.lagBehindHint")}
+              role="status"
+            >
+              {t("live.lagBehind", { seconds: lagSeconds })}
             </span>
           )}
         </div>

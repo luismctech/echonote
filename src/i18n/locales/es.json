@@ -47,6 +47,8 @@
     "fatal": "fatal:",
     "dismiss": "cerrar",
     "listening": "Escuchando… habla por el micrófono.",
+    "lagBehind": "Procesando con {{seconds}} s de retraso",
+    "lagBehindHint": "La transcripción va más lenta que el tiempo real en este equipo; no se pierde audio, el texto se pone al día.",
     "focusMode": "Modo enfoque ({{shortcut}})",
     "toggleFocusMode": "Alternar modo enfoque",
     "pressStart": "Pulsa Iniciar o {{shortcut}} para comenzar una sesión.",

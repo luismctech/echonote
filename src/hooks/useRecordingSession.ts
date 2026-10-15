@@ -51,9 +51,11 @@ export type RecordingStats = {
   chunks: number;
   skipped: number;
   audioMs: number;
+  /** Latest processing lag reported by the backend (ms); 0 when idle. */
+  lagMs: number;
 };
 
-const ZERO_STATS: RecordingStats = { chunks: 0, skipped: 0, audioMs: 0 };
+const ZERO_STATS: RecordingStats = { chunks: 0, skipped: 0, audioMs: 0, lagMs: 0 };
 
 /** Max transcript lines kept in memory during a live session. */
 const MAX_LIVE_LINES = 500;
@@ -245,7 +247,11 @@ export function useRecordingSession({
             : next;
         });
         break;
+      case "progress":
+        setStats((s) => (s.lagMs === evt.lagMs ? s : { ...s, lagMs: evt.lagMs }));
+        break;
       case "stopped":
+        setStats((s) => ({ ...s, lagMs: 0 }));
         dispatch({
           type: "STREAMING_STOPPED",
           totalSegments: evt.totalSegments,
@@ -256,6 +262,7 @@ export function useRecordingSession({
         onSessionFinishedRef.current();
         break;
       case "failed":
+        setStats((s) => ({ ...s, lagMs: 0 }));
         dispatch({ type: "STREAMING_FAILED", message: evt.message });
         onSessionFinishedRef.current();
         break;

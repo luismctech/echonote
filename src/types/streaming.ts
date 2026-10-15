@@ -124,6 +124,18 @@ export type TranscriptEvent =
     }
   | {
       /**
+       * How far transcription runs behind capture, sent after every
+       * chunk or skipped span. Live telemetry only; never persisted.
+       */
+      type: "progress";
+      sessionId: StreamingSessionId;
+      /** Active capture time minus transcribed session audio (ms, ≥ 0). */
+      lagMs: number;
+      /** Captured audio still queued for the pipeline (ms). */
+      backlogMs: number;
+    }
+  | {
+      /**
        * Offline diarization refinement applied at end-of-session.
        * Carries `(absorbed, surviving)` SpeakerId pairs; the recorder
        * has already rewritten persisted segments and dropped absorbed

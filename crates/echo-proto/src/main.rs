@@ -1069,6 +1069,9 @@ async fn run_stream(
                     retired.len()
                 );
             }
+            // Lag telemetry for the app's UI; the CLI already prints
+            // every chunk as it lands.
+            Some(TranscriptEvent::Progress { .. }) => {}
             None => break,
         }
     }

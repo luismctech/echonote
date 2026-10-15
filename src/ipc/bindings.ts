@@ -1606,7 +1606,7 @@ export type TranscriptEvent_Deserialize =
 /**  Session id this event belongs to. */
 sessionId: StreamingSessionId; 
 /**  Format actually negotiated with the device. */
-inputFormat: AudioFormat }) & { chunkIndex?: never; chunks?: never; created?: never; durationMs?: never; language?: never; merges?: never; message?: never; offsetMs?: never; planId?: never; retired?: never; rms?: never; rtf?: never; segments?: never; speakerId?: never; speakerSlot?: never; speakers?: never; totalAudioMs?: never; totalSegments?: never } | 
+inputFormat: AudioFormat }) & { backlogMs?: never; chunkIndex?: never; chunks?: never; created?: never; durationMs?: never; lagMs?: never; language?: never; merges?: never; message?: never; offsetMs?: never; planId?: never; retired?: never; rms?: never; rtf?: never; segments?: never; speakerId?: never; speakerSlot?: never; speakers?: never; totalAudioMs?: never; totalSegments?: never } | 
 /**
  *  One transcribed chunk. Segments inside are timestamped relative
  *  to the start of the session (not the chunk).
@@ -1648,7 +1648,7 @@ speakerSlot?: number | null;
  *  before the segments. Defaults to empty so payloads from
  *  older producers still deserialise.
  */
-speakers?: SpeakerRef[] }) & { chunks?: never; created?: never; durationMs?: never; inputFormat?: never; merges?: never; message?: never; planId?: never; retired?: never; rms?: never; totalAudioMs?: never; totalSegments?: never } | 
+speakers?: SpeakerRef[] }) & { backlogMs?: never; chunks?: never; created?: never; durationMs?: never; inputFormat?: never; lagMs?: never; merges?: never; message?: never; planId?: never; retired?: never; rms?: never; totalAudioMs?: never; totalSegments?: never } | 
 /**
  *  A chunk was discarded by the silence gate before being sent to
  *  the ASR backend. Useful for UI / metrics.
@@ -1663,7 +1663,7 @@ offsetMs: number;
 /**  Length of the skipped chunk in milliseconds. */
 durationMs: number; 
 /**  RMS of the skipped chunk (for diagnostics). */
-rms: number | null }) & { chunks?: never; created?: never; inputFormat?: never; language?: never; merges?: never; message?: never; planId?: never; retired?: never; rtf?: never; segments?: never; speakerId?: never; speakerSlot?: never; speakers?: never; totalAudioMs?: never; totalSegments?: never } | 
+rms: number | null }) & { backlogMs?: never; chunks?: never; created?: never; inputFormat?: never; lagMs?: never; language?: never; merges?: never; message?: never; planId?: never; retired?: never; rtf?: never; segments?: never; speakerId?: never; speakerSlot?: never; speakers?: never; totalAudioMs?: never; totalSegments?: never } | 
 /**
  *  Offline diarization refinement after the streaming loop ended.
  * 
@@ -1682,7 +1682,7 @@ sessionId: StreamingSessionId;
  *  `(absorbed, surviving)` pairs produced by the diarizer's
  *  offline refinement pass.
  */
-merges: SpeakerMerge[] }) & { chunkIndex?: never; chunks?: never; created?: never; durationMs?: never; inputFormat?: never; language?: never; message?: never; offsetMs?: never; planId?: never; retired?: never; rms?: never; rtf?: never; segments?: never; speakerId?: never; speakerSlot?: never; speakers?: never; totalAudioMs?: never; totalSegments?: never } | 
+merges: SpeakerMerge[] }) & { backlogMs?: never; chunkIndex?: never; chunks?: never; created?: never; durationMs?: never; inputFormat?: never; lagMs?: never; language?: never; message?: never; offsetMs?: never; planId?: never; retired?: never; rms?: never; rtf?: never; segments?: never; speakerId?: never; speakerSlot?: never; speakers?: never; totalAudioMs?: never; totalSegments?: never } | 
 /**
  *  Offline re-segmentation after the streaming loop ended (ADR 0001).
  * 
@@ -1708,7 +1708,7 @@ retired: SpeakerRetirement[];
 /**  Segments whose speaker changed, with their new speaker. */
 segments: SegmentSpeaker[]; 
 /**  Chunks whose dominant speaker changed (live pane). */
-chunks: ChunkSpeaker[] }) & { chunkIndex?: never; durationMs?: never; inputFormat?: never; language?: never; merges?: never; message?: never; offsetMs?: never; rms?: never; rtf?: never; speakerId?: never; speakerSlot?: never; speakers?: never; totalAudioMs?: never; totalSegments?: never } | 
+chunks: ChunkSpeaker[] }) & { backlogMs?: never; chunkIndex?: never; durationMs?: never; inputFormat?: never; lagMs?: never; language?: never; merges?: never; message?: never; offsetMs?: never; rms?: never; rtf?: never; speakerId?: never; speakerSlot?: never; speakers?: never; totalAudioMs?: never; totalSegments?: never } | 
 /**  The pipeline finished cleanly (caller stopped or stream EOF). */
 ({ type: "stopped"; 
 /**  Session id. */
@@ -1716,7 +1716,7 @@ sessionId: StreamingSessionId;
 /**  Total transcribed segments emitted across all chunks. */
 totalSegments: number; 
 /**  Total wall-clock audio captured, in milliseconds. */
-totalAudioMs: number }) & { chunkIndex?: never; chunks?: never; created?: never; durationMs?: never; inputFormat?: never; language?: never; merges?: never; message?: never; offsetMs?: never; planId?: never; retired?: never; rms?: never; rtf?: never; segments?: never; speakerId?: never; speakerSlot?: never; speakers?: never } | 
+totalAudioMs: number }) & { backlogMs?: never; chunkIndex?: never; chunks?: never; created?: never; durationMs?: never; inputFormat?: never; lagMs?: never; language?: never; merges?: never; message?: never; offsetMs?: never; planId?: never; retired?: never; rms?: never; rtf?: never; segments?: never; speakerId?: never; speakerSlot?: never; speakers?: never } | 
 /**  The pipeline aborted with an error. No further events follow. */
 ({ type: "failed"; 
 /**  Session id. */
@@ -1725,15 +1725,34 @@ sessionId: StreamingSessionId;
  *  Human-readable error message. The structured cause is logged
  *  in the backend and not exposed across the wire.
  */
-message: string }) & { chunkIndex?: never; chunks?: never; created?: never; durationMs?: never; inputFormat?: never; language?: never; merges?: never; offsetMs?: never; planId?: never; retired?: never; rms?: never; rtf?: never; segments?: never; speakerId?: never; speakerSlot?: never; speakers?: never; totalAudioMs?: never; totalSegments?: never } | 
+message: string }) & { backlogMs?: never; chunkIndex?: never; chunks?: never; created?: never; durationMs?: never; inputFormat?: never; lagMs?: never; language?: never; merges?: never; offsetMs?: never; planId?: never; retired?: never; rms?: never; rtf?: never; segments?: never; speakerId?: never; speakerSlot?: never; speakers?: never; totalAudioMs?: never; totalSegments?: never } | 
 /**  The pipeline was paused. Audio frames are discarded until resumed. */
 ({ type: "paused"; 
 /**  Session id. */
-sessionId: StreamingSessionId }) & { chunkIndex?: never; chunks?: never; created?: never; durationMs?: never; inputFormat?: never; language?: never; merges?: never; message?: never; offsetMs?: never; planId?: never; retired?: never; rms?: never; rtf?: never; segments?: never; speakerId?: never; speakerSlot?: never; speakers?: never; totalAudioMs?: never; totalSegments?: never } | 
+sessionId: StreamingSessionId }) & { backlogMs?: never; chunkIndex?: never; chunks?: never; created?: never; durationMs?: never; inputFormat?: never; lagMs?: never; language?: never; merges?: never; message?: never; offsetMs?: never; planId?: never; retired?: never; rms?: never; rtf?: never; segments?: never; speakerId?: never; speakerSlot?: never; speakers?: never; totalAudioMs?: never; totalSegments?: never } | 
 /**  The pipeline was resumed after a pause. */
 ({ type: "resumed"; 
 /**  Session id. */
-sessionId: StreamingSessionId }) & { chunkIndex?: never; chunks?: never; created?: never; durationMs?: never; inputFormat?: never; language?: never; merges?: never; message?: never; offsetMs?: never; planId?: never; retired?: never; rms?: never; rtf?: never; segments?: never; speakerId?: never; speakerSlot?: never; speakers?: never; totalAudioMs?: never; totalSegments?: never };
+sessionId: StreamingSessionId }) & { backlogMs?: never; chunkIndex?: never; chunks?: never; created?: never; durationMs?: never; inputFormat?: never; lagMs?: never; language?: never; merges?: never; message?: never; offsetMs?: never; planId?: never; retired?: never; rms?: never; rtf?: never; segments?: never; speakerId?: never; speakerSlot?: never; speakers?: never; totalAudioMs?: never; totalSegments?: never } | 
+/**
+ *  How far transcription runs behind capture. Emitted after every
+ *  chunk or skipped span, so the UI can tell a slow transcriber
+ *  (growing lag, no audio lost) apart from a stalled one. Not
+ *  persisted.
+ */
+({ type: "progress"; 
+/**  Session id. */
+sessionId: StreamingSessionId; 
+/**
+ *  Active (non-paused) capture time minus the session audio
+ *  already emitted, in milliseconds; never negative.
+ */
+lagMs: number; 
+/**
+ *  Captured audio queued for the pipeline but not yet buffered
+ *  for chunking, in milliseconds.
+ */
+backlogMs: number }) & { chunkIndex?: never; chunks?: never; created?: never; durationMs?: never; inputFormat?: never; language?: never; merges?: never; message?: never; offsetMs?: never; planId?: never; retired?: never; rms?: never; rtf?: never; segments?: never; speakerId?: never; speakerSlot?: never; speakers?: never; totalAudioMs?: never; totalSegments?: never };
 
 /**
  *  One event emitted by the streaming pipeline.
@@ -1751,7 +1770,7 @@ export type TranscriptEvent_Serialize =
 /**  Session id this event belongs to. */
 sessionId: StreamingSessionId; 
 /**  Format actually negotiated with the device. */
-inputFormat: AudioFormat }) & { chunkIndex?: never; chunks?: never; created?: never; durationMs?: never; language?: never; merges?: never; message?: never; offsetMs?: never; planId?: never; retired?: never; rms?: never; rtf?: never; segments?: never; speakerId?: never; speakerSlot?: never; speakers?: never; totalAudioMs?: never; totalSegments?: never } | 
+inputFormat: AudioFormat }) & { backlogMs?: never; chunkIndex?: never; chunks?: never; created?: never; durationMs?: never; lagMs?: never; language?: never; merges?: never; message?: never; offsetMs?: never; planId?: never; retired?: never; rms?: never; rtf?: never; segments?: never; speakerId?: never; speakerSlot?: never; speakers?: never; totalAudioMs?: never; totalSegments?: never } | 
 /**
  *  One transcribed chunk. Segments inside are timestamped relative
  *  to the start of the session (not the chunk).
@@ -1793,7 +1812,7 @@ speakerSlot?: number | null;
  *  before the segments. Defaults to empty so payloads from
  *  older producers still deserialise.
  */
-speakers: SpeakerRef[] }) & { chunks?: never; created?: never; durationMs?: never; inputFormat?: never; merges?: never; message?: never; planId?: never; retired?: never; rms?: never; totalAudioMs?: never; totalSegments?: never } | 
+speakers: SpeakerRef[] }) & { backlogMs?: never; chunks?: never; created?: never; durationMs?: never; inputFormat?: never; lagMs?: never; merges?: never; message?: never; planId?: never; retired?: never; rms?: never; totalAudioMs?: never; totalSegments?: never } | 
 /**
  *  A chunk was discarded by the silence gate before being sent to
  *  the ASR backend. Useful for UI / metrics.
@@ -1808,7 +1827,7 @@ offsetMs: number;
 /**  Length of the skipped chunk in milliseconds. */
 durationMs: number; 
 /**  RMS of the skipped chunk (for diagnostics). */
-rms: number | null }) & { chunks?: never; created?: never; inputFormat?: never; language?: never; merges?: never; message?: never; planId?: never; retired?: never; rtf?: never; segments?: never; speakerId?: never; speakerSlot?: never; speakers?: never; totalAudioMs?: never; totalSegments?: never } | 
+rms: number | null }) & { backlogMs?: never; chunks?: never; created?: never; inputFormat?: never; lagMs?: never; language?: never; merges?: never; message?: never; planId?: never; retired?: never; rtf?: never; segments?: never; speakerId?: never; speakerSlot?: never; speakers?: never; totalAudioMs?: never; totalSegments?: never } | 
 /**
  *  Offline diarization refinement after the streaming loop ended.
  * 
@@ -1827,7 +1846,7 @@ sessionId: StreamingSessionId;
  *  `(absorbed, surviving)` pairs produced by the diarizer's
  *  offline refinement pass.
  */
-merges: SpeakerMerge[] }) & { chunkIndex?: never; chunks?: never; created?: never; durationMs?: never; inputFormat?: never; language?: never; message?: never; offsetMs?: never; planId?: never; retired?: never; rms?: never; rtf?: never; segments?: never; speakerId?: never; speakerSlot?: never; speakers?: never; totalAudioMs?: never; totalSegments?: never } | 
+merges: SpeakerMerge[] }) & { backlogMs?: never; chunkIndex?: never; chunks?: never; created?: never; durationMs?: never; inputFormat?: never; lagMs?: never; language?: never; message?: never; offsetMs?: never; planId?: never; retired?: never; rms?: never; rtf?: never; segments?: never; speakerId?: never; speakerSlot?: never; speakers?: never; totalAudioMs?: never; totalSegments?: never } | 
 /**
  *  Offline re-segmentation after the streaming loop ended (ADR 0001).
  * 
@@ -1853,7 +1872,7 @@ retired: SpeakerRetirement[];
 /**  Segments whose speaker changed, with their new speaker. */
 segments: SegmentSpeaker[]; 
 /**  Chunks whose dominant speaker changed (live pane). */
-chunks: ChunkSpeaker[] }) & { chunkIndex?: never; durationMs?: never; inputFormat?: never; language?: never; merges?: never; message?: never; offsetMs?: never; rms?: never; rtf?: never; speakerId?: never; speakerSlot?: never; speakers?: never; totalAudioMs?: never; totalSegments?: never } | 
+chunks: ChunkSpeaker[] }) & { backlogMs?: never; chunkIndex?: never; durationMs?: never; inputFormat?: never; lagMs?: never; language?: never; merges?: never; message?: never; offsetMs?: never; rms?: never; rtf?: never; speakerId?: never; speakerSlot?: never; speakers?: never; totalAudioMs?: never; totalSegments?: never } | 
 /**  The pipeline finished cleanly (caller stopped or stream EOF). */
 ({ type: "stopped"; 
 /**  Session id. */
@@ -1861,7 +1880,7 @@ sessionId: StreamingSessionId;
 /**  Total transcribed segments emitted across all chunks. */
 totalSegments: number; 
 /**  Total wall-clock audio captured, in milliseconds. */
-totalAudioMs: number }) & { chunkIndex?: never; chunks?: never; created?: never; durationMs?: never; inputFormat?: never; language?: never; merges?: never; message?: never; offsetMs?: never; planId?: never; retired?: never; rms?: never; rtf?: never; segments?: never; speakerId?: never; speakerSlot?: never; speakers?: never } | 
+totalAudioMs: number }) & { backlogMs?: never; chunkIndex?: never; chunks?: never; created?: never; durationMs?: never; inputFormat?: never; lagMs?: never; language?: never; merges?: never; message?: never; offsetMs?: never; planId?: never; retired?: never; rms?: never; rtf?: never; segments?: never; speakerId?: never; speakerSlot?: never; speakers?: never } | 
 /**  The pipeline aborted with an error. No further events follow. */
 ({ type: "failed"; 
 /**  Session id. */
@@ -1870,15 +1889,34 @@ sessionId: StreamingSessionId;
  *  Human-readable error message. The structured cause is logged
  *  in the backend and not exposed across the wire.
  */
-message: string }) & { chunkIndex?: never; chunks?: never; created?: never; durationMs?: never; inputFormat?: never; language?: never; merges?: never; offsetMs?: never; planId?: never; retired?: never; rms?: never; rtf?: never; segments?: never; speakerId?: never; speakerSlot?: never; speakers?: never; totalAudioMs?: never; totalSegments?: never } | 
+message: string }) & { backlogMs?: never; chunkIndex?: never; chunks?: never; created?: never; durationMs?: never; inputFormat?: never; lagMs?: never; language?: never; merges?: never; offsetMs?: never; planId?: never; retired?: never; rms?: never; rtf?: never; segments?: never; speakerId?: never; speakerSlot?: never; speakers?: never; totalAudioMs?: never; totalSegments?: never } | 
 /**  The pipeline was paused. Audio frames are discarded until resumed. */
 ({ type: "paused"; 
 /**  Session id. */
-sessionId: StreamingSessionId }) & { chunkIndex?: never; chunks?: never; created?: never; durationMs?: never; inputFormat?: never; language?: never; merges?: never; message?: never; offsetMs?: never; planId?: never; retired?: never; rms?: never; rtf?: never; segments?: never; speakerId?: never; speakerSlot?: never; speakers?: never; totalAudioMs?: never; totalSegments?: never } | 
+sessionId: StreamingSessionId }) & { backlogMs?: never; chunkIndex?: never; chunks?: never; created?: never; durationMs?: never; inputFormat?: never; lagMs?: never; language?: never; merges?: never; message?: never; offsetMs?: never; planId?: never; retired?: never; rms?: never; rtf?: never; segments?: never; speakerId?: never; speakerSlot?: never; speakers?: never; totalAudioMs?: never; totalSegments?: never } | 
 /**  The pipeline was resumed after a pause. */
 ({ type: "resumed"; 
 /**  Session id. */
-sessionId: StreamingSessionId }) & { chunkIndex?: never; chunks?: never; created?: never; durationMs?: never; inputFormat?: never; language?: never; merges?: never; message?: never; offsetMs?: never; planId?: never; retired?: never; rms?: never; rtf?: never; segments?: never; speakerId?: never; speakerSlot?: never; speakers?: never; totalAudioMs?: never; totalSegments?: never };
+sessionId: StreamingSessionId }) & { backlogMs?: never; chunkIndex?: never; chunks?: never; created?: never; durationMs?: never; inputFormat?: never; lagMs?: never; language?: never; merges?: never; message?: never; offsetMs?: never; planId?: never; retired?: never; rms?: never; rtf?: never; segments?: never; speakerId?: never; speakerSlot?: never; speakers?: never; totalAudioMs?: never; totalSegments?: never } | 
+/**
+ *  How far transcription runs behind capture. Emitted after every
+ *  chunk or skipped span, so the UI can tell a slow transcriber
+ *  (growing lag, no audio lost) apart from a stalled one. Not
+ *  persisted.
+ */
+({ type: "progress"; 
+/**  Session id. */
+sessionId: StreamingSessionId; 
+/**
+ *  Active (non-paused) capture time minus the session audio
+ *  already emitted, in milliseconds; never negative.
+ */
+lagMs: number; 
+/**
+ *  Captured audio queued for the pipeline but not yet buffered
+ *  for chunking, in milliseconds.
+ */
+backlogMs: number }) & { chunkIndex?: never; chunks?: never; created?: never; durationMs?: never; inputFormat?: never; language?: never; merges?: never; message?: never; offsetMs?: never; planId?: never; retired?: never; rms?: never; rtf?: never; segments?: never; speakerId?: never; speakerSlot?: never; speakers?: never; totalAudioMs?: never; totalSegments?: never };
 
 /* Tauri Specta runtime */
 async function typedError<T, E>(result: Promise<T>): Promise<{ status: "ok"; data: T } | { status: "error"; error: E }> {

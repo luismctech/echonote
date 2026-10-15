@@ -38,29 +38,34 @@
 //! Pausing flushes the buffered audio first; paused audio is not part
 //! of session time.
 //!
-//! Backpressure: a single ASR call is in flight at a time. If the
-//! transcriber is slower than real time the next chunk waits — the UI
-//! sees this as growing latency rather than dropped audio. A drop
-//! policy can be added in Sprint 1 once metrics are wired.
+//! Backpressure: capture is read by its own task (see `read_capture`)
+//! into an unbounded queue, so the device is always drained promptly.
+//! A single ASR call is in flight at a time; if the transcriber is
+//! slower than real time the queue grows instead of the device
+//! dropping frames, and the lag is reported after every chunk as
+//! [`TranscriptEvent::Progress`]. On stop, the queued audio is still
+//! processed before `Stopped`.
 
 mod chunker;
 mod gain;
 mod refine;
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
+// Tokio's clock, so tests driving time see the same instants.
+use tokio::time::Instant;
 use tracing::{debug, error, info, warn};
 
 use chunker::{ChunkBounds, Cut, SpeechTimeline, TimedFrame};
 use echo_domain::{
-    AudioCapture, AudioFormat, AudioFrame, CaptureSpec, ChunkContext, Diarizer, DomainError,
-    Punctuator, RefineOutcome, Resampler, Sample, SpeakerId, SpeakerMerge, SpeakerRef, SpeakerSpan,
-    StreamingOptions, StreamingSessionId, TranscribeOptions, Transcriber, TranscriptEvent, Vad,
-    VoiceState,
+    AudioCapture, AudioFormat, AudioFrame, AudioStream, CaptureSpec, ChunkContext, Diarizer,
+    DomainError, Punctuator, RefineOutcome, Resampler, Sample, SpeakerId, SpeakerMerge, SpeakerRef,
+    SpeakerSpan, StreamingOptions, StreamingSessionId, TranscribeOptions, Transcriber,
+    TranscriptEvent, Vad, VoiceState,
 };
 use gain::AutoGain;
 pub use refine::DEFAULT_REFINE_TIMEOUT;
@@ -68,10 +73,22 @@ use refine::{refine_at_stop, AttributionLedger};
 
 use crate::FrameSink;
 
-/// Capacity of the event channel. ~10 minutes of headroom for a
-/// 5-second chunk cadence; if consumers are slower than that we have a
-/// bigger problem.
-const EVENT_CHANNEL_CAPACITY: usize = 128;
+/// Capacity of the event channel. Large because stop drains the
+/// capture backlog (two events per chunk) while a caller may await
+/// [`StreamingHandle::stop`] without reading events; tokio allocates
+/// the slots lazily, so the headroom costs nothing until used.
+const EVENT_CHANNEL_CAPACITY: usize = 8_192;
+
+/// Lag above which the pipeline logs (once per episode) that
+/// transcription runs behind capture.
+const LAG_INFO_MS: u32 = 5_000;
+
+/// Lag above which the pipeline warns, at most once per
+/// [`LAG_WARN_INTERVAL`].
+const LAG_WARN_MS: u32 = 30_000;
+
+/// Minimum spacing between two lag warnings.
+const LAG_WARN_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Errors specific to the streaming pipeline.
 #[derive(Debug, thiserror::Error)]
@@ -357,12 +374,20 @@ impl StreamingHandle {
         Arc::clone(&self.paused)
     }
 
-    /// Signal the background task to stop and wait for it to drain.
-    /// Idempotent.
-    pub async fn stop(&mut self) -> Result<(), StreamingError> {
+    /// Signal the background task to stop without waiting for it.
+    /// Audio already captured is still processed, so events keep
+    /// arriving until `Stopped`; callers that consume events elsewhere
+    /// use this instead of [`stop`](Self::stop). Idempotent.
+    pub fn request_stop(&mut self) {
         if let Some(tx) = self.stop_tx.take() {
             let _ = tx.send(());
         }
+    }
+
+    /// Signal the background task to stop and wait for it to drain.
+    /// Idempotent.
+    pub async fn stop(&mut self) -> Result<(), StreamingError> {
+        self.request_stop();
         if let Some(join) = self.join.take() {
             join.await.map_err(|e| {
                 error!(error = %e, "streaming task panicked");
@@ -381,6 +406,80 @@ impl Drop for StreamingHandle {
     }
 }
 
+/// A captured frame, tagged with the pause state when it arrived.
+///
+/// The tag is taken at capture time because the pipeline may dequeue
+/// the frame much later: reading the flag then would drop audio
+/// captured before a pause, or keep audio captured during it.
+struct CapturedFrame {
+    samples: Vec<Sample>,
+    paused: bool,
+}
+
+/// Capture-side counters shared by [`read_capture`] and the pipeline.
+#[derive(Default)]
+struct CaptureMeter {
+    /// Wall-clock time covered by non-paused frames, in microseconds.
+    active_us: AtomicU64,
+    /// Samples queued by the reader and not yet taken by the pipeline.
+    backlog_samples: AtomicU64,
+}
+
+/// Drain `stream` into `frames` until stop is signalled (or the stop
+/// sender is dropped) or the stream ends, then stop the stream.
+///
+/// Runs in its own task so a slow transcriber never keeps the device
+/// queue from being emptied: capture adapters drop frames when their
+/// bounded queue is full. Every frame accounts its arrival gap as
+/// active time unless it was captured while paused.
+async fn read_capture(
+    mut stream: Box<dyn AudioStream>,
+    mut stop_rx: oneshot::Receiver<()>,
+    paused: Arc<AtomicBool>,
+    frames: mpsc::UnboundedSender<CapturedFrame>,
+    meter: Arc<CaptureMeter>,
+    session_id: StreamingSessionId,
+) {
+    let mut last_arrival = Instant::now();
+    loop {
+        let frame = tokio::select! {
+            biased;
+            _ = &mut stop_rx => {
+                debug!(%session_id, "stop signal received");
+                break;
+            }
+            frame = stream.next_frame() => match frame {
+                Some(f) => f,
+                None => {
+                    debug!(%session_id, "capture stream ended");
+                    break;
+                }
+            },
+        };
+        let now = Instant::now();
+        let paused = paused.load(Ordering::Acquire);
+        if !paused {
+            let gap = now.saturating_duration_since(last_arrival);
+            let gap_us = u64::try_from(gap.as_micros()).unwrap_or(u64::MAX);
+            meter.active_us.fetch_add(gap_us, Ordering::Relaxed);
+        }
+        last_arrival = now;
+        let len = frame.samples.len() as u64;
+        meter.backlog_samples.fetch_add(len, Ordering::Relaxed);
+        let captured = CapturedFrame {
+            samples: frame.samples,
+            paused,
+        };
+        if frames.send(captured).is_err() {
+            // The pipeline is gone; nothing will consume more audio.
+            break;
+        }
+    }
+    if let Err(e) = stream.stop().await {
+        warn!(error = %e, "stream.stop returned an error");
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_pipeline(
     capture: Arc<dyn AudioCapture>,
@@ -393,7 +492,7 @@ async fn run_pipeline(
     source: PipelineSource,
     options: StreamingOptions,
     events: mpsc::Sender<TranscriptEvent>,
-    mut stop_rx: oneshot::Receiver<()>,
+    stop_rx: oneshot::Receiver<()>,
     paused: Arc<AtomicBool>,
     refine_timeout: Duration,
     audio_sink: Option<Box<dyn FrameSink>>,
@@ -406,7 +505,7 @@ async fn run_pipeline(
         v.reset();
     }
 
-    let mut stream = match source {
+    let stream = match source {
         PipelineSource::Spec(spec) => match capture.start(spec).await {
             Ok(s) => s,
             Err(e) => {
@@ -451,6 +550,8 @@ async fn run_pipeline(
         epoch: 0,
         ledger: AttributionLedger::default(),
         audio_sink: audio_sink.map(std::sync::Mutex::new),
+        meter: Arc::new(CaptureMeter::default()),
+        lag_alarm: LagAlarm::default(),
     };
     info!(%session_id, speech_aligned = chunker.is_speech_aligned(), "chunking policy");
 
@@ -459,27 +560,29 @@ async fn run_pipeline(
     let mut auto_gain = options.auto_gain.then(|| AutoGain::new(format));
     info!(%session_id, auto_gain = auto_gain.is_some(), "capture level normalisation");
 
+    let (frame_tx, mut frame_rx) = mpsc::unbounded_channel();
+    let reader = tokio::spawn(read_capture(
+        stream,
+        stop_rx,
+        paused,
+        frame_tx,
+        Arc::clone(&emitter.meter),
+        session_id,
+    ));
+
     let mut buffer: Vec<Sample> = Vec::new();
     let pipeline_started = Instant::now();
     let mut was_paused = false;
 
-    loop {
-        let frame = tokio::select! {
-            biased;
-            _ = &mut stop_rx => {
-                debug!(%session_id, "stop signal received");
-                break;
-            }
-            frame = stream.next_frame() => match frame {
-                Some(f) => f,
-                None => {
-                    debug!(%session_id, "capture stream ended");
-                    break;
-                }
-            },
-        };
-
-        let is_paused = paused.load(Ordering::Acquire);
+    // Ends once the reader has stopped (stop signal or stream end) and
+    // every frame it queued has been processed, so no audio captured
+    // before stop is lost.
+    while let Some(frame) = frame_rx.recv().await {
+        emitter
+            .meter
+            .backlog_samples
+            .fetch_sub(frame.samples.len() as u64, Ordering::Relaxed);
+        let is_paused = frame.paused;
 
         // Emit state-change events exactly once per transition.
         if is_paused && !was_paused {
@@ -505,9 +608,8 @@ async fn run_pipeline(
             was_paused = false;
         }
 
-        // While paused, discard incoming audio so the pipeline doesn't
-        // accumulate a backlog that would explode on resume. Paused
-        // audio is not part of session time.
+        // Audio captured while paused is discarded: it is not part of
+        // session time.
         if is_paused {
             continue;
         }
@@ -521,8 +623,8 @@ async fn run_pipeline(
         chunker.drain_ready(&mut buffer, &mut emitter).await;
     }
 
-    if let Err(e) = stream.stop().await {
-        warn!(error = %e, "stream.stop returned an error");
+    if let Err(e) = reader.await {
+        error!(%session_id, error = %e, "capture reader task failed");
     }
     if let Some(gain) = &auto_gain {
         // Diagnostics: how much the capture level had to be raised.
@@ -839,6 +941,39 @@ struct ChunkEmitter {
     /// only makes the emitter `Sync` (it is borrowed across awaits); it
     /// is never contended.
     audio_sink: Option<std::sync::Mutex<Box<dyn FrameSink>>>,
+    /// Capture-side counters, for the lag reported after every chunk.
+    meter: Arc<CaptureMeter>,
+    /// Rate limit for the lag log lines.
+    lag_alarm: LagAlarm,
+}
+
+/// Rate limit for the "transcription is behind" log lines.
+#[derive(Default)]
+struct LagAlarm {
+    /// Set while the lag stays above [`LAG_INFO_MS`]; re-armed below it.
+    behind: bool,
+    /// Last warning, to space them [`LAG_WARN_INTERVAL`] apart.
+    last_warn: Option<Instant>,
+}
+
+impl LagAlarm {
+    fn observe(&mut self, session_id: StreamingSessionId, lag_ms: u32, backlog_ms: u32) {
+        if lag_ms <= LAG_INFO_MS {
+            self.behind = false;
+            return;
+        }
+        if !self.behind {
+            self.behind = true;
+            info!(%session_id, lag_ms, backlog_ms, "transcription is running behind capture");
+        }
+        let due = self
+            .last_warn
+            .is_none_or(|t| t.elapsed() >= LAG_WARN_INTERVAL);
+        if lag_ms > LAG_WARN_MS && due {
+            self.last_warn = Some(Instant::now());
+            warn!(%session_id, lag_ms, backlog_ms, "transcription is far behind capture");
+        }
+    }
 }
 
 impl ChunkEmitter {
@@ -853,6 +988,24 @@ impl ChunkEmitter {
         let channels = u64::from(self.format.channels.max(1));
         self.emitted_frames += raw.len() as u64 / channels;
         self.chunk_index = self.chunk_index.saturating_add(1);
+    }
+
+    /// Report how far the emitted audio trails active capture time.
+    async fn report_progress(&mut self) {
+        let active_ms = self.meter.active_us.load(Ordering::Relaxed) / 1_000;
+        let lag_ms = u32::try_from(active_ms.saturating_sub(u64::from(self.offset_ms())))
+            .unwrap_or(u32::MAX);
+        let backlog = self.meter.backlog_samples.load(Ordering::Relaxed);
+        let backlog_ms = samples_to_ms(usize::try_from(backlog).unwrap_or(usize::MAX), self.format);
+        self.lag_alarm.observe(self.session_id, lag_ms, backlog_ms);
+        let _ = self
+            .events
+            .send(TranscriptEvent::Progress {
+                session_id: self.session_id,
+                lag_ms,
+                backlog_ms,
+            })
+            .await;
     }
 
     /// Write `raw` to the audio sink as 16 kHz mono. A failed resample
@@ -905,6 +1058,7 @@ impl ChunkEmitter {
         debug!(session_id = %self.session_id, chunk_index = self.chunk_index, chunk_rms, "skipping silent chunk (speech-aligned VAD)");
         self.send_skipped(raw, chunk_rms).await;
         self.advance(raw);
+        self.report_progress().await;
     }
 
     async fn send_skipped(&self, raw: &[Sample], chunk_rms: f32) {
@@ -925,6 +1079,7 @@ impl ChunkEmitter {
         let segs = self.process_inner(gate, raw).await;
         self.total_segments = self.total_segments.saturating_add(segs);
         self.advance(raw);
+        self.report_progress().await;
     }
 
     /// Returns the number of segments emitted (0 when skipped/failed).

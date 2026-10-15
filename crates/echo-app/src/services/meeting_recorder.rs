@@ -356,6 +356,8 @@ impl MeetingRecorder {
             // Paused / Resumed are informational UI events — the
             // recorder doesn't persist anything for them.
             TranscriptEvent::Paused { .. } | TranscriptEvent::Resumed { .. } => Ok(None),
+            // Processing lag is live telemetry for the UI, not meeting data.
+            TranscriptEvent::Progress { .. } => Ok(None),
         }
     }
 

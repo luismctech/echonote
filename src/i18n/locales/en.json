@@ -47,6 +47,8 @@
     "fatal": "fatal:",
     "dismiss": "dismiss",
     "listening": "Listening… speak into the microphone.",
+    "lagBehind": "Processing {{seconds}} s behind",
+    "lagBehindHint": "Transcription is slower than real time on this machine; no audio is lost, the text catches up.",
     "focusMode": "Focus mode ({{shortcut}})",
     "toggleFocusMode": "Toggle focus mode",
     "pressStart": "Press Start or {{shortcut}} to begin a session.",

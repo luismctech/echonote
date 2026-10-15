@@ -272,6 +272,21 @@ pub enum TranscriptEvent {
         /// Session id.
         session_id: StreamingSessionId,
     },
+    /// How far transcription runs behind capture. Emitted after every
+    /// chunk or skipped span, so the UI can tell a slow transcriber
+    /// (growing lag, no audio lost) apart from a stalled one. Not
+    /// persisted.
+    #[serde(rename_all = "camelCase")]
+    Progress {
+        /// Session id.
+        session_id: StreamingSessionId,
+        /// Active (non-paused) capture time minus the session audio
+        /// already emitted, in milliseconds; never negative.
+        lag_ms: u32,
+        /// Captured audio queued for the pipeline but not yet buffered
+        /// for chunking, in milliseconds.
+        backlog_ms: u32,
+    },
 }
 
 /// A speaker referenced by a [`TranscriptEvent::Chunk`]: its stable id
@@ -345,7 +360,8 @@ impl TranscriptEvent {
             | Self::Stopped { session_id, .. }
             | Self::Failed { session_id, .. }
             | Self::Paused { session_id, .. }
-            | Self::Resumed { session_id, .. } => *session_id,
+            | Self::Resumed { session_id, .. }
+            | Self::Progress { session_id, .. } => *session_id,
         }
     }
 }
@@ -371,6 +387,21 @@ mod tests {
         let json = r#"{"language":null,"chunk_ms":5000,"silence_rms_threshold":0.02}"#;
         let opts: StreamingOptions = serde_json::from_str(json).unwrap();
         assert_eq!(opts, StreamingOptions::default());
+    }
+
+    #[test]
+    fn progress_serializes_lag_and_backlog_in_camel_case() {
+        let evt = TranscriptEvent::Progress {
+            session_id: StreamingSessionId::new(),
+            lag_ms: 12_000,
+            backlog_ms: 3_500,
+        };
+        let json = serde_json::to_value(&evt).unwrap();
+        assert_eq!(json["type"], "progress");
+        assert_eq!(json["lagMs"], 12_000);
+        assert_eq!(json["backlogMs"], 3_500);
+        let back: TranscriptEvent = serde_json::from_value(json).unwrap();
+        assert_eq!(back, evt);
     }
 
     #[test]
