@@ -62,6 +62,12 @@ export const commands = {
 	 *  behaviour for benchmarking.
 	 */
 	disableNeuralVad: boolean | null,
+	/**
+	 *  Keep this session's audio (16 kHz mono 16-bit WAV) next to the
+	 *  meeting database, as `recordings/<meetingId>.wav`, deleted with
+	 *  the meeting. `None`/`false` ⇒ no audio is kept (default).
+	 */
+	saveAudio: boolean | null,
 } | null, onEvent: Channel<TranscriptEvent_Deserialize>) => typedError<StreamingSessionId, IpcError>(__TAURI_INVOKE("start_streaming", { options, onEvent })),
 	/**
 	 *  Stop a previously-started streaming session. Idempotent: returns
@@ -131,8 +137,8 @@ export const commands = {
 	notes: Note[],
 }) & (MeetingSummary_Serialize) | null, IpcError>(__TAURI_INVOKE("get_meeting", { id })),
 	/**
-	 *  Delete a meeting and its segments. Returns `true` when the row
-	 *  existed and was removed.
+	 *  Delete a meeting, its segments and its saved audio, if any.
+	 *  Returns `true` when the row existed and was removed.
 	 */
 	deleteMeeting: (id: MeetingId) => typedError<boolean, IpcError>(__TAURI_INVOKE("delete_meeting", { id })),
 	/**
@@ -1215,6 +1221,12 @@ export type StartStreamingOptions = {
 	 *  behaviour for benchmarking.
 	 */
 	disableNeuralVad: boolean | null,
+	/**
+	 *  Keep this session's audio (16 kHz mono 16-bit WAV) next to the
+	 *  meeting database, as `recordings/<meetingId>.wav`, deleted with
+	 *  the meeting. `None`/`false` ⇒ no audio is kept (default).
+	 */
+	saveAudio: boolean | null,
 };
 
 /**

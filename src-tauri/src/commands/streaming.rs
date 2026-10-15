@@ -18,7 +18,7 @@ use echo_domain::{
     Vad,
 };
 
-use super::{AppState, SessionEntry};
+use super::{session_audio, AppState, SessionEntry};
 
 /// IPC mirror of [`echo_domain::AudioSource`] with camelCase naming
 /// so the frontend stays stylistically consistent (the domain enum
@@ -138,6 +138,10 @@ pub struct StartStreamingOptions {
     /// the model misclassifies as silence, or to reproduce pre-Silero
     /// behaviour for benchmarking.
     pub disable_neural_vad: Option<bool>,
+    /// Keep this session's audio (16 kHz mono 16-bit WAV) next to the
+    /// meeting database, as `recordings/<meetingId>.wav`, deleted with
+    /// the meeting. `None`/`false` ⇒ no audio is kept (default).
+    pub save_audio: Option<bool>,
 }
 
 /// Maximum number of concurrent streaming sessions allowed. A single
@@ -224,6 +228,15 @@ pub async fn start_streaming(
         tracing::info!("neural VAD disabled by request; using RMS gate");
     }
     pipeline = pipeline.with_punctuator(Arc::new(NaivePunctuator));
+    // The sink holds the audio until the drain publishes the meeting's
+    // audio path (see `session_audio`).
+    let audio_target = if opts.save_audio.unwrap_or(false) {
+        let target = session_audio::AudioTarget::default();
+        pipeline = pipeline.with_audio_sink(session_audio::deferred_sink(Arc::clone(&target)));
+        Some(target)
+    } else {
+        None
+    };
 
     // For Mixed source: start both captures directly so we can retain the
     // MixControls handles for live source toggling via set_mix_sources.
@@ -257,6 +270,7 @@ pub async fn start_streaming(
     let drain_handle = handle_arc.clone();
     let recorder = state.recorder.clone();
     let sessions_for_drain = state.sessions_handle();
+    let recordings_dir = state.recordings_dir.clone();
     let join = tokio::spawn(async move {
         let mut saw_terminal = false;
         loop {
@@ -267,6 +281,13 @@ pub async fn start_streaming(
                 Some(evt) => {
                     if let Err(e) = recorder.record(&evt).await {
                         tracing::warn!(error = %e, %session_id, "recorder.record failed");
+                    }
+                    // Publish the audio path as soon as the meeting exists.
+                    if let Some(target) = audio_target.as_ref().filter(|t| t.get().is_none()) {
+                        if let Some(id) = recorder.meeting_id_for_session(session_id).await {
+                            let _ =
+                                target.set(session_audio::meeting_audio_path(&recordings_dir, id));
+                        }
                     }
                     let terminal = matches!(
                         evt,

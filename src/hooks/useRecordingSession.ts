@@ -37,9 +37,10 @@ import {
   initialRecordingState,
   recordingReducer,
 } from "../state/recording";
-import type { AudioSourceKind, TranscriptEvent } from "../types/streaming";
+import type { TranscriptEvent } from "../types/streaming";
 import type { Note } from "../types/meeting";
 import type { StreamLine } from "../types/view";
+import { streamingOptionsFor, type StartOptions } from "../lib/streamingOptions";
 import {
   applyChunkSpeakers,
   applySpeakerMerges,
@@ -57,14 +58,7 @@ const ZERO_STATS: RecordingStats = { chunks: 0, skipped: 0, audioMs: 0 };
 /** Max transcript lines kept in memory during a live session. */
 const MAX_LIVE_LINES = 500;
 
-export type StartOptions = {
-  /** Whisper language hint. Empty string means "auto-detect". */
-  language: string;
-  /** Enable diarization for this session. */
-  diarize: boolean;
-  /** Audio capture source. Defaults to microphone. */
-  source?: AudioSourceKind;
-};
+export type { StartOptions } from "../lib/streamingOptions";
 
 export function useRecordingSession({
   backendReady,
@@ -289,7 +283,7 @@ export function useRecordingSession({
   }, [t, notifyRefinement]);
 
   const start = useCallback(
-    async ({ language, diarize, source }: StartOptions) => {
+    async (options: StartOptions) => {
       setLines([]);
       setStats(ZERO_STATS);
       setNotes([]);
@@ -297,17 +291,7 @@ export function useRecordingSession({
       meetingIdRef.current = null;
       dispatch({ type: "START_REQUESTED" });
       try {
-        const langHint = language.trim();
-        await startStreaming(
-          {
-            chunkMs: 5_000,
-            silenceRmsThreshold: 0.005,
-            diarize,
-            ...(langHint.length > 0 ? { language: langHint } : {}),
-            ...(source && source !== "microphone" ? { source } : {}),
-          },
-          handleEvent,
-        );
+        await startStreaming(streamingOptionsFor(options), handleEvent);
       } catch (err) {
         let msg: string;
         let code: ErrorCode | undefined;

@@ -1,7 +1,7 @@
 import { type RefObject, useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { ChevronDown, Globe, PanelLeft, Mic, MonitorSpeaker, Pause, Play, Users, X } from "lucide-react";
+import { ChevronDown, Globe, HardDrive, PanelLeft, Mic, MonitorSpeaker, Pause, Play, Users, X } from "lucide-react";
 
 import { LogoAnimated } from "../../components/Logo";
 import { ResizableHandleVertical } from "../../components/ResizableHandleVertical";
@@ -74,6 +74,8 @@ export function LivePane({
   canResume,
   diarize,
   onToggleDiarize,
+  saveAudio,
+  onToggleSaveAudio,
   language,
   onChangeLanguage,
   audioSource,
@@ -103,6 +105,8 @@ export function LivePane({
   canResume: boolean;
   diarize: boolean;
   onToggleDiarize: (next: boolean) => void;
+  saveAudio: boolean;
+  onToggleSaveAudio: (next: boolean) => void;
   language: string;
   onChangeLanguage: (next: string) => void;
   audioSource: AudioSourceKind;
@@ -301,6 +305,37 @@ export function LivePane({
               <span
                 className={`ml-0.5 inline-block h-2 w-2 rounded-full ${
                   diarize
+                    ? "bg-emerald-500 shadow-[0_0_0_2px_rgba(16,185,129,0.18)]"
+                    : "border border-content-placeholder/50"
+                }`}
+                aria-hidden
+              />
+            </button>
+
+            {/* Save audio */}
+            <button
+              type="button"
+              onClick={() => !toggleLocked && onToggleSaveAudio(!saveAudio)}
+              disabled={toggleLocked}
+              role="switch"
+              aria-checked={saveAudio}
+              title={t("live.saveAudioHint")}
+              className={`flex select-none items-center gap-1.5 px-2.5 py-1 transition-colors ${
+                toggleLocked ? "" : "cursor-pointer hover:bg-surface-sunken"
+              } ${
+                saveAudio
+                  ? "text-emerald-700 dark:text-emerald-400"
+                  : "text-content-secondary"
+              }`}
+            >
+              <HardDrive
+                className={`h-3.5 w-3.5 ${saveAudio ? "text-emerald-600 dark:text-emerald-400" : "text-content-tertiary"}`}
+                aria-hidden
+              />
+              <span>{t("live.saveAudio")}</span>
+              <span
+                className={`ml-0.5 inline-block h-2 w-2 rounded-full ${
+                  saveAudio
                     ? "bg-emerald-500 shadow-[0_0_0_2px_rgba(16,185,129,0.18)]"
                     : "border border-content-placeholder/50"
                 }`}

@@ -17,6 +17,7 @@ pub mod mcp;
 pub mod meetings;
 pub mod models;
 pub mod recommendation;
+pub(crate) mod session_audio;
 pub mod streaming;
 pub mod templates;
 
@@ -185,6 +186,9 @@ pub struct AppState {
     /// it falls back to the Tauri `appDataDir` so models are
     /// downloaded to a writable, OS-standard location.
     pub(crate) data_root: PathBuf,
+    /// Where sessions started with `saveAudio` keep their audio: the
+    /// `recordings` directory next to the meeting database.
+    pub(crate) recordings_dir: PathBuf,
 }
 
 use echo_domain::StreamingSessionId;
@@ -349,6 +353,10 @@ impl AppState {
             db_path = %db_path.display(),
             "echo-shell paths resolved"
         );
+        let recordings_dir = db_path
+            .parent()
+            .map_or_else(|| PathBuf::from("."), Path::to_path_buf)
+            .join(session_audio::RECORDINGS_DIR);
         let store = SqliteMeetingStore::open(&db_path).await.map_err(|e| {
             IpcError::storage(format!("open meeting store at {}: {e}", db_path.display()))
         })?;
@@ -379,6 +387,7 @@ impl AppState {
             vad: LazyModel::new(),
             in_flight_downloads: Arc::new(Mutex::new(std::collections::HashMap::new())),
             data_root,
+            recordings_dir,
         })
     }
 

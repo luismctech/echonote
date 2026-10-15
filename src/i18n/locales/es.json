@@ -32,6 +32,8 @@
     "langAuto": "Auto",
     "diarize": "Voces",
     "diarizeHint": "Identifica y separa a cada persona que habla",
+    "saveAudio": "Guardar audio",
+    "saveAudioHint": "Guarda el audio de esta sesión en este equipo (unos 115 MB por hora). Se borra junto con la reunión.",
     "starting": "Iniciando…",
     "start": "Iniciar",
     "recording": "Grabando…",

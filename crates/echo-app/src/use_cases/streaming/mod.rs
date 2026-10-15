@@ -22,7 +22,8 @@
 //!   the VAD runs incrementally over the buffer and chunks end at
 //!   speech pauses between [`StreamingOptions::min_chunk_ms`] and
 //!   [`StreamingOptions::max_chunk_ms`]; silence between utterances is
-//!   reported as skipped and never transcribed (see `chunker`).
+//!   reported as skipped and never transcribed, and so are chunks with
+//!   too little confident speech (see `chunker`).
 //! - **Fixed**: a chunk every [`StreamingOptions::chunk_ms`], gated by
 //!   the VAD per chunk when one is attached, by the RMS floor otherwise.
 //!
@@ -49,13 +50,15 @@ use tracing::{debug, error, info, warn};
 
 use chunker::{ChunkBounds, Cut, SpeechTimeline, TimedFrame};
 use echo_domain::{
-    AudioCapture, AudioFormat, CaptureSpec, ChunkContext, Diarizer, DomainError, Punctuator,
-    RefineOutcome, Resampler, Sample, SpeakerId, SpeakerMerge, SpeakerRef, SpeakerSpan,
+    AudioCapture, AudioFormat, AudioFrame, CaptureSpec, ChunkContext, Diarizer, DomainError,
+    Punctuator, RefineOutcome, Resampler, Sample, SpeakerId, SpeakerMerge, SpeakerRef, SpeakerSpan,
     StreamingOptions, StreamingSessionId, TranscribeOptions, Transcriber, TranscriptEvent, Vad,
     VoiceState,
 };
 pub use refine::DEFAULT_REFINE_TIMEOUT;
 use refine::{refine_at_stop, AttributionLedger};
+
+use crate::FrameSink;
 
 /// Capacity of the event channel. ~10 minutes of headroom for a
 /// 5-second chunk cadence; if consumers are slower than that we have a
@@ -110,6 +113,8 @@ pub struct StreamingPipeline {
     punctuator: Option<Arc<dyn Punctuator>>,
     /// Hard limit on the end-of-session diarization refine.
     refine_timeout: Duration,
+    /// Optional sink for the session audio (16 kHz mono).
+    audio_sink: Option<Box<dyn FrameSink>>,
 }
 
 impl StreamingPipeline {
@@ -127,6 +132,7 @@ impl StreamingPipeline {
             vad: None,
             punctuator: None,
             refine_timeout: DEFAULT_REFINE_TIMEOUT,
+            audio_sink: None,
         }
     }
 
@@ -168,6 +174,17 @@ impl StreamingPipeline {
     #[must_use]
     pub fn with_punctuator(mut self, punctuator: Arc<dyn Punctuator>) -> Self {
         self.punctuator = Some(punctuator);
+        self
+    }
+
+    /// Save the session audio to `sink`: every emitted chunk, speech and
+    /// skipped silence alike, resampled to 16 kHz mono, so time in the
+    /// saved audio equals session time (paused audio is excluded from
+    /// both). The sink is finished at stop. A write error drops the sink
+    /// with a warning; transcription carries on.
+    #[must_use]
+    pub fn with_audio_sink(mut self, sink: Box<dyn FrameSink>) -> Self {
+        self.audio_sink = Some(sink);
         self
     }
 
@@ -256,6 +273,7 @@ impl StreamingPipeline {
             stop_rx,
             Arc::clone(&paused),
             self.refine_timeout,
+            self.audio_sink,
         ));
 
         Ok(StreamingHandle {
@@ -370,6 +388,7 @@ async fn run_pipeline(
     mut stop_rx: oneshot::Receiver<()>,
     paused: Arc<AtomicBool>,
     refine_timeout: Duration,
+    audio_sink: Option<Box<dyn FrameSink>>,
 ) {
     info!(%session_id, vad_enabled = vad.is_some(), "streaming pipeline starting");
 
@@ -423,6 +442,7 @@ async fn run_pipeline(
         total_segments: 0,
         epoch: 0,
         ledger: AttributionLedger::default(),
+        audio_sink: audio_sink.map(std::sync::Mutex::new),
     };
     info!(%session_id, speech_aligned = chunker.is_speech_aligned(), "chunking policy");
 
@@ -485,6 +505,7 @@ async fn run_pipeline(
 
     // Flush whatever is still buffered as final, possibly-shorter chunks.
     chunker.flush(&mut buffer, &mut emitter).await;
+    emitter.finish_audio();
 
     // Offline diarization refinement (ADR 0001, D3). ASR runs inline per
     // chunk, so every segment was emitted before this point and the
@@ -638,6 +659,14 @@ const FORCED_CUT_LOOKBACK_MS: u32 = 1_500;
 /// clip the first phoneme.
 const SPEECH_PRE_ROLL_MS: u32 = 300;
 
+/// Least confident speech a speech-aligned chunk needs to reach the
+/// transcriber. Chunks below it are noise blips the VAD let through
+/// (one window over the start threshold plus ~0.5 s of hysteresis),
+/// on which Whisper hallucinates "Gracias.". In the 2026-10 chunking
+/// bench every such hallucination held at most 160 ms of confident
+/// speech and every real chunk at least 288 ms.
+const MIN_CONFIDENT_SPEECH_MS: u32 = 250;
+
 /// Cuts chunks at speech pauses. Runs the VAD incrementally over the
 /// buffer (in [`ANALYSIS_BLOCK_MS`] steps, in chronological order) and
 /// lets [`SpeechTimeline`] decide the cut points. Chunks it emits are
@@ -662,6 +691,7 @@ impl SpeechChunker {
                 max: samples(options.max_chunk_ms),
                 lookback: samples(FORCED_CUT_LOOKBACK_MS),
                 pre_roll: samples(SPEECH_PRE_ROLL_MS),
+                min_speech: samples(MIN_CONFIDENT_SPEECH_MS),
             },
             block: samples(ANALYSIS_BLOCK_MS).max(1),
             analyzed: 0,
@@ -779,6 +809,10 @@ struct ChunkEmitter {
     epoch: u16,
     /// Vector-free record of every attribution, for the stop refine.
     ledger: AttributionLedger,
+    /// Session audio sink; dropped after its first error. The mutex
+    /// only makes the emitter `Sync` (it is borrowed across awaits); it
+    /// is never contended.
+    audio_sink: Option<std::sync::Mutex<Box<dyn FrameSink>>>,
 }
 
 impl ChunkEmitter {
@@ -789,9 +823,54 @@ impl ChunkEmitter {
 
     /// Advance the session clock and chunk index past `raw`.
     fn advance(&mut self, raw: &[Sample]) {
+        self.save_audio(raw);
         let channels = u64::from(self.format.channels.max(1));
         self.emitted_frames += raw.len() as u64 / channels;
         self.chunk_index = self.chunk_index.saturating_add(1);
+    }
+
+    /// Write `raw` to the audio sink as 16 kHz mono. A failed resample
+    /// writes silence of the same duration so later audio stays aligned
+    /// with session time.
+    fn save_audio(&mut self, raw: &[Sample]) {
+        let Some(sink) = self.audio_sink.as_mut() else {
+            return;
+        };
+        let samples = self
+            .resampler
+            .to_whisper(raw, self.format)
+            .unwrap_or_else(|e| {
+                warn!(error = %e, "resampler failed; saving silence for this chunk");
+                let channels = u64::from(self.format.channels.max(1));
+                let frames = raw.len() as u64 / channels;
+                let rate = u64::from(self.format.sample_rate_hz.max(1));
+                let len = frames * u64::from(AudioFormat::WHISPER.sample_rate_hz) / rate;
+                vec![0.0; usize::try_from(len).unwrap_or(0)]
+            });
+        let frame = AudioFrame {
+            samples,
+            format: AudioFormat::WHISPER,
+            captured_at_ns: 0,
+        };
+        let sink = sink
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Err(e) = sink.accept(&frame) {
+            warn!(session_id = %self.session_id, error = %e, "saving session audio failed; audio is no longer saved");
+            self.audio_sink = None;
+        }
+    }
+
+    /// Finish the audio sink, if any (stop).
+    fn finish_audio(&mut self) {
+        if let Some(sink) = self.audio_sink.take() {
+            let mut sink = sink
+                .into_inner()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Err(e) = sink.finish() {
+                warn!(session_id = %self.session_id, error = %e, "finishing the session audio failed");
+            }
+        }
     }
 
     /// Report `raw` as skipped silence without transcribing it.
