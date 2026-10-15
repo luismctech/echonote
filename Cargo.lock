@@ -1554,7 +1554,6 @@ dependencies = [
  "echo-domain",
  "echo-llm",
  "echo-storage",
- "echo-telemetry",
  "futures",
  "keepawake",
  "libc",
@@ -1579,6 +1578,7 @@ dependencies = [
  "time",
  "tokio",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
