@@ -373,6 +373,69 @@ impl MeetingStore for SqliteMeetingStore {
         Ok(out)
     }
 
+    async fn delete_segments(
+        &self,
+        meeting_id: MeetingId,
+        segment_ids: &[SegmentId],
+    ) -> Result<u32, DomainError> {
+        let meeting = meeting_id.to_string();
+        // Dropping `tx` on any early `?` rolls every delete back.
+        let mut tx = self.pool.begin().await.map_err(map_sqlx("begin tx"))?;
+
+        let exists: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM meetings WHERE id = ?")
+            .bind(&meeting)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(map_sqlx("verify meeting"))?;
+        if exists == 0 {
+            return Err(DomainError::NotFound {
+                entity: "meeting",
+                id: meeting,
+            });
+        }
+
+        let mut deleted: u32 = 0;
+        for segment_id in segment_ids {
+            let segment = segment_id.0.to_string();
+            let foreign: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM segments WHERE id = ? AND meeting_id <> ?",
+            )
+            .bind(&segment)
+            .bind(&meeting)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(map_sqlx("verify segment ownership"))?;
+            if foreign > 0 {
+                return Err(DomainError::Invariant(format!(
+                    "segment {segment} is not part of meeting {meeting}"
+                )));
+            }
+            // The `segments_ad` trigger removes the text from the FTS index.
+            let result = sqlx::query("DELETE FROM segments WHERE id = ? AND meeting_id = ?")
+                .bind(&segment)
+                .bind(&meeting)
+                .execute(&mut *tx)
+                .await
+                .map_err(map_sqlx("delete segment"))?;
+            deleted += u32::try_from(result.rows_affected()).unwrap_or(u32::MAX);
+        }
+
+        sqlx::query(
+            r#"UPDATE meetings
+                  SET segment_count = (SELECT COUNT(*) FROM segments WHERE meeting_id = ?)
+                WHERE id = ?"#,
+        )
+        .bind(&meeting)
+        .bind(&meeting)
+        .execute(&mut *tx)
+        .await
+        .map_err(map_sqlx("update segment_count"))?;
+
+        tx.commit().await.map_err(map_sqlx("commit tx"))?;
+        debug!(%meeting_id, deleted, "segments deleted");
+        Ok(deleted)
+    }
+
     async fn rename_meeting(
         &self,
         meeting_id: MeetingId,
@@ -1804,6 +1867,84 @@ mod tests {
                 .await,
             Err(DomainError::NotFound { .. })
         ));
+    }
+
+    // ---------- Segment deletion (user transcript corrections) -----------
+
+    #[tokio::test]
+    async fn delete_segments_removes_rows_count_and_search_text() {
+        let store = SqliteMeetingStore::open_in_memory().await.unwrap();
+        let (id, a, b, seg_a, seg_b) = seed_two_speakers(&store, None, Some("Ana")).await;
+        assert_eq!(store.search("dos", 10).await.unwrap().len(), 1);
+
+        assert_eq!(store.delete_segments(id, &[seg_b.id]).await.unwrap(), 1);
+
+        let full = store.get(id).await.unwrap().unwrap();
+        assert_eq!(
+            full.segments.iter().map(|s| s.id).collect::<Vec<_>>(),
+            vec![seg_a.id]
+        );
+        assert_eq!(full.summary.segment_count, 1);
+        assert!(
+            store.search("dos", 10).await.unwrap().is_empty(),
+            "FTS index leaked after segment delete"
+        );
+        assert_eq!(store.search("uno", 10).await.unwrap().len(), 1);
+        // A speaker left without segments keeps its row and label.
+        assert_eq!(
+            full.speakers
+                .iter()
+                .map(|s| (s.id, s.label.clone()))
+                .collect::<Vec<_>>(),
+            vec![(a.id, None), (b.id, Some("Ana".into()))]
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_segments_skips_already_deleted_ids() {
+        let store = SqliteMeetingStore::open_in_memory().await.unwrap();
+        let (id, _, _, seg_a, seg_b) = seed_two_speakers(&store, None, None).await;
+
+        assert_eq!(
+            store
+                .delete_segments(id, &[seg_a.id, seg_b.id])
+                .await
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            store
+                .delete_segments(id, &[seg_a.id, seg_b.id])
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(store.delete_segments(id, &[]).await.unwrap(), 0);
+        let full = store.get(id).await.unwrap().unwrap();
+        assert!(full.segments.is_empty());
+        assert_eq!(full.summary.segment_count, 0);
+    }
+
+    #[tokio::test]
+    async fn delete_segments_rejects_foreign_ids_and_writes_nothing() {
+        let store = SqliteMeetingStore::open_in_memory().await.unwrap();
+        let (id, _, _, seg_a, _) = seed_two_speakers(&store, None, None).await;
+        let (other, _, _, seg_x, _) = seed_two_speakers(&store, None, None).await;
+        let before = store.get(id).await.unwrap().unwrap();
+        let other_before = store.get(other).await.unwrap().unwrap();
+
+        assert!(matches!(
+            store.delete_segments(id, &[seg_a.id, seg_x.id]).await,
+            Err(DomainError::Invariant(_))
+        ));
+        assert_eq!(store.get(id).await.unwrap().unwrap(), before);
+        assert_eq!(store.get(other).await.unwrap().unwrap(), other_before);
+
+        assert!(matches!(
+            store.delete_segments(MeetingId::new(), &[seg_a.id]).await,
+            Err(DomainError::NotFound { .. })
+        ));
+        assert_eq!(store.get(id).await.unwrap().unwrap(), before);
     }
 
     // ---------- FTS5 search (Sprint 1 day 8) -------------------------------
