@@ -40,8 +40,8 @@ export function selectRange(
   const to = visibleIds.indexOf(id);
   if (from < 0 || to < 0) return toggleSegment(state, id);
   const selected = new Set(state.selected);
-  for (let i = Math.min(from, to); i <= Math.max(from, to); i++) {
-    selected.add(visibleIds[i]!);
+  for (const id of visibleIds.slice(Math.min(from, to), Math.max(from, to) + 1)) {
+    selected.add(id);
   }
   return { selected, anchor: state.anchor };
 }
