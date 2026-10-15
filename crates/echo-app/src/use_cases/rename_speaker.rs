@@ -155,6 +155,13 @@ mod tests {
             s.label = label.map(str::to_string);
             Ok(true)
         }
+        async fn delete_segments(
+            &self,
+            _: MeetingId,
+            _: &[echo_domain::SegmentId],
+        ) -> Result<u32, DomainError> {
+            unreachable!()
+        }
         async fn reassign_speakers(
             &self,
             _: MeetingId,

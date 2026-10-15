@@ -4,7 +4,10 @@ use tauri::State;
 
 use crate::ipc_error::IpcError;
 
-use echo_domain::{Meeting, MeetingId, MeetingSearchHit, MeetingSummary, Note, NoteId, SpeakerId};
+use echo_app::{CorrectMeeting, CorrectMeetingError};
+use echo_domain::{
+    Meeting, MeetingId, MeetingSearchHit, MeetingSummary, Note, NoteId, SegmentId, SpeakerId,
+};
 
 use super::{session_audio, AppState};
 
@@ -130,6 +133,72 @@ pub async fn rename_speaker(
         .ok_or_else(|| {
             IpcError::not_found(format!("meeting {meeting_id} disappeared after rename"))
         })
+}
+
+/// Map a correction failure to the IPC error the frontend expects.
+/// Lives here rather than in `ipc_error` because only these commands
+/// produce it.
+fn correction_error(e: CorrectMeetingError) -> IpcError {
+    match &e {
+        CorrectMeetingError::NotFound(_) => IpcError::not_found(e.to_string()),
+        CorrectMeetingError::Invalid(_) => IpcError::invalid_input(e.to_string()),
+        CorrectMeetingError::Storage(_) => IpcError::storage(e.to_string()),
+    }
+}
+
+/// Merge speaker `absorbed` into `surviving` in a saved meeting: all of
+/// its segments move to `surviving` and its row is removed. The survivor
+/// keeps its label, or inherits the absorbed label when it had none.
+/// Irreversible; the UI confirms first. Resolves to `true` when anything
+/// changed.
+#[tauri::command]
+#[specta::specta]
+pub async fn merge_meeting_speakers(
+    state: State<'_, AppState>,
+    meeting_id: MeetingId,
+    absorbed: SpeakerId,
+    surviving: SpeakerId,
+) -> Result<bool, IpcError> {
+    CorrectMeeting::new(state.store.clone())
+        .merge_speakers(meeting_id, absorbed, surviving)
+        .await
+        .map_err(correction_error)
+}
+
+/// Point the given segments of a saved meeting at `speaker_id`, or clear
+/// their speaker with `null`. All ids must belong to the meeting; a
+/// foreign id fails with `invalid_input` and writes nothing. Resolves to
+/// the number of segments whose speaker changed.
+#[tauri::command]
+#[specta::specta]
+pub async fn reassign_segments(
+    state: State<'_, AppState>,
+    meeting_id: MeetingId,
+    segment_ids: Vec<SegmentId>,
+    speaker_id: Option<SpeakerId>,
+) -> Result<u32, IpcError> {
+    CorrectMeeting::new(state.store.clone())
+        .reassign_segments(meeting_id, &segment_ids, speaker_id)
+        .await
+        .map_err(correction_error)
+}
+
+/// Delete segments of a saved meeting (search index and segment count
+/// stay consistent). Speakers left without segments are kept. A foreign
+/// id fails with `invalid_input` and deletes nothing; already-deleted ids
+/// are skipped. Irreversible; the UI confirms first. Resolves to the
+/// number of segments deleted.
+#[tauri::command]
+#[specta::specta]
+pub async fn delete_segments(
+    state: State<'_, AppState>,
+    meeting_id: MeetingId,
+    segment_ids: Vec<SegmentId>,
+) -> Result<u32, IpcError> {
+    CorrectMeeting::new(state.store.clone())
+        .delete_segments(meeting_id, &segment_ids)
+        .await
+        .map_err(correction_error)
 }
 
 /// Add a timestamped note to a meeting. `timestamp_ms` is relative to

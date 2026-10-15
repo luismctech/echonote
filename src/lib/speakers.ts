@@ -76,6 +76,16 @@ export function chipLabel(speaker: Pick<Speaker, "slot" | "label">): string {
   return label && label.length > 0 ? label : shortTag(speaker.slot);
 }
 
+/**
+ * Menu text for a speaker: `Ana (S2)` when it has a name, otherwise
+ * its short tag `S2`, so same-named speakers stay distinguishable.
+ */
+export function speakerMenuLabel(speaker: Pick<Speaker, "slot" | "label">): string {
+  const label = chipLabel(speaker);
+  const tag = shortTag(speaker.slot);
+  return label === tag ? tag : `${label} (${tag})`;
+}
+
 /** Short tag used in dense rows (live transcript): `S1`, `S2`, … */
 export function shortTag(slot: number): string {
   return `S${(slot >>> 0) + 1}`;

@@ -97,7 +97,22 @@
     "copyTranscript": "Copy transcript",
     "copyNotes": "Copy notes",
     "editTitle": "Click to rename",
-    "sectionsNav": "Meeting sections"
+    "sectionsNav": "Meeting sections",
+    "filterStatus": "Showing {{shown}} of {{total}} segments",
+    "clearFilter": "Clear filter",
+    "select": "Select",
+    "selectionToolbar": "Selected segments",
+    "selectedCount_one": "{{count}} selected",
+    "selectedCount_other": "{{count}} selected",
+    "selectAllVisible": "Select all visible",
+    "assignTo": "Assign to ▾",
+    "noSpeaker": "No speaker",
+    "deleteSelected": "Delete ({{count}})",
+    "deleteTitle": "Delete segments",
+    "deleteConfirm_one": "Delete {{count}} segment? This cannot be undone.",
+    "deleteConfirm_other": "Delete {{count}} segments? This cannot be undone.",
+    "selectSegment": "Select segment at {{time}}",
+    "dismissError": "Dismiss"
   },
   "export": {
     "markdown": "Markdown (.md)",
@@ -110,7 +125,13 @@
     "label": "Speakers",
     "speaker": "Speaker {{n}}",
     "rename": "Rename {{name}}",
-    "slot": "Speaker slot {{n}}"
+    "slot": "Speaker slot {{n}}",
+    "filterBy": "Show only {{name}}",
+    "actions": "Actions for {{name}}",
+    "mergeInto": "Merge into…",
+    "mergeTitle": "Merge speakers",
+    "mergeConfirm": "Merge {{from}} into {{to}}? Its segments will move to {{to}}. This cannot be undone.",
+    "mergeAction": "Merge"
   },
   "summary": {
     "label": "Summary",
@@ -382,5 +403,8 @@
       "addNote": "Add note",
       "deleteNote": "Delete note"
     }
+  },
+  "confirm": {
+    "cancel": "Cancel"
   }
 }

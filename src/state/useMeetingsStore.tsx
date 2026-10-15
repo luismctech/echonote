@@ -54,12 +54,14 @@ import { isTauri } from "../ipc/isTauri";
 import { useIpcAction } from "../ipc/useIpcAction";
 import { useDebouncedValue } from "../lib/useDebouncedValue";
 import type {
+  Meeting,
   MeetingId,
   MeetingSearchHit,
   MeetingSummary,
 } from "../types/meeting";
 import type { SpeakerId } from "../types/speaker";
 import type { MainView } from "../types/view";
+import { withFreshMeeting } from "../lib/meetingView";
 import { errorMessage } from "../types/ipc-error";
 
 // ---------------------------------------------------------------------------
@@ -71,6 +73,8 @@ export type MeetingsContextValue = {
   meetings: MeetingSummary[];
   meetingsError: string | null;
   refreshMeetings: () => Promise<void>;
+  /** Show `fresh` if it is the open meeting (after an in-place edit). */
+  replaceMeeting: (fresh: Meeting) => void;
   // View / ad-hoc routing
   view: MainView;
   goToLive: () => void;
@@ -135,6 +139,10 @@ export function MeetingsProvider({ children }: { children: ReactNode }) {
   // View --------------------------------------------------------------------
   const [view, setView] = useState<MainView>({ kind: "live" });
   const goToLive = useCallback(() => setView({ kind: "live" }), []);
+  const replaceMeeting = useCallback(
+    (fresh: Meeting) => setView((prev) => withFreshMeeting(prev, fresh)),
+    [],
+  );
 
   // Meeting actions (open / rename / delete) compose useMeetingDetail.
   const { openMeeting, renameMeetingAction, renameSpeakerAction, deleteMeetingAction } =
@@ -197,6 +205,7 @@ export function MeetingsProvider({ children }: { children: ReactNode }) {
       meetings,
       meetingsError,
       refreshMeetings,
+      replaceMeeting,
       view,
       goToLive,
       goToMeeting: openMeeting,
@@ -216,6 +225,7 @@ export function MeetingsProvider({ children }: { children: ReactNode }) {
       meetings,
       meetingsError,
       refreshMeetings,
+      replaceMeeting,
       view,
       goToLive,
       openMeeting,
