@@ -267,8 +267,19 @@ impl AppState {
             // handle would block the drain task that consumes its events,
             // and a session behind real time first transcribes its queued
             // audio. The bounded wait below keeps quitting responsive.
-            entry.handle.lock().await.request_stop();
-            match tokio::time::timeout(SHUTDOWN_DRAIN_TIMEOUT, entry.join).await {
+            // A paused session emits no events, so its drain task sits in
+            // `next_event()` holding the handle: unpause it first (as
+            // `stop_streaming` does) and bound the lock wait as well.
+            entry
+                .paused
+                .store(false, std::sync::atomic::Ordering::Release);
+            let handle = entry.handle;
+            let join = entry.join;
+            let stop = async move {
+                handle.lock().await.request_stop();
+                join.await
+            };
+            match tokio::time::timeout(SHUTDOWN_DRAIN_TIMEOUT, stop).await {
                 Ok(Ok(())) => {}
                 Ok(Err(e)) => tracing::warn!(error = %e, "shutdown: drain task panicked"),
                 Err(_) => tracing::warn!(
