@@ -75,6 +75,13 @@ jobs:
     - name: Install sccache
       uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
 
+    # Cargo.toml optimizes third-party crates in the dev profile so that
+    # `pnpm tauri dev` keeps up with live audio. CI only needs the tests
+    # to pass: compiling every dependency optimized pushed this job from
+    # ~4 to 17-30 minutes. A Cargo config profile overrides Cargo.toml.
+    - name: Build dependencies unoptimized (CI only)
+      run: printf '[profile.dev.package."*"]\nopt-level = 0\n' >> "${CARGO_HOME:-$HOME/.cargo}/config.toml"
+
     - name: Cache cargo registry and target
       uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       with:
