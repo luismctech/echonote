@@ -2,7 +2,7 @@ import { memo } from "react";
 
 import { SpeakerChip } from "../../components/SpeakerChip";
 import { formatTimestamp } from "../../lib/format";
-import { shortTag } from "../../lib/speakers";
+import { chipLabel } from "../../lib/speakers";
 import type { Speaker } from "../../types/speaker";
 
 export type SegmentRowProps = {
@@ -27,7 +27,7 @@ export const SegmentRow = memo(function SegmentRow({
       {speaker && (
         <SpeakerChip
           slot={speaker.slot}
-          label={shortTag(speaker.slot)}
+          label={chipLabel(speaker)}
           compact
         />
       )}

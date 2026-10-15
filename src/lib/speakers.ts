@@ -67,6 +67,15 @@ export function displayName(
   return `Speaker ${speaker.slot + 1}`;
 }
 
+/**
+ * Chip text for a speaker in transcript rows: the name the user gave
+ * it, or its short `S{n}` tag while it has none.
+ */
+export function chipLabel(speaker: Pick<Speaker, "slot" | "label">): string {
+  const label = speaker.label?.trim();
+  return label && label.length > 0 ? label : shortTag(speaker.slot);
+}
+
 /** Short tag used in dense rows (live transcript): `S1`, `S2`, … */
 export function shortTag(slot: number): string {
   return `S${(slot >>> 0) + 1}`;

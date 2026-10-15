@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  chipLabel,
   displayName,
   indexSpeakers,
   paletteFor,
@@ -50,6 +51,17 @@ describe("displayName", () => {
 
   it("trims surrounding whitespace from labels", () => {
     expect(displayName(speaker("a", 0, "  Bob  "))).toBe("Bob");
+  });
+});
+
+describe("chipLabel", () => {
+  it("shows the name given to the speaker", () => {
+    expect(chipLabel(speaker("a", 2, "  Ana López "))).toBe("Ana López");
+  });
+
+  it("keeps the S tag while the speaker has no name", () => {
+    expect(chipLabel(speaker("a", 2, null))).toBe("S3");
+    expect(chipLabel(speaker("a", 0, "   "))).toBe("S1");
   });
 });
 
