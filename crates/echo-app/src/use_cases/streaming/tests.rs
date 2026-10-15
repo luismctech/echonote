@@ -1994,5 +1994,11 @@ async fn stop_without_reading_events_does_not_deadlock_on_a_large_backlog() {
         .expect("stop() deadlocked on a full event channel")
         .unwrap();
     let events = drain_until_stopped(&mut handle).await;
-    assert_eq!(stopped_totals(&events).1, 20_000);
+    // Stop discards whatever the stream had not yet handed over, so the
+    // total depends on scheduling; every frame that was read is processed
+    // (asserted exactly in `stop_processes_the_audio_still_queued`). This
+    // test only pins the absence of a deadlock and whole-frame accounting.
+    let total_ms = stopped_totals(&events).1;
+    assert!(total_ms > 0 && total_ms <= 20_000, "total {total_ms} ms");
+    assert_eq!(total_ms % 100, 0, "whole 100 ms frames, got {total_ms} ms");
 }
