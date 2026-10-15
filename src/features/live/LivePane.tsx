@@ -10,6 +10,8 @@ import type { AudioSourceKind } from "../../types/streaming";
 import type { Note } from "../../types/meeting";
 import type { StreamLine } from "../../types/view";
 import { lagIndicatorSeconds } from "../../lib/lag";
+import type { DraftLine } from "../../lib/draft";
+import { formatTimestamp } from "../../lib/format";
 import { NoteInput } from "./NoteInput";
 import { NoteList } from "./NoteList";
 import { TranscriptRow } from "./TranscriptRow";
@@ -67,6 +69,7 @@ export function LivePane({
   stream,
   stats,
   lines,
+  draft = null,
   notes,
   listRef,
   canStart,
@@ -99,6 +102,8 @@ export function LivePane({
   /** `lagMs`: latest processing lag reported by the backend. */
   stats: { chunks: number; skipped: number; audioMs: number; lagMs?: number };
   lines: StreamLine[];
+  /** Provisional text of the chunk still open, shown after `lines`. */
+  draft?: DraftLine | null;
   notes: Note[];
   listRef: RefObject<HTMLDivElement>;
   canStart: boolean;
@@ -466,7 +471,7 @@ export function LivePane({
               ref={listRef}
               className="min-h-0 flex-1 overflow-y-auto rounded-md border border-subtle bg-surface-sunken p-3 font-mono text-ui-sm leading-relaxed"
             >
-              {lines.length === 0 ? (
+              {lines.length === 0 && draft === null ? (
                 <div className="flex flex-col items-center justify-center gap-3 py-8">
                   <LogoAnimated size={48} className="opacity-40" />
                   <p className="text-ui-sm text-content-placeholder">
@@ -496,6 +501,21 @@ export function LivePane({
                     );
                   })}
                 </ul>
+              )}
+              {draft !== null && (
+                <p
+                  className="flex w-full items-baseline gap-3 italic text-content-placeholder"
+                  title={t("live.draftHint")}
+                  data-testid="live-draft"
+                >
+                  <span className="w-12 shrink-0 tabular-nums">
+                    {formatTimestamp(draft.offsetMs)}
+                  </span>
+                  <span className="flex-1 min-w-0 break-all">{draft.text}</span>
+                  <span className="shrink-0 not-italic text-micro uppercase">
+                    {t("live.draft")}
+                  </span>
+                </p>
               )}
             </div>
           </div>
