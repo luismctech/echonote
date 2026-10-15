@@ -3,15 +3,12 @@
  *
  * Wraps the three irreversible edits (merge two speakers, reassign
  * segments to a speaker, delete segments). Each action runs the IPC
- * call, reloads the meeting from disk and exposes the fresh aggregate
- * as `meeting`, so the view re-renders from the canonical state
- * instead of patching it optimistically.
- *
- * The reloaded meeting is kept as an override tied to the `base`
- * meeting it replaced: as soon as the store hands down a different
- * meeting (navigation, or a rename that returns the canonical row) the
- * override is dropped and the store's value wins again. The meetings
- * store stays the owner of the view; this hook never writes to it.
+ * call, reloads the meeting from disk and hands the fresh aggregate to
+ * `onReloaded`, which puts it into the meetings store. The store stays
+ * the single owner of the view, so later actions that build on its
+ * copy (e.g. a title rename) never resurrect pre-edit data. The reload
+ * also runs when an edit fails, because a multi-step edit may have
+ * been partly saved.
  *
  * Errors are kept inline (`error`) for the meeting they happened on;
  * actions resolve to `true` on success so callers can clear their
@@ -29,15 +26,14 @@ import { userErrorMessage } from "../types/ipc-error";
 
 export function useSpeakerTools(
   base: Meeting | null,
-  /** Called after a successful edit (e.g. refresh the sidebar counts). */
-  onEdited?: () => Promise<void> | void,
+  /** Receives the meeting reloaded after an edit attempt. */
+  onReloaded?: (fresh: Meeting) => Promise<void> | void,
 ) {
   const { t } = useTranslation();
-  const [override, setOverride] = useState<{ base: Meeting; meeting: Meeting } | null>(null);
   const [failure, setFailure] = useState<{ meetingId: MeetingId; message: string } | null>(null);
   const [busy, setBusy] = useState(false);
 
-  const meeting = override && override.base === base ? override.meeting : base;
+  const meeting = base;
   const error = failure && failure.meetingId === base?.id ? failure.message : null;
 
   const run = useCallback(
@@ -46,20 +42,24 @@ export function useSpeakerTools(
       const meetingId = base.id;
       setBusy(true);
       setFailure(null);
+      let ok = false;
       try {
         await op(meetingId);
-        const fresh = await getMeeting(meetingId);
-        if (fresh) setOverride({ base, meeting: fresh });
-        void onEdited?.();
-        return true;
+        ok = true;
       } catch (err) {
         setFailure({ meetingId, message: userErrorMessage(err, t) });
-        return false;
+      }
+      try {
+        const fresh = await getMeeting(meetingId);
+        if (fresh) await onReloaded?.(fresh);
+      } catch (err) {
+        if (ok) setFailure({ meetingId, message: userErrorMessage(err, t) });
       } finally {
         setBusy(false);
       }
+      return ok;
     },
-    [base, onEdited, t],
+    [base, onReloaded, t],
   );
 
   /** Fold `absorbed` into `surviving`; the absorbed speaker disappears. */

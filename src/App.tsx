@@ -36,6 +36,7 @@ import { useOnboardingState } from "./hooks/useOnboardingState";
 import { useRecordingSession } from "./hooks/useRecordingSession";
 import { useMeetings } from "./state/useMeetingsStore";
 import { errorMessage } from "./types/ipc-error";
+import type { Meeting } from "./types/meeting";
 
 function dotColor(downloading: boolean, allGood: boolean): string {
   if (downloading) return "animate-pulse bg-blue-500";
@@ -80,7 +81,15 @@ export function App() {
   const toast = useToast();
   const { completed: onboardingDone, markComplete, reset: resetOnboarding } = useOnboardingState();
   const probe = useHealthProbe();
-  const { goToLive, refreshMeetings, view, renameSpeaker, renameMeeting } = useMeetings();
+  const { goToLive, refreshMeetings, replaceMeeting, view, renameSpeaker, renameMeeting } =
+    useMeetings();
+  const onMeetingEdited = useCallback(
+    (fresh: Meeting) => {
+      replaceMeeting(fresh);
+      void refreshMeetings();
+    },
+    [replaceMeeting, refreshMeetings],
+  );
 
   // Ref-based callback so useRecordingSession can open the models
   // panel even though the state is declared after the hook.
@@ -335,7 +344,7 @@ export function App() {
               view={view}
               onRenameSpeaker={renameSpeaker}
               onRenameMeeting={renameMeeting}
-              onMeetingEdited={refreshMeetings}
+              onMeetingEdited={onMeetingEdited}
             />
           )}
         </section>

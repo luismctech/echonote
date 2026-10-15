@@ -32,7 +32,7 @@ import {
   pruneSpeakerFilter,
   toggleSpeaker,
 } from "../../lib/speakerFilter";
-import type { Note, NoteId } from "../../types/meeting";
+import type { Meeting, Note, NoteId } from "../../types/meeting";
 import type { Speaker } from "../../types/speaker";
 import type { SegmentId } from "../../types/chat";
 import type { SpeakerId } from "../../types/speaker";
@@ -130,7 +130,8 @@ export function MeetingDetail({
   ) => Promise<void>;
   onRenameMeeting: (title: string) => Promise<void>;
   /** Called after a speaker merge or a segment edit (refresh the list). */
-  onMeetingEdited?: () => Promise<void>;
+  /** Receives the meeting reloaded after a speaker or segment edit. */
+  onMeetingEdited?: (fresh: Meeting) => Promise<void> | void;
 }>) {
   const meetingId = view.kind === "meeting" ? view.id : null;
   const summaryState = useMeetingSummary(meetingId);
@@ -150,8 +151,8 @@ export function MeetingDetail({
     setSplitRatio(Math.min(SPLIT_MAX, Math.max(SPLIT_MIN, r)));
   }, []);
 
-  // Merge / reassign / delete reload the meeting and expose the
-  // freshest copy as `freshMeeting` (falls back to the store's `view.meeting`).
+  // Merge / reassign / delete reload the meeting and hand it to the
+  // store through `onMeetingEdited`, so `view.meeting` is always current.
   const {
     meeting: freshMeeting,
     busy: applyingEdit,
