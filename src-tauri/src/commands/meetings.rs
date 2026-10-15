@@ -6,7 +6,7 @@ use crate::ipc_error::IpcError;
 
 use echo_domain::{Meeting, MeetingId, MeetingSearchHit, MeetingSummary, Note, NoteId, SpeakerId};
 
-use super::AppState;
+use super::{session_audio, AppState};
 
 /// List meetings, newest first.
 #[tauri::command]
@@ -37,16 +37,19 @@ pub async fn get_meeting(
         .map_err(|e| IpcError::storage(format!("get meeting: {e}")))
 }
 
-/// Delete a meeting and its segments. Returns `true` when the row
-/// existed and was removed.
+/// Delete a meeting, its segments and its saved audio, if any.
+/// Returns `true` when the row existed and was removed.
 #[tauri::command]
 #[specta::specta]
 pub async fn delete_meeting(state: State<'_, AppState>, id: MeetingId) -> Result<bool, IpcError> {
-    state
+    let deleted = state
         .store
         .delete(id)
         .await
-        .map_err(|e| IpcError::storage(format!("delete meeting: {e}")))
+        .map_err(|e| IpcError::storage(format!("delete meeting: {e}")))?;
+    session_audio::delete_meeting_audio(&state.recordings_dir, id)
+        .map_err(|e| IpcError::storage(format!("delete meeting audio: {e}")))?;
+    Ok(deleted)
 }
 
 /// Full-text search over segment text. Returns one hit per meeting,

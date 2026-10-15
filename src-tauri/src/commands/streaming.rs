@@ -18,7 +18,7 @@ use echo_domain::{
     Vad,
 };
 
-use super::{AppState, SessionEntry};
+use super::{session_audio, AppState, SessionEntry};
 
 /// IPC mirror of [`echo_domain::AudioSource`] with camelCase naming
 /// so the frontend stays stylistically consistent (the domain enum
@@ -138,6 +138,10 @@ pub struct StartStreamingOptions {
     /// the model misclassifies as silence, or to reproduce pre-Silero
     /// behaviour for benchmarking.
     pub disable_neural_vad: Option<bool>,
+    /// Keep this session's audio (16 kHz mono 16-bit WAV) next to the
+    /// meeting database, as `recordings/<meetingId>.wav`, deleted with
+    /// the meeting. `None`/`false` ⇒ no audio is kept (default).
+    pub save_audio: Option<bool>,
 }
 
 /// Maximum number of concurrent streaming sessions allowed. A single
@@ -224,30 +228,51 @@ pub async fn start_streaming(
         tracing::info!("neural VAD disabled by request; using RMS gate");
     }
     pipeline = pipeline.with_punctuator(Arc::new(NaivePunctuator));
+    let partial_audio = if opts.save_audio.unwrap_or(false) {
+        let path = session_audio::partial_audio_path(&state.recordings_dir);
+        let sink = session_audio::create_sink(&path)
+            .map_err(|e| IpcError::storage(format!("cannot save session audio: {e}")))?;
+        pipeline = pipeline.with_audio_sink(sink);
+        Some(path)
+    } else {
+        None
+    };
+    // A session that fails to start keeps no audio file.
+    let discard_audio = |e: IpcError| {
+        if let Some(path) = &partial_audio {
+            if let Err(rm) = std::fs::remove_file(path) {
+                tracing::warn!(error = %rm, "could not remove the audio of a failed start");
+            }
+        }
+        e
+    };
 
     // For Mixed source: start both captures directly so we can retain the
     // MixControls handles for live source toggling via set_mix_sources.
     let (handle, mix_controls) = if source == AudioSource::Mixed {
-        let (stream, controls) = state.capture.start_mixed(spec).await.map_err(|e| {
-            IpcError::new(
-                ErrorCode::Audio,
-                format!("failed to start mixed capture: {e}"),
-            )
-        })?;
+        let (stream, controls) = state
+            .capture
+            .start_mixed(spec)
+            .await
+            .map_err(|e| {
+                IpcError::new(
+                    ErrorCode::Audio,
+                    format!("failed to start mixed capture: {e}"),
+                )
+            })
+            .map_err(discard_audio)?;
         let handle = pipeline
             .start_with_stream(stream, streaming_options)
             .await
-            .map_err(|e| {
-                IpcError::new(ErrorCode::Audio, format!("failed to start streaming: {e}"))
-            })?;
+            .map_err(|e| IpcError::new(ErrorCode::Audio, format!("failed to start streaming: {e}")))
+            .map_err(discard_audio)?;
         (handle, Some(controls))
     } else {
         let handle = pipeline
             .start_with_spec(spec, streaming_options)
             .await
-            .map_err(|e| {
-                IpcError::new(ErrorCode::Audio, format!("failed to start streaming: {e}"))
-            })?;
+            .map_err(|e| IpcError::new(ErrorCode::Audio, format!("failed to start streaming: {e}")))
+            .map_err(discard_audio)?;
         (handle, None)
     };
     let session_id = handle.session_id();
@@ -257,8 +282,10 @@ pub async fn start_streaming(
     let drain_handle = handle_arc.clone();
     let recorder = state.recorder.clone();
     let sessions_for_drain = state.sessions_handle();
+    let recordings_dir = state.recordings_dir.clone();
     let join = tokio::spawn(async move {
         let mut saw_terminal = false;
+        let mut meeting_id = None;
         loop {
             let mut guard = drain_handle.lock().await;
             let evt = guard.next_event().await;
@@ -267,6 +294,9 @@ pub async fn start_streaming(
                 Some(evt) => {
                     if let Err(e) = recorder.record(&evt).await {
                         tracing::warn!(error = %e, %session_id, "recorder.record failed");
+                    }
+                    if partial_audio.is_some() && meeting_id.is_none() {
+                        meeting_id = recorder.meeting_id_for_session(session_id).await;
                     }
                     let terminal = matches!(
                         evt,
@@ -298,6 +328,20 @@ pub async fn start_streaming(
             };
             if let Err(e) = recorder.record(&synth).await {
                 tracing::warn!(error = %e, %session_id, "recorder.record(synth Failed) failed");
+            }
+        }
+        // The pipeline finished the audio file before its terminal event.
+        if let Some(partial) = &partial_audio {
+            match session_audio::finalize(&recordings_dir, partial, meeting_id) {
+                Ok(Some(path)) => {
+                    tracing::info!(%session_id, path = %path.display(), "session audio saved")
+                }
+                Ok(None) => {
+                    tracing::warn!(%session_id, "no meeting was recorded; session audio discarded")
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, %session_id, "could not finalize the session audio")
+                }
             }
         }
         if let Ok(mut map) = sessions_for_drain.lock() {
