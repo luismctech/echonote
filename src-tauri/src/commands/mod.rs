@@ -263,17 +263,18 @@ impl AppState {
             tracing::info!(pending, "shutdown: stopping in-flight sessions");
         }
         for entry in entries {
-            let mut handle = entry.handle.lock().await;
-            if let Err(e) = handle.stop().await {
-                tracing::warn!(error = %e, "shutdown: stop_streaming failed");
-            }
-            drop(handle);
-            match tokio::time::timeout(std::time::Duration::from_secs(5), entry.join).await {
+            // Only signal the stop: awaiting the pipeline while holding the
+            // handle would block the drain task that consumes its events,
+            // and a session behind real time first transcribes its queued
+            // audio. The bounded wait below keeps quitting responsive.
+            entry.handle.lock().await.request_stop();
+            match tokio::time::timeout(SHUTDOWN_DRAIN_TIMEOUT, entry.join).await {
                 Ok(Ok(())) => {}
                 Ok(Err(e)) => tracing::warn!(error = %e, "shutdown: drain task panicked"),
-                Err(_) => {
-                    tracing::warn!("shutdown: drain task did not finish within 5s; abandoning")
-                }
+                Err(_) => tracing::warn!(
+                    timeout_s = SHUTDOWN_DRAIN_TIMEOUT.as_secs(),
+                    "shutdown: session did not finish in time; abandoning its queued audio"
+                ),
             }
         }
         // Flush WAL to the main database file before _exit() skips
@@ -643,6 +644,11 @@ impl AppState {
             .map(|arc| arc as Arc<dyn Transcriber>)
     }
 }
+
+/// Longest wait per in-flight session when the app quits: enough to
+/// transcribe a modest backlog and run the stop-time refine (up to 20 s),
+/// short enough that quitting never hangs.
+const SHUTDOWN_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 // ---------------------------------------------------------------------------
 // Path helpers (crate-internal, used by sub-modules via `super::`)
