@@ -6,6 +6,7 @@ import {
   indexSpeakers,
   paletteFor,
   shortTag,
+  speakerMenuLabel,
   speakersWithSegments,
   SPEAKER_PALETTE,
 } from "./speakers";
@@ -99,5 +100,16 @@ describe("speakersWithSegments", () => {
 
   it("returns nothing when no segment has a speaker", () => {
     expect(speakersWithSegments([speaker("a", 0, null)], [seg(null)])).toEqual([]);
+  });
+});
+
+describe("speakerMenuLabel", () => {
+  it("shows the name with the tag when the speaker is named", () => {
+    expect(speakerMenuLabel(speaker("a", 1, "Ana"))).toBe("Ana (S2)");
+  });
+
+  it("shows only the tag for an anonymous speaker", () => {
+    expect(speakerMenuLabel(speaker("a", 4, null))).toBe("S5");
+    expect(speakerMenuLabel(speaker("a", 4, "  "))).toBe("S5");
   });
 });

@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::entities::meeting::{Meeting, MeetingId, MeetingSearchHit, MeetingSummary};
 use crate::entities::note::Note;
-use crate::entities::segment::Segment;
+use crate::entities::segment::{Segment, SegmentId};
 use crate::entities::speaker::{Speaker, SpeakerId};
 use crate::entities::streaming::{SegmentSpeaker, SpeakerRef, SpeakerRetirement};
 use crate::entities::summary::Summary;
@@ -176,6 +176,26 @@ pub trait MeetingStore: Send + Sync {
         meeting_id: MeetingId,
         plan: &SpeakerReassignment,
     ) -> Result<ReassignOutcome, DomainError>;
+
+    /// Delete segments of one meeting in a single all-or-nothing
+    /// transaction, used when the user trims a saved transcript.
+    ///
+    /// Keeps derived state consistent: the full-text index drops the
+    /// deleted text and the meeting's `segment_count` is recomputed.
+    /// Speakers left without segments are kept, like after
+    /// [`MeetingStore::merge_speakers`], so deleting text never destroys
+    /// a user label.
+    ///
+    /// Returns the number of rows deleted. Ids unknown to every meeting
+    /// (for example already deleted) are skipped, so a retry returns
+    /// `Ok(0)`. Returns [`DomainError::NotFound`] when the meeting does
+    /// not exist and [`DomainError::Invariant`] when an id belongs to
+    /// another meeting; nothing is deleted in either case.
+    async fn delete_segments(
+        &self,
+        meeting_id: MeetingId,
+        segment_ids: &[SegmentId],
+    ) -> Result<u32, DomainError>;
 
     /// Update the display title of a meeting. Returns `false` when
     /// the meeting id was not found.

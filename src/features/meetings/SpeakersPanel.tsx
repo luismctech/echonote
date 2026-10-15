@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useMemo, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { Segment } from "../../types/meeting";
@@ -6,7 +6,7 @@ import type { Speaker, SpeakerId } from "../../types/speaker";
 import { SpeakerEditor } from "./SpeakerEditor";
 
 /** Compute talk-time ms per speaker from segments. */
-function computeTalkTime(segments: Segment[]): Map<string, number> {
+function computeTalkTime(segments: readonly Segment[]): Map<string, number> {
   const map = new Map<string, number>();
   for (const seg of segments) {
     if (!seg.speakerId) continue;
@@ -17,17 +17,26 @@ function computeTalkTime(segments: Segment[]): Map<string, number> {
 }
 
 /**
- * List of diarized speakers with an inline rename input each. Saves
- * on Enter or blur; clearing the input reverts to anonymous.
+ * Diarized speakers of a meeting. Clicking a chip toggles it in the
+ * transcript filter (several may be selected); each chip keeps a
+ * rename action and its share of the talk time. `renderActions` adds
+ * per-speaker controls such as the merge menu.
  */
 export function SpeakersPanel({
   speakers,
   segments,
+  filter,
+  onToggleFilter,
   onRename,
+  renderActions,
 }: {
   speakers: Speaker[];
-  segments: Segment[];
+  segments: readonly Segment[];
+  /** Speaker ids currently filtering the transcript (empty = all). */
+  filter: ReadonlySet<SpeakerId>;
+  onToggleFilter: (speakerId: SpeakerId) => void;
   onRename: (speakerId: SpeakerId, label: string | null) => Promise<void>;
+  renderActions?: (speaker: Speaker) => ReactNode;
 }) {
   const { t } = useTranslation();
 
@@ -45,12 +54,17 @@ export function SpeakersPanel({
       {speakers.map((sp) => {
         const ms = talkTime.get(sp.id) ?? 0;
         const pct = totalMs > 0 ? Math.round((ms / totalMs) * 100) : 0;
+        const selected = filter.has(sp.id);
         return (
           <SpeakerEditor
             key={sp.id}
             speaker={sp}
             talkTimePct={pct}
+            selected={selected}
+            dimmed={filter.size > 0 && !selected}
+            onToggle={onToggleFilter}
             onRename={onRename}
+            actions={renderActions?.(sp)}
           />
         );
       })}

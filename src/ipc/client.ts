@@ -14,7 +14,7 @@
 
 import { Channel, invoke } from "@tauri-apps/api/core";
 
-import type { ChatEvent, ChatMessage } from "../types/chat";
+import type { ChatEvent, ChatMessage, SegmentId } from "../types/chat";
 import type { DownloadEvent, ModelInfo } from "../types/models";
 import type { HardwareProfile, ModelRecommendation } from "../types/hardware";
 import type { HealthStatus } from "../types/health";
@@ -182,6 +182,52 @@ export async function renameSpeaker(
     speakerId,
     label,
   });
+}
+
+/**
+ * Merge speaker `absorbed` into `surviving`: its segments move to
+ * `surviving` and its row is removed. The survivor keeps its label, or
+ * inherits the absorbed one when it had none. Irreversible. Resolves
+ * to `true` when anything changed.
+ */
+export async function mergeMeetingSpeakers(
+  meetingId: MeetingId,
+  absorbed: SpeakerId,
+  surviving: SpeakerId,
+): Promise<boolean> {
+  return invoke<boolean>("merge_meeting_speakers", {
+    meetingId,
+    absorbed,
+    surviving,
+  });
+}
+
+/**
+ * Point segments at `speakerId` (`null` clears their speaker). Every id
+ * must belong to the meeting, otherwise nothing is written. Resolves to
+ * the number of segments whose speaker changed.
+ */
+export async function reassignSegments(
+  meetingId: MeetingId,
+  segmentIds: SegmentId[],
+  speakerId: SpeakerId | null,
+): Promise<number> {
+  return invoke<number>("reassign_segments", {
+    meetingId,
+    segmentIds,
+    speakerId,
+  });
+}
+
+/**
+ * Delete segments of a saved meeting. Irreversible; already-deleted ids
+ * are skipped. Resolves to the number of segments deleted.
+ */
+export async function deleteSegments(
+  meetingId: MeetingId,
+  segmentIds: SegmentId[],
+): Promise<number> {
+  return invoke<number>("delete_segments", { meetingId, segmentIds });
 }
 
 // ---------------------------------------------------------------------------

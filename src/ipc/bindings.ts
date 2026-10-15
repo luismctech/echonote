@@ -154,6 +154,29 @@ export const commands = {
 	 */
 	renameSpeaker: (meetingId: MeetingId, speakerId: SpeakerId, label: string | null) => typedError<Meeting_Serialize, IpcError>(__TAURI_INVOKE("rename_speaker", { meetingId, speakerId, label })),
 	/**
+	 *  Merge speaker `absorbed` into `surviving` in a saved meeting: all of
+	 *  its segments move to `surviving` and its row is removed. The survivor
+	 *  keeps its label, or inherits the absorbed label when it had none.
+	 *  Irreversible; the UI confirms first. Resolves to `true` when anything
+	 *  changed.
+	 */
+	mergeMeetingSpeakers: (meetingId: MeetingId, absorbed: SpeakerId, surviving: SpeakerId) => typedError<boolean, IpcError>(__TAURI_INVOKE("merge_meeting_speakers", { meetingId, absorbed, surviving })),
+	/**
+	 *  Point the given segments of a saved meeting at `speaker_id`, or clear
+	 *  their speaker with `null`. All ids must belong to the meeting; a
+	 *  foreign id fails with `invalid_input` and writes nothing. Resolves to
+	 *  the number of segments whose speaker changed.
+	 */
+	reassignSegments: (meetingId: MeetingId, segmentIds: SegmentId[], speakerId: string | null) => typedError<number, IpcError>(__TAURI_INVOKE("reassign_segments", { meetingId, segmentIds, speakerId })),
+	/**
+	 *  Delete segments of a saved meeting (search index and segment count
+	 *  stay consistent). Speakers left without segments are kept. A foreign
+	 *  id fails with `invalid_input` and deletes nothing; already-deleted ids
+	 *  are skipped. Irreversible; the UI confirms first. Resolves to the
+	 *  number of segments deleted.
+	 */
+	deleteSegments: (meetingId: MeetingId, segmentIds: SegmentId[]) => typedError<number, IpcError>(__TAURI_INVOKE("delete_segments", { meetingId, segmentIds })),
+	/**
 	 *  Full-text search over segment text. Returns one hit per meeting,
 	 *  ordered by FTS5 BM25 rank (best match first). Empty / whitespace-
 	 *  only queries return an empty vec — the frontend wires this to
@@ -1744,8 +1767,10 @@ sessionId: StreamingSessionId }) & { backlogMs?: never; chunkIndex?: never; chun
 /**  Session id. */
 sessionId: StreamingSessionId; 
 /**
- *  Active (non-paused) capture time minus the session audio
- *  already emitted, in milliseconds; never negative.
+ *  Active (non-paused) capture time minus the audio the
+ *  pipeline has taken in (emitted or buffered for the open
+ *  chunk), in milliseconds; never negative. An open speech chunk
+ *  waiting for its pause is not lag.
  */
 lagMs: number; 
 /**
@@ -1927,8 +1952,10 @@ sessionId: StreamingSessionId }) & { backlogMs?: never; chunkIndex?: never; chun
 /**  Session id. */
 sessionId: StreamingSessionId; 
 /**
- *  Active (non-paused) capture time minus the session audio
- *  already emitted, in milliseconds; never negative.
+ *  Active (non-paused) capture time minus the audio the
+ *  pipeline has taken in (emitted or buffered for the open
+ *  chunk), in milliseconds; never negative. An open speech chunk
+ *  waiting for its pause is not lag.
  */
 lagMs: number; 
 /**
