@@ -219,7 +219,8 @@ fn start_capture(spec: &CaptureSpec) -> Result<StartedStream, DomainError> {
     let filter = SCContentFilter::create()
         .with_display(&display)
         .with_excluding_windows(&[])
-        .build();
+        .build()
+        .map_err(|e| DomainError::AudioCaptureFailed(format!("SCContentFilter: {e}")))?;
 
     // We honor the caller's requested sample rate / channel count when
     // possible. Whisper-target preferred_format (16 kHz mono) is below
@@ -309,9 +310,12 @@ impl SCStreamOutputTrait for AudioOutputHandler {
             return;
         }
 
-        let Some(buffer_list) = sample.audio_buffer_list() else {
-            warn!("SCK audio sample carried no buffer list");
-            return;
+        let buffer_list = match sample.audio_buffer_list() {
+            Ok(list) => list,
+            Err(status) => {
+                warn!(status, "SCK audio sample carried no buffer list");
+                return;
+            }
         };
 
         // ScreenCaptureKit always delivers float32 linear PCM. A single
@@ -369,8 +373,21 @@ fn run_capture_thread(
     let start = Instant::now();
     let handler = AudioOutputHandler { tx, format, start };
 
-    let mut stream = SCStream::new(&filter, &config);
-    stream.add_output_handler(handler, SCStreamOutputType::Audio);
+    let mut stream = match SCStream::new(&filter, &config) {
+        Ok(stream) => stream,
+        Err(e) => {
+            let _ = ready_tx.send(Err(DomainError::AudioCaptureFailed(format!(
+                "SCStream::new: {e}"
+            ))));
+            return;
+        }
+    };
+    if let Err(e) = stream.add_output_handler(handler, SCStreamOutputType::Audio) {
+        let _ = ready_tx.send(Err(DomainError::AudioCaptureFailed(format!(
+            "SCStream::add_output_handler: {e}"
+        ))));
+        return;
+    }
 
     if let Err(e) = stream.start_capture() {
         let _ = ready_tx.send(Err(DomainError::AudioCaptureFailed(format!(
