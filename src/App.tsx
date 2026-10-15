@@ -105,6 +105,8 @@ export function App() {
   // Diarize is opt-in to keep the existing whisper-only path unchanged
   // for users who haven't downloaded the embedder yet.
   const [diarize, setDiarize] = useState(false);
+  // Saving the audio is opt-in per session: it is private data.
+  const [saveAudio, setSaveAudio] = useState(false);
   const [language, setLanguage] = useState<string>("es");
   const [audioSource, setAudioSource] = useState<import("./types/streaming").AudioSourceKind>("microphone");
   const [micActive, setMicActive] = useState(true);
@@ -132,8 +134,8 @@ export function App() {
     goToLive();
     setMicActive(true);
     setSysActive(true);
-    await startRecording({ language, diarize, source: audioSource });
-  }, [goToLive, startRecording, language, diarize, audioSource]);
+    await startRecording({ language, diarize, saveAudio, source: audioSource });
+  }, [goToLive, startRecording, language, diarize, saveAudio, audioSource]);
 
   const handleToggleMic = useCallback(async (active: boolean) => {
     setMicActive(active);
@@ -306,6 +308,8 @@ export function App() {
               canResume={recording.canResume}
               diarize={diarize}
               onToggleDiarize={setDiarize}
+              saveAudio={saveAudio}
+              onToggleSaveAudio={setSaveAudio}
               language={language}
               onChangeLanguage={setLanguage}
               audioSource={audioSource}

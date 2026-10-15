@@ -49,6 +49,11 @@ export type StartStreamingOptions = {
    */
   diarize?: boolean;
   /**
+   * Keep this session's audio (16 kHz mono WAV) next to the meeting
+   * database; it is deleted with the meeting. Defaults to `false`.
+   */
+  saveAudio?: boolean;
+  /**
    * Override path to the speaker-embedder ONNX. Most callers should
    * leave this unset so the backend uses its configured default.
    */

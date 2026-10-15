@@ -32,6 +32,8 @@
     "langAuto": "Auto",
     "diarize": "Voices",
     "diarizeHint": "Identify and separate each person speaking",
+    "saveAudio": "Save audio",
+    "saveAudioHint": "Keep this session's audio on this computer (about 115 MB per hour). It is deleted with the meeting.",
     "starting": "Starting…",
     "start": "Start",
     "recording": "Recording…",
