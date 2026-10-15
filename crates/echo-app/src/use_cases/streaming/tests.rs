@@ -1511,3 +1511,55 @@ async fn audio_sink_skips_paused_audio() {
     assert_eq!(log.samples.len(), 2 * SEC);
     assert!(log.samples.iter().all(|&s| s != 0.25));
 }
+
+/// 440 Hz bursts at `voiced_rms` (200 ms on, 100 ms off, silent gaps),
+/// cut into 100 ms capture frames: speech-like dynamics at a level a
+/// quiet microphone delivers (-50 dBFS).
+fn quiet_speech_frames(seconds: usize, voiced_rms: f32) -> Vec<Vec<f32>> {
+    let amplitude = voiced_rms * std::f32::consts::SQRT_2;
+    let samples: Vec<f32> = (0..seconds * 16_000)
+        .map(|i| {
+            if i % 4_800 < 3_200 {
+                amplitude * (2.0 * std::f32::consts::PI * 440.0 * i as f32 / 16_000.0).sin()
+            } else {
+                0.0
+            }
+        })
+        .collect();
+    samples.chunks(1_600).map(<[f32]>::to_vec).collect()
+}
+
+async fn run_quiet_speech(auto_gain: bool) -> (usize, usize) {
+    let capture = FakeCapture::new(AudioFormat::WHISPER, quiet_speech_frames(6, 0.003));
+    let resampler = Arc::new(PassThroughResampler) as Arc<dyn Resampler>;
+    let pipeline = StreamingPipeline::new(capture, resampler, FakeTranscriber::new());
+    let mut handle = pipeline
+        .start(StreamingOptions {
+            chunk_ms: 1_000,
+            auto_gain,
+            ..StreamingOptions::default()
+        })
+        .await
+        .unwrap();
+    let events = drain_until_stopped(&mut handle).await;
+    let count = |f: fn(&TranscriptEvent) -> bool| events.iter().filter(|e| f(e)).count();
+    (
+        count(|e| matches!(e, TranscriptEvent::Chunk { .. })),
+        count(|e| matches!(e, TranscriptEvent::Skipped { .. })),
+    )
+}
+
+#[tokio::test]
+async fn auto_gain_lets_quiet_speech_past_the_rms_gate() {
+    // Default RMS gate (0.02) against 0.003 RMS speech: only the first
+    // second, while the gain is still rising, may be skipped.
+    let (chunks, skipped) = run_quiet_speech(true).await;
+    assert!(chunks >= 5, "chunks {chunks}, skipped {skipped}");
+    assert!(skipped <= 1, "chunks {chunks}, skipped {skipped}");
+}
+
+#[tokio::test]
+async fn without_auto_gain_quiet_speech_is_skipped_as_before() {
+    let (chunks, skipped) = run_quiet_speech(false).await;
+    assert_eq!((chunks, skipped), (0, 6));
+}

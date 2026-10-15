@@ -10,6 +10,12 @@
 //!                                   (mpsc channel)
 //! ```
 //!
+//! When [`StreamingOptions::auto_gain`] is set (the default), every
+//! captured frame first goes through an automatic gain stage (see
+//! `gain`) that raises quiet capture to a normal speech level, so the
+//! VAD, the RMS gate, the transcriber, the diarizer and the saved audio
+//! all see normalised audio.
+//!
 //! The pipeline buffers raw frames at the device sample rate and cuts
 //! them into chunks, runs each chunk through the resampler and the
 //! transcriber, then emits a [`TranscriptEvent::Chunk`] (or
@@ -38,6 +44,7 @@
 //! policy can be added in Sprint 1 once metrics are wired.
 
 mod chunker;
+mod gain;
 mod refine;
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -55,6 +62,7 @@ use echo_domain::{
     StreamingOptions, StreamingSessionId, TranscribeOptions, Transcriber, TranscriptEvent, Vad,
     VoiceState,
 };
+use gain::AutoGain;
 pub use refine::DEFAULT_REFINE_TIMEOUT;
 use refine::{refine_at_stop, AttributionLedger};
 
@@ -446,6 +454,11 @@ async fn run_pipeline(
     };
     info!(%session_id, speech_aligned = chunker.is_speech_aligned(), "chunking policy");
 
+    // Normalises quiet capture before the VAD, ASR, diarizer and saved
+    // audio see it (a -54 dBFS mic made the VAD drop real speech).
+    let mut auto_gain = options.auto_gain.then(|| AutoGain::new(format));
+    info!(%session_id, auto_gain = auto_gain.is_some(), "capture level normalisation");
+
     let mut buffer: Vec<Sample> = Vec::new();
     let pipeline_started = Instant::now();
     let mut was_paused = false;
@@ -481,6 +494,10 @@ async fn run_pipeline(
             // Reset VAD hidden state — the LSTM would be stale after
             // the gap, producing unreliable voice/silence decisions.
             chunker.reset_vad();
+            // The level history spans the gap too; start it afresh.
+            if let Some(gain) = auto_gain.as_mut() {
+                gain.reset();
+            }
             // Audio before and after the pause is not contiguous: the
             // diarizer's log must not treat it as one run.
             emitter.epoch = emitter.epoch.saturating_add(1);
@@ -495,12 +512,21 @@ async fn run_pipeline(
             continue;
         }
 
-        buffer.extend_from_slice(&frame.samples);
+        // After the pause check, so paused audio is never measured.
+        let mut samples = frame.samples;
+        if let Some(gain) = auto_gain.as_mut() {
+            gain.process(&mut samples);
+        }
+        buffer.extend_from_slice(&samples);
         chunker.drain_ready(&mut buffer, &mut emitter).await;
     }
 
     if let Err(e) = stream.stop().await {
         warn!(error = %e, "stream.stop returned an error");
+    }
+    if let Some(gain) = &auto_gain {
+        // Diagnostics: how much the capture level had to be raised.
+        info!(%session_id, final_gain = gain.gain(), "auto gain at stop");
     }
 
     // Flush whatever is still buffered as final, possibly-shorter chunks.

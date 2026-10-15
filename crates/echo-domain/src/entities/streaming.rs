@@ -78,10 +78,20 @@ pub struct StreamingOptions {
     /// decodes up to 30 s windows).
     #[serde(default = "default_max_chunk_ms")]
     pub max_chunk_ms: u32,
+    /// Raise quiet capture to a normal speech level before anything
+    /// else sees it (VAD, ASR, diarizer, saved audio). The gain follows
+    /// the speech level over the last seconds, never attenuates, is
+    /// capped at about +30 dB and ignores steady noise, so loud input
+    /// passes through unchanged. Default `true`: a mic at -54 dBFS made
+    /// the VAD drop real speech as silence.
+    #[serde(default = "default_auto_gain")]
+    pub auto_gain: bool,
 }
 
 /// Default for [`StreamingOptions::speech_aligned_chunks`].
 const DEFAULT_SPEECH_ALIGNED_CHUNKS: bool = true;
+/// Default for [`StreamingOptions::auto_gain`].
+const DEFAULT_AUTO_GAIN: bool = true;
 /// Default for [`StreamingOptions::min_chunk_ms`].
 const DEFAULT_MIN_CHUNK_MS: u32 = 4_000;
 /// Default for [`StreamingOptions::max_chunk_ms`].
@@ -89,6 +99,10 @@ const DEFAULT_MAX_CHUNK_MS: u32 = 20_000;
 
 fn default_speech_aligned_chunks() -> bool {
     DEFAULT_SPEECH_ALIGNED_CHUNKS
+}
+
+fn default_auto_gain() -> bool {
+    DEFAULT_AUTO_GAIN
 }
 
 fn default_min_chunk_ms() -> u32 {
@@ -108,6 +122,7 @@ impl Default for StreamingOptions {
             speech_aligned_chunks: DEFAULT_SPEECH_ALIGNED_CHUNKS,
             min_chunk_ms: DEFAULT_MIN_CHUNK_MS,
             max_chunk_ms: DEFAULT_MAX_CHUNK_MS,
+            auto_gain: DEFAULT_AUTO_GAIN,
         }
     }
 }
@@ -348,6 +363,7 @@ mod tests {
         assert!(opts.language.is_none());
         assert!(opts.speech_aligned_chunks);
         assert_eq!((opts.min_chunk_ms, opts.max_chunk_ms), (4_000, 20_000));
+        assert!(opts.auto_gain);
     }
 
     #[test]
