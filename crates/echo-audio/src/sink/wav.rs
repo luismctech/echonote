@@ -119,6 +119,14 @@ impl WavSink {
         Ok(())
     }
 
+    /// Write buffered samples and bring the header up to date without
+    /// closing the file, so it stays readable if the process dies.
+    pub fn flush(&mut self) -> Result<(), WavError> {
+        let writer = self.writer.as_mut().ok_or(WavError::AlreadyFinalized)?;
+        writer.flush()?;
+        Ok(())
+    }
+
     /// Flush the WAV header and close the file.
     pub fn finalize(mut self) -> Result<PathBuf, WavError> {
         if let Some(w) = self.writer.take() {
@@ -181,6 +189,21 @@ mod tests {
         assert_eq!(spec.channels, 1);
         assert_eq!(spec.bits_per_sample, 16);
         assert_eq!(reader.len(), n as u32);
+    }
+
+    #[test]
+    fn flush_leaves_a_readable_file_if_the_process_dies() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("out.wav");
+        let fmt = AudioFormat::WHISPER;
+        let mut sink = WavSink::create(&path, fmt, WriteOptions::default()).unwrap();
+        sink.write_frame(&frame(vec![0.25; 1_600], fmt)).unwrap();
+        sink.flush().unwrap();
+        // A killed process never runs Drop or finalize.
+        std::mem::forget(sink);
+
+        let reader = hound::WavReader::open(&path).unwrap();
+        assert_eq!(reader.len(), 1_600);
     }
 
     #[test]
