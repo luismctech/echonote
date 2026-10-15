@@ -564,6 +564,7 @@ async fn run_pipeline(
         events: events.clone(),
         chunk_index: 0,
         emitted_frames: 0,
+        intake_frames: 0,
         total_segments: 0,
         epoch: 0,
         ledger: AttributionLedger::default(),
@@ -637,6 +638,7 @@ async fn run_pipeline(
         if let Some(gain) = auto_gain.as_mut() {
             gain.process(&mut samples);
         }
+        emitter.intake_frames += samples.len() as u64 / u64::from(emitter.format.channels.max(1));
         buffer.extend_from_slice(&samples);
         chunker.drain_ready(&mut buffer, &mut emitter).await;
     }
@@ -985,6 +987,10 @@ struct ChunkEmitter {
     chunk_index: u32,
     /// Device frames (samples per channel) emitted so far.
     emitted_frames: u64,
+    /// Non-paused device frames taken from the capture queue into the
+    /// buffer so far: emitted plus the open chunk. Lag is measured
+    /// against this, so waiting for a pause does not count as lag.
+    intake_frames: u64,
     total_segments: u32,
     /// Capture run: 0 at start, +1 after every resume.
     epoch: u16,
@@ -1122,10 +1128,10 @@ impl ChunkEmitter {
             .await;
     }
 
-    /// Report how far the emitted audio trails active capture time.
+    /// Report how far the pipeline's intake trails active capture time.
     async fn report_progress(&mut self) {
-        let lag_ms = u32::try_from(self.active_ms().saturating_sub(u64::from(self.offset_ms())))
-            .unwrap_or(u32::MAX);
+        let intake_ms = u64::from(frames_to_ms(self.intake_frames, self.format));
+        let lag_ms = u32::try_from(self.active_ms().saturating_sub(intake_ms)).unwrap_or(u32::MAX);
         let backlog_ms = self.backlog_ms();
         self.lag_alarm.observe(self.session_id, lag_ms, backlog_ms);
         let _ = self
