@@ -296,8 +296,10 @@ pub enum TranscriptEvent {
     Progress {
         /// Session id.
         session_id: StreamingSessionId,
-        /// Active (non-paused) capture time minus the session audio
-        /// already emitted, in milliseconds; never negative.
+        /// Active (non-paused) capture time minus the audio the
+        /// pipeline has taken in (emitted or buffered for the open
+        /// chunk), in milliseconds; never negative. An open speech chunk
+        /// waiting for its pause is not lag.
         lag_ms: u32,
         /// Captured audio queued for the pipeline but not yet buffered
         /// for chunking, in milliseconds.
