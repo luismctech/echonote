@@ -105,7 +105,7 @@ export function LivePane({
   /** Provisional text of the chunk still open, shown after `lines`. */
   draft?: DraftLine | null;
   notes: Note[];
-  listRef: RefObject<HTMLDivElement>;
+  listRef: RefObject<HTMLDivElement | null>;
   canStart: boolean;
   canStop: boolean;
   canPause: boolean;
