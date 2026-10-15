@@ -14,7 +14,11 @@
 //!   pause);
 //! - when no transition shows up by `max`, the cut is forced at the
 //!   quietest window (lowest VAD probability) in the `lookback` before
-//!   `max`, which avoids splitting a word whenever a dip exists.
+//!   `max`, which avoids splitting a word whenever a dip exists;
+//! - a speech cut holding less than `min_speech` of confident speech
+//!   (windows at or above [`CONFIDENT_SPEECH_PROBABILITY`]) is
+//!   reported as silence instead, so noise blips never reach the
+//!   transcriber.
 //!
 //! All positions are sample indices into the pipeline buffer (device
 //! rate, interleaved), so cuts map 1:1 to buffer drains.
@@ -34,7 +38,16 @@ pub(super) struct ChunkBounds {
     /// Silence kept before a speech onset so the first phoneme is not
     /// clipped by a late VAD decision.
     pub pre_roll: usize,
+    /// Least confident speech (windows at or above
+    /// [`CONFIDENT_SPEECH_PROBABILITY`]) a chunk needs to be
+    /// transcribed; weaker chunks are skipped as silence.
+    pub min_speech: usize,
 }
+
+/// Speech probability at which a VAD window counts as confident
+/// speech. Above the detector's start threshold, so windows kept
+/// voiced only by hysteresis or by a hesitant onset do not count.
+pub(super) const CONFIDENT_SPEECH_PROBABILITY: f32 = 0.5;
 
 /// One VAD window positioned in buffer coordinates.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -110,7 +123,7 @@ impl SpeechTimeline {
 
         let ends: Vec<usize> = self.speech_ends().filter(|&t| t <= bounds.max).collect();
         if let Some(&t) = ends.iter().find(|&&t| t >= bounds.min) {
-            return Some(Cut::Speech(t));
+            return Some(self.speech(t, bounds));
         }
         let ends_in_silence = self
             .frames
@@ -118,11 +131,11 @@ impl SpeechTimeline {
             .is_some_and(|f| f.state == VoiceState::Silence);
         if ends_in_silence {
             if let Some(&t) = ends.last() {
-                return Some(Cut::Speech(t));
+                return Some(self.speech(t, bounds));
             }
         }
         if analyzed >= bounds.max {
-            return Some(Cut::Speech(self.quietest_cut(bounds)));
+            return Some(self.speech(self.quietest_cut(bounds), bounds));
         }
         None
     }
@@ -149,9 +162,31 @@ impl SpeechTimeline {
             .last()
             .is_some_and(|f| f.state == VoiceState::Silence);
         match self.speech_ends().last() {
-            Some(t) if ends_in_silence && t < len => Some(Cut::Speech(t)),
-            _ => Some(Cut::Speech(len)),
+            Some(t) if ends_in_silence && t < len => Some(self.speech(t, bounds)),
+            _ => Some(self.speech(len, bounds)),
         }
+    }
+
+    /// Classify the speech chunk `[0, n)`: [`Cut::Speech`] when it holds
+    /// at least `bounds.min_speech` samples of confident speech,
+    /// [`Cut::Silence`] otherwise.
+    fn speech(&self, n: usize, bounds: &ChunkBounds) -> Cut {
+        if self.confident_speech(n) >= bounds.min_speech {
+            Cut::Speech(n)
+        } else {
+            Cut::Silence(n)
+        }
+    }
+
+    /// Samples in `[0, n)` covered by windows at or above
+    /// [`CONFIDENT_SPEECH_PROBABILITY`].
+    fn confident_speech(&self, n: usize) -> usize {
+        self.frames
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| f.probability >= CONFIDENT_SPEECH_PROBABILITY)
+            .map(|(i, f)| f.end.min(n).saturating_sub(self.start(i)))
+            .sum()
     }
 
     /// Start of the window at index `i`.
@@ -226,7 +261,34 @@ mod tests {
             max: 8 * SEC,
             lookback: 2 * SEC,
             pre_roll: 3,
+            min_speech: SEC / 2,
         }
+    }
+
+    /// One frame per second, all voiced, with the given probabilities.
+    fn voiced_with(probabilities: &[f32]) -> SpeechTimeline {
+        let mut t = SpeechTimeline::default();
+        for (k, &probability) in probabilities.iter().enumerate() {
+            t.push(TimedFrame {
+                end: (k + 1) * SEC,
+                probability,
+                state: V,
+            });
+        }
+        t
+    }
+
+    /// Append `n` one-second silent frames.
+    fn then_silence(mut t: SpeechTimeline, n: usize) -> SpeechTimeline {
+        for _ in 0..n {
+            let end = t.analyzed() + SEC;
+            t.push(TimedFrame {
+                end,
+                probability: 0.1,
+                state: S,
+            });
+        }
+        t
     }
 
     /// One frame per second with the given states, probability 0.9
@@ -335,5 +397,31 @@ mod tests {
             SpeechTimeline::default().final_cut(&b, 5),
             Some(Cut::Silence(5))
         );
+    }
+
+    #[test]
+    fn hesitant_blip_followed_by_silence_is_skipped() {
+        // Voiced by hysteresis only: no window reaches the confidence floor.
+        let t = then_silence(voiced_with(&[0.4]), 2);
+        assert_eq!(t.next_cut(&bounds()), Some(Cut::Silence(SEC)));
+    }
+
+    #[test]
+    fn hesitant_forced_cut_is_skipped() {
+        let t = voiced_with(&[0.4; 9]);
+        assert_eq!(t.next_cut(&bounds()), Some(Cut::Silence(8 * SEC)));
+    }
+
+    #[test]
+    fn hesitant_final_chunk_is_skipped() {
+        let t = voiced_with(&[0.4, 0.4]);
+        assert_eq!(t.final_cut(&bounds(), 2 * SEC), Some(Cut::Silence(2 * SEC)));
+    }
+
+    #[test]
+    fn confident_speech_at_the_floor_is_transcribed() {
+        // One confident second clears the half-second floor.
+        let t = then_silence(voiced_with(&[0.4, 0.5]), 1);
+        assert_eq!(t.next_cut(&bounds()), Some(Cut::Speech(2 * SEC)));
     }
 }

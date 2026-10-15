@@ -22,7 +22,8 @@
 //!   the VAD runs incrementally over the buffer and chunks end at
 //!   speech pauses between [`StreamingOptions::min_chunk_ms`] and
 //!   [`StreamingOptions::max_chunk_ms`]; silence between utterances is
-//!   reported as skipped and never transcribed (see `chunker`).
+//!   reported as skipped and never transcribed, and so are chunks with
+//!   too little confident speech (see `chunker`).
 //! - **Fixed**: a chunk every [`StreamingOptions::chunk_ms`], gated by
 //!   the VAD per chunk when one is attached, by the RMS floor otherwise.
 //!
@@ -658,6 +659,14 @@ const FORCED_CUT_LOOKBACK_MS: u32 = 1_500;
 /// clip the first phoneme.
 const SPEECH_PRE_ROLL_MS: u32 = 300;
 
+/// Least confident speech a speech-aligned chunk needs to reach the
+/// transcriber. Chunks below it are noise blips the VAD let through
+/// (one window over the start threshold plus ~0.5 s of hysteresis),
+/// on which Whisper hallucinates "Gracias.". In the 2026-10 chunking
+/// bench every such hallucination held at most 160 ms of confident
+/// speech and every real chunk at least 288 ms.
+const MIN_CONFIDENT_SPEECH_MS: u32 = 250;
+
 /// Cuts chunks at speech pauses. Runs the VAD incrementally over the
 /// buffer (in [`ANALYSIS_BLOCK_MS`] steps, in chronological order) and
 /// lets [`SpeechTimeline`] decide the cut points. Chunks it emits are
@@ -682,6 +691,7 @@ impl SpeechChunker {
                 max: samples(options.max_chunk_ms),
                 lookback: samples(FORCED_CUT_LOOKBACK_MS),
                 pre_roll: samples(SPEECH_PRE_ROLL_MS),
+                min_speech: samples(MIN_CONFIDENT_SPEECH_MS),
             },
             block: samples(ANALYSIS_BLOCK_MS).max(1),
             analyzed: 0,
