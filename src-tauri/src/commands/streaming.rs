@@ -285,7 +285,8 @@ pub async fn start_streaming(
     let recordings_dir = state.recordings_dir.clone();
     let join = tokio::spawn(async move {
         let mut saw_terminal = false;
-        let mut meeting_id = None;
+        // Partial audio not yet moved to its meeting path.
+        let mut pending_audio = partial_audio;
         loop {
             let mut guard = drain_handle.lock().await;
             let evt = guard.next_event().await;
@@ -295,8 +296,22 @@ pub async fn start_streaming(
                     if let Err(e) = recorder.record(&evt).await {
                         tracing::warn!(error = %e, %session_id, "recorder.record failed");
                     }
-                    if partial_audio.is_some() && meeting_id.is_none() {
-                        meeting_id = recorder.meeting_id_for_session(session_id).await;
+                    // Move the audio to the meeting path as soon as the
+                    // meeting exists, so a quit during the stop-time refine
+                    // (shutdown waits less than the refine may take) does
+                    // not leave it orphaned.
+                    if let Some(partial) = &pending_audio {
+                        if let Some(id) = recorder.meeting_id_for_session(session_id).await {
+                            match session_audio::finalize(&recordings_dir, partial, Some(id)) {
+                                Ok(path) => {
+                                    tracing::info!(%session_id, path = ?path, "session audio saved with its meeting")
+                                }
+                                Err(e) => {
+                                    tracing::warn!(error = %e, %session_id, "could not move the session audio to its meeting")
+                                }
+                            }
+                            pending_audio = None;
+                        }
                     }
                     let terminal = matches!(
                         evt,
@@ -330,18 +345,11 @@ pub async fn start_streaming(
                 tracing::warn!(error = %e, %session_id, "recorder.record(synth Failed) failed");
             }
         }
-        // The pipeline finished the audio file before its terminal event.
-        if let Some(partial) = &partial_audio {
-            match session_audio::finalize(&recordings_dir, partial, meeting_id) {
-                Ok(Some(path)) => {
-                    tracing::info!(%session_id, path = %path.display(), "session audio saved")
-                }
-                Ok(None) => {
-                    tracing::warn!(%session_id, "no meeting was recorded; session audio discarded")
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, %session_id, "could not finalize the session audio")
-                }
+        // No meeting was ever recorded for this session: keep no audio.
+        if let Some(partial) = &pending_audio {
+            tracing::warn!(%session_id, "no meeting was recorded; session audio discarded");
+            if let Err(e) = session_audio::finalize(&recordings_dir, partial, None) {
+                tracing::warn!(error = %e, %session_id, "could not remove the session audio");
             }
         }
         if let Ok(mut map) = sessions_for_drain.lock() {

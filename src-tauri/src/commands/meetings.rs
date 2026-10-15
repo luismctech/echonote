@@ -47,8 +47,11 @@ pub async fn delete_meeting(state: State<'_, AppState>, id: MeetingId) -> Result
         .delete(id)
         .await
         .map_err(|e| IpcError::storage(format!("delete meeting: {e}")))?;
-    session_audio::delete_meeting_audio(&state.recordings_dir, id)
-        .map_err(|e| IpcError::storage(format!("delete meeting audio: {e}")))?;
+    // The meeting is already gone; a leftover file is logged, not
+    // reported as a failed delete.
+    if let Err(e) = session_audio::delete_meeting_audio(&state.recordings_dir, id) {
+        tracing::warn!(error = %e, meeting_id = %id, "could not delete the meeting audio");
+    }
     Ok(deleted)
 }
 

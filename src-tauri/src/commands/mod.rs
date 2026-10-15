@@ -357,6 +357,14 @@ impl AppState {
             .parent()
             .map_or_else(|| PathBuf::from("."), Path::to_path_buf)
             .join(session_audio::RECORDINGS_DIR);
+        match session_audio::sweep_partial_files(&recordings_dir) {
+            Ok(0) => {}
+            Ok(n) => tracing::info!(
+                removed = n,
+                "removed partial session audio from a previous run"
+            ),
+            Err(e) => tracing::warn!(error = %e, "could not sweep partial session audio"),
+        }
         let store = SqliteMeetingStore::open(&db_path).await.map_err(|e| {
             IpcError::storage(format!("open meeting store at {}: {e}", db_path.display()))
         })?;

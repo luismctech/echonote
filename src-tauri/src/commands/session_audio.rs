@@ -4,9 +4,11 @@
 //! 16-bit PCM WAV, see `StreamingPipeline::with_audio_sink`) to a
 //! partial file in the recordings directory, next to the meeting
 //! database. The meeting id only exists once the recorder handled
-//! `Started`, so at stop the partial file is renamed to
-//! `<meeting_id>.wav`, or removed when no meeting was recorded.
-//! Deleting the meeting deletes its file.
+//! `Started`, so the partial file is renamed to `<meeting_id>.wav` as
+//! soon as the meeting exists (the pipeline keeps writing through its
+//! open handle), or removed at the end when no meeting was recorded.
+//! Partial files left by a crash are swept at startup. Deleting the
+//! meeting deletes its file.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -101,6 +103,29 @@ pub(crate) fn finalize(
 /// Remove a meeting's audio file; a meeting without one is fine.
 pub(crate) fn delete_meeting_audio(dir: &Path, meeting: MeetingId) -> io::Result<()> {
     remove_if_present(&meeting_audio_path(dir, meeting))
+}
+
+/// Remove `*.partial.wav` files a previous run left behind (crash,
+/// forced quit before the meeting id was known). Call at startup, when
+/// no session is writing. Returns how many files were removed.
+pub(crate) fn sweep_partial_files(dir: &Path) -> io::Result<usize> {
+    let entries = match std::fs::read_dir(dir) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(0),
+        other => other?,
+    };
+    let mut removed = 0;
+    for entry in entries {
+        let path = entry?.path();
+        let is_partial = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.ends_with(".partial.wav"));
+        if is_partial {
+            remove_if_present(&path)?;
+            removed += 1;
+        }
+    }
+    Ok(removed)
 }
 
 fn remove_if_present(path: &Path) -> io::Result<()> {
@@ -211,6 +236,39 @@ mod tests {
         assert!(!meeting_audio_path(&dir, meeting).exists());
         delete_meeting_audio(&dir, meeting).unwrap();
         delete_meeting_audio(&temp_dir("never-created"), meeting).unwrap();
+    }
+
+    #[test]
+    fn audio_moved_to_the_meeting_path_while_open_is_completed_there() {
+        // The drain renames the file as soon as the meeting exists, while
+        // the pipeline is still writing through the open handle.
+        let dir = temp_dir("early");
+        let partial = partial_audio_path(&dir);
+        let mut sink = create_sink(&partial).unwrap();
+        sink.accept(&frame(vec![0.5; 1_600])).unwrap();
+        let meeting = MeetingId::new();
+        let path = finalize(&dir, &partial, Some(meeting)).unwrap().unwrap();
+        sink.accept(&frame(vec![0.5; 1_600])).unwrap();
+        sink.finish().unwrap();
+
+        let bytes = std::fs::read(path).unwrap();
+        assert_eq!(bytes.len(), 44 + 3_200 * 2);
+        assert!(!partial.exists());
+    }
+
+    #[test]
+    fn sweep_removes_leftover_partial_files_only() {
+        let dir = temp_dir("sweep");
+        std::fs::create_dir_all(&dir).unwrap();
+        let partial = partial_audio_path(&dir);
+        std::fs::write(&partial, b"wav").unwrap();
+        let kept = meeting_audio_path(&dir, MeetingId::new());
+        std::fs::write(&kept, b"wav").unwrap();
+
+        assert_eq!(sweep_partial_files(&dir).unwrap(), 1);
+        assert!(!partial.exists());
+        assert!(kept.exists());
+        assert_eq!(sweep_partial_files(&temp_dir("absent")).unwrap(), 0);
     }
 
     #[test]
