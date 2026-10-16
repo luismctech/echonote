@@ -2,12 +2,14 @@
 //!
 //! `MixedStream` reads concurrently from a microphone stream and a system
 //! audio (loopback) stream, normalizes each source to a common target
-//! format (channel downmix + sample-rate conversion), and emits mixed
-//! frames whenever either per-source buffer reaches the threshold.
+//! format (channel downmix + sample-rate conversion), and emits a mixed
+//! frame whenever both per-source buffers cover the next threshold.
 //! Mixing is a per-sample average over the *normalized* samples, so
 //! sources delivering different native rates or channel counts (e.g.
 //! built-in mic mono 48 kHz vs ScreenCaptureKit stereo 48 kHz) line up
-//! correctly in the time domain.
+//! correctly in the time domain. A source that stops delivering is
+//! padded with silence after a bounded skew, so one dead source never
+//! stalls the mix.
 //!
 //! Each source can be independently muted at any time by storing `false`
 //! in the corresponding `Arc<AtomicBool>` returned alongside the stream.
@@ -37,6 +39,13 @@ const MIX_THRESHOLD: usize = 160;
 /// dropped. ~340 ms at 16 kHz mono — protects against pathological clock
 /// drift between mic and system streams.
 const MAX_DRIFT_SAMPLES: usize = MIX_THRESHOLD * 32;
+
+/// Lead one source may build up over the other before the lagging one
+/// is treated as stalled and padded with silence: 200 ms at 16 kHz.
+/// Below this the mixer waits for the lagging source so both sides of a
+/// frame cover the same time span; above it a dead source would
+/// otherwise stall the mix for good.
+const STALL_SKEW_SAMPLES: usize = MIX_THRESHOLD * 20;
 
 /// Channel depth in mixed frames. ~5 s of headroom at 10 ms/frame.
 const CHANNEL_CAPACITY: usize = 512;
@@ -288,29 +297,43 @@ async fn run_mixer(
     };
 
     loop {
-        // Drain both buffers into mixed frames before waiting for more input.
-        while mic_buf.len() >= MIX_THRESHOLD || sys_buf.len() >= MIX_THRESHOLD {
+        // Emit every frame both sources already cover. A frame takes the
+        // same time span from each buffer, so the two sides stay aligned;
+        // a source that stops delivering is padded with silence once the
+        // other leads by `STALL_SKEW_SAMPLES`, so the mix keeps real time.
+        loop {
             let n = MIX_THRESHOLD;
+            let (take_mic, take_sys) = match (mic_buf.len() >= n, sys_buf.len() >= n) {
+                (true, true) => (true, true),
+                (true, false) if mic_buf.len() >= STALL_SKEW_SAMPLES => (true, false),
+                (false, true) if sys_buf.len() >= STALL_SKEW_SAMPLES => (false, true),
+                _ => break,
+            };
             let use_mic = mic_active.load(Ordering::Relaxed);
             let use_sys = sys_active.load(Ordering::Relaxed);
 
+            // Gain follows the controls, not availability: a stalled source
+            // counts as silence at the same mix gain, so the level never
+            // jumps while both sources are enabled.
             let mut mixed = Vec::with_capacity(n);
             for i in 0..n {
-                let mic_avail = use_mic && i < mic_buf.len();
-                let sys_avail = use_sys && i < sys_buf.len();
-                let sample = match (mic_avail, sys_avail) {
-                    (true, true) => (mic_buf[i] + sys_buf[i]) * 0.5,
-                    (true, false) => mic_buf[i],
-                    (false, true) => sys_buf[i],
+                let mic_s = if take_mic { mic_buf[i] } else { 0.0 };
+                let sys_s = if take_sys { sys_buf[i] } else { 0.0 };
+                let sample = match (use_mic, use_sys) {
+                    (true, true) => (mic_s + sys_s) * 0.5,
+                    (true, false) => mic_s,
+                    (false, true) => sys_s,
                     (false, false) => 0.0_f32,
                 };
                 mixed.push(sample.clamp(-1.0, 1.0));
             }
 
-            let consumed_mic = n.min(mic_buf.len());
-            let consumed_sys = n.min(sys_buf.len());
-            mic_buf.drain(..consumed_mic);
-            sys_buf.drain(..consumed_sys);
+            if take_mic {
+                mic_buf.drain(..n);
+            }
+            if take_sys {
+                sys_buf.drain(..n);
+            }
 
             let frame = AudioFrame {
                 samples: mixed,
@@ -565,6 +588,92 @@ mod tests {
         assert!(
             peak_rms > 0.3,
             "muted sys still attenuating: peak per-frame RMS {peak_rms} (expected ≈0.354)"
+        );
+    }
+
+    /// Power of `freq_hz` in `samples` (Goertzel), normalised by length.
+    fn tone_power(samples: &[f32], freq_hz: f32, rate_hz: u32) -> f32 {
+        let w = 2.0 * std::f32::consts::PI * freq_hz / rate_hz as f32;
+        let coeff = 2.0 * w.cos();
+        let (mut s1, mut s2) = (0.0_f32, 0.0_f32);
+        for &x in samples {
+            let s0 = x + coeff * s1 - s2;
+            s2 = s1;
+            s1 = s0;
+        }
+        (s1 * s1 + s2 * s2 - coeff * s1 * s2) / samples.len().max(1) as f32
+    }
+
+    /// `n` samples of a sine split into frames of `frame` samples.
+    fn frames_of(n: usize, frame: usize, freq_hz: f32, format: AudioFormat) -> Vec<AudioFrame> {
+        let all = sine(n, freq_hz, format.sample_rate_hz, format.channels);
+        all.chunks(frame)
+            .map(|c| AudioFrame {
+                samples: c.to_vec(),
+                format,
+                captured_at_ns: 0,
+            })
+            .collect()
+    }
+
+    async fn drain(stream: &mut MixedStream, idle: Duration) -> Vec<AudioFrame> {
+        let mut frames = Vec::new();
+        while let Ok(Some(f)) = tokio::time::timeout(idle, stream.next_frame()).await {
+            frames.push(f);
+        }
+        frames
+    }
+
+    /// Mic and system audio that arrive interleaved in time must be
+    /// summed sample by sample, not emitted one after the other.
+    #[tokio::test]
+    async fn both_sources_are_mixed_into_the_same_frames() {
+        let fmt = AudioFormat::WHISPER;
+        let total = 3_200;
+        let mic = ScriptedStream::boxed(fmt, frames_of(total, 800, 440.0, fmt));
+        let sys = ScriptedStream::boxed(fmt, frames_of(total, 800, 1_000.0, fmt));
+        let (mut stream, _ctrl) = MixedStream::new(mic, sys, fmt).expect("build mixed stream");
+
+        let frames = drain(&mut stream, Duration::from_millis(200)).await;
+        let emitted: usize = frames.iter().map(|f| f.samples.len()).sum();
+        assert_eq!(emitted, total, "one output sample per aligned input sample");
+        for (i, f) in frames.iter().enumerate() {
+            let p440 = tone_power(&f.samples, 440.0, fmt.sample_rate_hz);
+            let p1000 = tone_power(&f.samples, 1_000.0, fmt.sample_rate_hz);
+            let silence = tone_power(&f.samples, 2_500.0, fmt.sample_rate_hz);
+            assert!(
+                p440 > 10.0 * silence && p1000 > 10.0 * silence,
+                "frame {i} must carry both tones: 440 Hz {p440}, 1 kHz {p1000}, floor {silence}"
+            );
+        }
+    }
+
+    /// A source that stops delivering must not stall the other: after a
+    /// bounded skew the missing side is padded with silence, at the same
+    /// gain as when both sources flow.
+    #[tokio::test]
+    async fn a_stalled_source_is_padded_with_silence() {
+        let fmt = AudioFormat::WHISPER;
+        let total = 6_400;
+        let mic = ScriptedStream::boxed(fmt, frames_of(total, 800, 440.0, fmt));
+        let sys = ScriptedStream::boxed(fmt, Vec::new());
+        let (mut stream, _ctrl) = MixedStream::new(mic, sys, fmt).expect("build mixed stream");
+
+        let frames = drain(&mut stream, Duration::from_millis(200)).await;
+        let emitted: usize = frames.iter().map(|f| f.samples.len()).sum();
+        assert!(
+            emitted >= total - STALL_SKEW_SAMPLES && emitted <= total,
+            "mic must keep flowing once the skew bound is reached: {emitted} of {total}"
+        );
+        let all: Vec<f32> = frames
+            .iter()
+            .flat_map(|f| f.samples.iter().copied())
+            .collect();
+        let r = rms(&all);
+        // 0.5 amplitude sine ⇒ RMS 0.354; mixed with silence at 0.5 gain ⇒ 0.177.
+        assert!(
+            (r - 0.177).abs() < 0.03,
+            "stalled sys must be silence at mix gain: rms {r}"
         );
     }
 }
