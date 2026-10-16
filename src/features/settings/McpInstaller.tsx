@@ -6,7 +6,7 @@
  * the EchoNote MCP server config with a single click.
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { type ReactElement, useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { LayoutGrid, ClipboardList, FileText, Search, NotebookPen, StickyNote, Users, FileDown, LayoutTemplate, Activity, Pencil, Trash2, UserPen, Plus, Minus } from "lucide-react";
 
@@ -29,7 +29,7 @@ interface McpClient {
   configPath: string | null;
 }
 
-const CLIENT_ICONS: Record<string, JSX.Element> = {
+const CLIENT_ICONS: Record<string, ReactElement> = {
   "claude-desktop": <McpClientLogo clientId="claude-desktop" />,
   "claude-code": <McpClientLogo clientId="claude-code" />,
   "vscode": <McpClientLogo clientId="vscode" />,
