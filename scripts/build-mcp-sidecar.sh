@@ -35,14 +35,21 @@ else
   OUT_DIR="$PROFILE"
 fi
 
+# Windows executables carry `.exe`, and Tauri expects the sidecar as
+# `echo-mcp-<triple>.exe` there.
+EXE=""
+case "$TRIPLE" in
+  *windows*) EXE=".exe" ;;
+esac
+
 # When cross-compiling, cargo puts output under target/<triple>/<profile>/
 if [ -n "$CARGO_TARGET_ARGS" ]; then
-  SRC="target/${TRIPLE}/${OUT_DIR}/echo-mcp"
+  SRC="target/${TRIPLE}/${OUT_DIR}/echo-mcp${EXE}"
 else
-  SRC="target/${OUT_DIR}/echo-mcp"
+  SRC="target/${OUT_DIR}/echo-mcp${EXE}"
 fi
 
-DEST="src-tauri/binaries/echo-mcp-${TRIPLE}"
+DEST="src-tauri/binaries/echo-mcp-${TRIPLE}${EXE}"
 
 mkdir -p src-tauri/binaries
 cp "$SRC" "$DEST"
