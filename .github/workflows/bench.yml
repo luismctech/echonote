@@ -44,6 +44,16 @@ jobs:
     - name: Checkout
       uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+    # screencapturekit 11 pulls apple-metal, whose Swift bridge references
+    # macOS 26 Metal APIs (guarded by #available at runtime); compiling
+    # needs the newest Xcode on the image, not its default.
+    - name: Select the newest Xcode
+      if: runner.os == 'macOS'
+      run: |
+        XCODE=$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)
+        sudo xcode-select -s "$XCODE"
+        xcodebuild -version
+
     - name: Install toolchain
       uses: dtolnay/rust-toolchain@stable
 
