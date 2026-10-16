@@ -55,13 +55,13 @@ jobs:
         include:
         # macOS — Apple Silicon (primary)
         - label: macOS-arm64
-          runner: macos-14
+          runner: macos-15
           rust-targets: aarch64-apple-darwin
           tauri-args: "--target aarch64-apple-darwin"
 
         # macOS — Intel
         - label: macOS-x64
-          runner: macos-14
+          runner: macos-15
           rust-targets: x86_64-apple-darwin
           tauri-args: "--target x86_64-apple-darwin"
 

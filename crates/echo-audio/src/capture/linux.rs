@@ -26,6 +26,7 @@ use echo_domain::{
     DomainError, Sample,
 };
 
+use super::sample_convert::{self, rank_format};
 use super::stream_error::{classify, Severity};
 
 /// Synthetic device ID for the default monitor source.
@@ -269,15 +270,6 @@ fn pick_config(
         ));
     }
 
-    fn rank_format(f: SampleFormat) -> u8 {
-        match f {
-            SampleFormat::F32 => 0,
-            SampleFormat::I16 => 1,
-            SampleFormat::U16 => 2,
-            _ => 9,
-        }
-    }
-
     let target_channels = preferred.channels.max(1);
     let chosen_channels = supported_iter
         .iter()
@@ -315,65 +307,22 @@ fn run_audio_thread(
     let start = std::time::Instant::now();
     // `poll()` timeouts and xruns are routine on the PipeWire/PulseAudio
     // ALSA plugin and leave the stream running — see `stream_error`.
-    let err_fn = |err: cpal::StreamError| match classify(&err) {
+    let err_fn = |err: cpal::Error| match classify(&err) {
         Severity::Transient => debug!(error = %err, "transient PulseAudio monitor stream error"),
         Severity::Fatal => error!(error = %err, "PulseAudio monitor stream error"),
     };
 
-    let build_result: Result<cpal::Stream, DomainError> = match sample_format {
-        SampleFormat::F32 => device
-            .build_input_stream(
-                &config,
-                {
-                    let tx = tx.clone();
-                    move |data: &[f32], _info: &cpal::InputCallbackInfo| {
-                        push_frame(&tx, format, start, data.iter().copied());
-                    }
-                },
-                err_fn,
-                Some(BUFFER_PERIOD),
-            )
-            .map_err(|e| DomainError::AudioCaptureFailed(format!("build f32 stream: {e}"))),
-        SampleFormat::I16 => device
-            .build_input_stream(
-                &config,
-                {
-                    let tx = tx.clone();
-                    move |data: &[i16], _info: &cpal::InputCallbackInfo| {
-                        push_frame(
-                            &tx,
-                            format,
-                            start,
-                            data.iter().map(|s| f32::from(*s) / f32::from(i16::MAX)),
-                        );
-                    }
-                },
-                err_fn,
-                Some(BUFFER_PERIOD),
-            )
-            .map_err(|e| DomainError::AudioCaptureFailed(format!("build i16 stream: {e}"))),
-        SampleFormat::U16 => device
-            .build_input_stream(
-                &config,
-                {
-                    let tx = tx.clone();
-                    move |data: &[u16], _info: &cpal::InputCallbackInfo| {
-                        push_frame(
-                            &tx,
-                            format,
-                            start,
-                            data.iter().map(|s| (f32::from(*s) - 32_768.0) / 32_768.0),
-                        );
-                    }
-                },
-                err_fn,
-                Some(BUFFER_PERIOD),
-            )
-            .map_err(|e| DomainError::AudioCaptureFailed(format!("build u16 stream: {e}"))),
-        other => Err(DomainError::AudioFormatUnsupported(format!(
-            "unsupported sample format: {other:?}"
-        ))),
-    };
+    let build_result = sample_convert::build_input_stream(
+        &device,
+        config,
+        sample_format,
+        {
+            let tx = tx.clone();
+            move |samples: Vec<Sample>| push_frame(&tx, format, start, samples.into_iter())
+        },
+        err_fn,
+        Some(BUFFER_PERIOD),
+    );
 
     let stream = match build_result {
         Ok(s) => s,

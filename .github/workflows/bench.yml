@@ -38,7 +38,7 @@ env:
 jobs:
   wer:
     name: bench wer (macOS)
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 30
     steps:
     - name: Checkout
@@ -50,7 +50,7 @@ jobs:
     - name: Cache cargo registry and target
       uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       with:
-        shared-key: macos-14-bench
+        shared-key: macos-15-bench
 
     - name: Build echo-proto (release)
       run: cargo build --release -p echo-proto --locked

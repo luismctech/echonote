@@ -8,12 +8,6 @@
 
 [advisories]
 ignore = [
-    # ── Vulnerability ────────────────────────────────────────────────────────
-    # rsa 0.9.10 — Marvin Attack timing sidechannel (CVSS 5.9 medium)
-    # Path: rsa ← sqlx-mysql. We use SQLite only; no MySQL/TLS exposure.
-    # No fixed version available upstream.
-    "RUSTSEC-2023-0071",
-
     # ── Unmaintained: GTK3 bindings (Linux, required by Tauri → wry) ────────
     "RUSTSEC-2024-0411", # gdkwayland-sys 0.18.2
     "RUSTSEC-2024-0412", # gdk 0.18.2

@@ -8,8 +8,8 @@
 yanked = "warn"
 ignore = [
     # Only advisories that cargo-deny actually matches in this graph are listed (it warns on
-    # stale entries). Advisories ignored in .cargo/audit.toml but not matched here (rsa via
-    # sqlx-mysql, GTK3 bindings, fxhash, glib, rand 0.7) are not triggered by cargo-deny.
+    # stale entries). Advisories ignored in .cargo/audit.toml but not matched here (GTK3
+    # bindings, fxhash, glib, rand 0.7) are not triggered by cargo-deny.
     "RUSTSEC-2024-0370", # proc-macro-error — unmaintained, transitive via Tauri/GTK macros
     "RUSTSEC-2024-0436", # paste — unmaintained, transitive via Tauri and tract
     "RUSTSEC-2026-0319", # anymap2 — unmaintained, transitive; no safe upgrade available
