@@ -9,6 +9,7 @@
 //! - **Linux**: [`linux::PulseMonitorCapture`] via PulseAudio monitor sources.
 
 pub mod cpal_microphone;
+pub(crate) mod interleave;
 pub mod mixed;
 pub mod routing;
 pub mod sample_convert;

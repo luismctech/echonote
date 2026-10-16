@@ -37,6 +37,7 @@
 //! produces, and is cheap to downsample to the 16 kHz mono Whisper
 //! expects (see [`crate::preprocess::resample`]).
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc as sync_mpsc;
 use std::thread;
 use std::time::Instant;
@@ -51,6 +52,8 @@ use echo_domain::{
 };
 
 use screencapturekit::prelude::*;
+
+use super::interleave::{interleave, Interleaved, Plane};
 use screencapturekit::shareable_content::SCShareableContent;
 
 /// Default sample rate requested from ScreenCaptureKit. 48 kHz is the
@@ -300,6 +303,8 @@ struct AudioOutputHandler {
     tx: mpsc::Sender<AudioFrame>,
     format: AudioFormat,
     start: Instant,
+    /// Set after the first unexpected buffer layout, so it is logged once.
+    layout_warned: AtomicBool,
 }
 
 impl SCStreamOutputTrait for AudioOutputHandler {
@@ -318,30 +323,44 @@ impl SCStreamOutputTrait for AudioOutputHandler {
             }
         };
 
-        // ScreenCaptureKit always delivers float32 linear PCM. A single
-        // AudioBufferList may contain one interleaved buffer (stereo)
-        // or N planar buffers (one per channel). We coalesce both into
-        // an interleaved Vec<f32> matching `self.format.channels`.
-        let mut samples: Vec<f32> = Vec::new();
-        for buf in buffer_list.iter() {
-            let bytes = buf.data();
-            // Trust the framework's claim of float32. Truncating div is
-            // intentional — partial trailing samples are discarded.
-            let chunk_len = bytes.len() / std::mem::size_of::<f32>();
-            samples.reserve(chunk_len);
-            for i in 0..chunk_len {
-                let offset = i * 4;
-                // SAFETY: `bytes` is at least `chunk_len * 4` bytes
-                // long (checked via integer division above) and SCK
-                // guarantees the data pointer is aligned to f32.
-                let raw = u32::from_le_bytes([
-                    bytes[offset],
-                    bytes[offset + 1],
-                    bytes[offset + 2],
-                    bytes[offset + 3],
-                ]);
-                samples.push(f32::from_bits(raw));
-            }
+        // ScreenCaptureKit delivers float32 linear PCM as one planar
+        // buffer per channel (or one interleaved buffer). Decode each
+        // buffer, then interleave by its declared channel count; see
+        // `interleave` for why concatenating the buffers is wrong.
+        let planes: Vec<Vec<f32>> = (0..buffer_list.num_buffers())
+            .filter_map(|i| buffer_list.get(i))
+            .map(|buf| {
+                buf.data()
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|b| f32::from_le_bytes(*b))
+                    .collect()
+            })
+            .collect();
+        let channels: Vec<u32> = (0..buffer_list.num_buffers())
+            .filter_map(|i| buffer_list.get(i))
+            .map(|buf| buf.number_channels)
+            .collect();
+        let plane_refs: Vec<Plane<'_>> = planes
+            .iter()
+            .zip(&channels)
+            .map(|(samples, &channels)| Plane {
+                channels,
+                samples: samples.as_slice(),
+            })
+            .collect();
+        let Interleaved {
+            samples,
+            layout_matched,
+        } = interleave(&plane_refs, self.format.channels);
+        if !layout_matched && !self.layout_warned.swap(true, Ordering::Relaxed) {
+            warn!(
+                buffers = planes.len(),
+                channels = ?channels,
+                expected = self.format.channels,
+                "SCK audio buffer layout does not match the stream format; channels remapped"
+            );
         }
 
         if samples.is_empty() {
@@ -371,7 +390,12 @@ fn run_capture_thread(
     ready_tx: sync_mpsc::Sender<Result<(), DomainError>>,
 ) {
     let start = Instant::now();
-    let handler = AudioOutputHandler { tx, format, start };
+    let handler = AudioOutputHandler {
+        tx,
+        format,
+        start,
+        layout_warned: AtomicBool::new(false),
+    };
 
     let mut stream = match SCStream::new(&filter, &config) {
         Ok(stream) => stream,
