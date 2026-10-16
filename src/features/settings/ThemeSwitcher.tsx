@@ -5,13 +5,14 @@
  * Shows a sun, moon, or monitor icon respectively.
  */
 
+import type { ReactElement } from "react";
 import { useTranslation } from "react-i18next";
 import { Sun, Moon, Monitor } from "lucide-react";
 import { useTheme, type Theme } from "../../hooks/useTheme";
 
 const CYCLE: Theme[] = ["light", "dark", "system"];
 
-const ICONS: Record<Theme, JSX.Element> = {
+const ICONS: Record<Theme, ReactElement> = {
   light: <Sun className="h-3.5 w-3.5" />,
   dark: <Moon className="h-3.5 w-3.5" />,
   system: <Monitor className="h-3.5 w-3.5" />,
