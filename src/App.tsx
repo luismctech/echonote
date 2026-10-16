@@ -93,7 +93,7 @@ export function App() {
 
   // Ref-based callback so useRecordingSession can open the models
   // panel even though the state is declared after the hook.
-  const openModelsRef = useRef<() => void>();
+  const openModelsRef = useRef<(() => void) | undefined>(undefined);
 
   // Pull the primitives we depend on out of the hook return so our
   // useCallback deps below reference stable identities (each member
