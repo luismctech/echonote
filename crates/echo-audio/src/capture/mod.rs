@@ -11,6 +11,7 @@
 pub mod cpal_microphone;
 pub mod mixed;
 pub mod routing;
+pub mod sample_convert;
 pub mod stream_error;
 
 pub use cpal_microphone::CpalMicrophoneCapture;
