@@ -41,8 +41,11 @@
 //! clock and the audio sink, are shed while transcription runs behind
 //! capture, and never change how final chunks are cut or transcribed.
 //!
-//! Chunk offsets are derived from the device frames actually emitted,
-//! so segment timestamps stay exact with variable-length chunks.
+//! Captured audio is converted to 16 kHz mono once, as it arrives, by
+//! the format each frame carries (a device may reconnect in another
+//! one). Chunk offsets are derived from the 16 kHz samples actually
+//! emitted, so segment timestamps stay exact with variable-length
+//! chunks.
 //! Pausing flushes the buffered audio first; paused audio is not part
 //! of session time.
 //!
@@ -442,8 +445,10 @@ struct CapturedFrame {
 struct CaptureMeter {
     /// Wall-clock time covered by non-paused frames, in microseconds.
     active_us: AtomicU64,
-    /// Samples queued by the reader and not yet taken by the pipeline.
-    backlog_samples: AtomicU64,
+    /// Duration of the audio queued by the reader and not yet taken by
+    /// the pipeline, in microseconds. Counted per frame in its own
+    /// format, so a device that reconnects in another one stays exact.
+    backlog_us: AtomicU64,
 }
 
 /// Drain `stream` into `frames` until stop is signalled (or the stop
@@ -485,8 +490,10 @@ async fn read_capture(
             meter.active_us.fetch_add(gap_us, Ordering::Relaxed);
         }
         last_arrival = now;
-        let len = frame.samples.len() as u64;
-        meter.backlog_samples.fetch_add(len, Ordering::Relaxed);
+        meter.backlog_us.fetch_add(
+            duration_us(frame.samples.len(), frame.format),
+            Ordering::Relaxed,
+        );
         let captured = CapturedFrame {
             samples: frame.samples,
             format: frame.format,
@@ -563,7 +570,6 @@ async fn run_pipeline(
         punctuator,
         session_id,
         format,
-        capture_format,
         transcribe_options: TranscribeOptions {
             language: options.language.clone(),
             ..Default::default()
@@ -605,10 +611,10 @@ async fn run_pipeline(
     // every frame it queued has been processed, so no audio captured
     // before stop is lost.
     while let Some(frame) = frame_rx.recv().await {
-        emitter
-            .meter
-            .backlog_samples
-            .fetch_sub(frame.samples.len() as u64, Ordering::Relaxed);
+        emitter.meter.backlog_us.fetch_sub(
+            duration_us(frame.samples.len(), frame.format),
+            Ordering::Relaxed,
+        );
         let is_paused = frame.paused;
 
         // Emit state-change events exactly once per transition.
@@ -970,7 +976,7 @@ impl SpeechChunker {
 }
 
 /// Turns chunks into events and keeps the session clock. Offsets come
-/// from the device frames actually emitted (`emitted_frames`), so
+/// from the 16 kHz samples actually emitted (`emitted_frames`), so
 /// variable-length chunks keep segment timestamps exact.
 struct ChunkEmitter {
     transcriber: Arc<dyn Transcriber>,
@@ -979,15 +985,13 @@ struct ChunkEmitter {
     session_id: StreamingSessionId,
     /// Format of the chunk buffer: always [`AudioFormat::WHISPER`].
     format: AudioFormat,
-    /// Device format at start; the capture backlog is counted in it.
-    capture_format: AudioFormat,
     transcribe_options: TranscribeOptions,
     silence_threshold: f32,
     events: mpsc::Sender<TranscriptEvent>,
     chunk_index: u32,
-    /// Device frames (samples per channel) emitted so far.
+    /// Frames (16 kHz mono samples) emitted so far.
     emitted_frames: u64,
-    /// Non-paused device frames taken from the capture queue into the
+    /// Non-paused 16 kHz frames taken from the capture queue into the
     /// buffer so far: emitted plus the open chunk. Lag is measured
     /// against this, so waiting for a pause does not count as lag.
     intake_frames: u64,
@@ -1056,11 +1060,8 @@ impl ChunkEmitter {
 
     /// Captured audio queued but not yet buffered, in milliseconds.
     fn backlog_ms(&self) -> u32 {
-        let backlog = self.meter.backlog_samples.load(Ordering::Relaxed);
-        samples_to_ms(
-            usize::try_from(backlog).unwrap_or(usize::MAX),
-            self.capture_format,
-        )
+        let backlog_us = self.meter.backlog_us.load(Ordering::Relaxed);
+        u32::try_from(backlog_us / 1_000).unwrap_or(u32::MAX)
     }
 
     /// `Some((backlog_ms, behind_ms))` when a draft must be skipped
@@ -1496,6 +1497,16 @@ fn flush_intake(intake: &mut dyn ResampleStream, session_id: StreamingSessionId)
         warn!(%session_id, error = %e, "cannot flush the capture resampler; dropping its tail");
     }
     tail
+}
+
+/// Duration of `samples` interleaved samples in `format`, in
+/// microseconds (0 for a degenerate format).
+fn duration_us(samples: usize, format: AudioFormat) -> u64 {
+    if format.channels == 0 || format.sample_rate_hz == 0 {
+        return 0;
+    }
+    let frames = samples as u64 / u64::from(format.channels);
+    frames * 1_000_000 / u64::from(format.sample_rate_hz)
 }
 
 fn chunk_size_in_samples(format: AudioFormat, chunk_ms: u32) -> usize {

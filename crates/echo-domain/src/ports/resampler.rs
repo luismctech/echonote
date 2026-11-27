@@ -37,8 +37,9 @@ pub trait Resampler: Send + Sync {
 /// [`AudioFormat::WHISPER`], created by [`Resampler::stream`].
 pub trait ResampleStream: Send {
     /// Convert the next block of interleaved `samples` in `input` format
-    /// and append the 16 kHz mono result to `out`. Output lags input by
-    /// at most one internal filter block; [`Self::flush`] releases it.
+    /// and append the 16 kHz mono result to `out`. Output may lag input
+    /// by an internal block plus the filter's look-ahead (a few tens of
+    /// milliseconds); [`Self::flush`] releases it.
     ///
     /// `input` may change between calls (a device reconnected with
     /// another configuration): the audio of the previous format is
