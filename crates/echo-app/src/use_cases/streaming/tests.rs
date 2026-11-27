@@ -1586,6 +1586,162 @@ impl ResampleStream for LeftChannelResampler {
     }
 }
 
+/// Capture whose frames carry their own format, like a microphone that
+/// reconnected with another configuration mid-session.
+struct TaggedCapture {
+    format: AudioFormat,
+    frames: Mutex<Option<Vec<AudioFrame>>>,
+}
+
+struct TaggedStream {
+    format: AudioFormat,
+    frames: std::vec::IntoIter<AudioFrame>,
+}
+
+#[async_trait]
+impl AudioCapture for TaggedCapture {
+    async fn list_devices(&self, _source: AudioSource) -> Result<Vec<DeviceInfo>, DomainError> {
+        Ok(vec![])
+    }
+    async fn start(&self, _spec: CaptureSpec) -> Result<Box<dyn AudioStream>, DomainError> {
+        let frames = self.frames.lock().unwrap().take().unwrap_or_default();
+        Ok(Box::new(TaggedStream {
+            format: self.format,
+            frames: frames.into_iter(),
+        }))
+    }
+}
+
+#[async_trait]
+impl AudioStream for TaggedStream {
+    fn format(&self) -> AudioFormat {
+        self.format
+    }
+    async fn next_frame(&mut self) -> Option<AudioFrame> {
+        tokio::task::yield_now().await;
+        self.frames.next()
+    }
+    async fn stop(&mut self) -> Result<(), DomainError> {
+        self.frames.by_ref().for_each(drop);
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn device_format_change_mid_session_keeps_session_time() {
+    let mono_48k = AudioFormat {
+        sample_rate_hz: 48_000,
+        channels: 1,
+    };
+    let stereo_16k = AudioFormat {
+        sample_rate_hz: 16_000,
+        channels: 2,
+    };
+    // 1 s before the device reconnects, 1 s after it in another format.
+    let frames = vec![
+        AudioFrame {
+            samples: sine(48_000, 0.5),
+            format: mono_48k,
+            captured_at_ns: 0,
+        },
+        AudioFrame {
+            samples: sine(16_000, 0.5).into_iter().flat_map(|s| [s, s]).collect(),
+            format: stereo_16k,
+            captured_at_ns: 0,
+        },
+    ];
+    let capture = Arc::new(TaggedCapture {
+        format: mono_48k,
+        frames: Mutex::new(Some(frames)),
+    });
+    let transcriber = FakeTranscriber::new();
+    let (sink, log) = RecordingSink::new(false);
+    let pipeline = StreamingPipeline::new(
+        capture,
+        Arc::new(echo_audio::RubatoResamplerAdapter::new()),
+        transcriber.clone(),
+    )
+    .with_audio_sink(Box::new(sink));
+    let mut handle = pipeline
+        .start(StreamingOptions {
+            chunk_ms: 1_000,
+            ..StreamingOptions::default()
+        })
+        .await
+        .unwrap();
+
+    let events = drain_until_stopped(&mut handle).await;
+    assert!(matches!(
+        events.last(),
+        Some(TranscriptEvent::Stopped { .. })
+    ));
+    // Two seconds captured, two seconds of session audio: the frames
+    // after the reconnect are neither sped up nor slowed down.
+    let log = log.lock().unwrap();
+    assert_eq!(log.samples.len(), 32_000);
+    assert_eq!(transcriber.call_count(), 2);
+}
+
+/// Pass-through resampler that counts every input sample it converts,
+/// one-shot or streamed.
+#[derive(Clone, Default)]
+struct CountingResampler {
+    converted: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl Resampler for CountingResampler {
+    fn to_whisper(
+        &self,
+        samples: &[Sample],
+        _input: AudioFormat,
+    ) -> Result<Vec<Sample>, DomainError> {
+        self.converted.fetch_add(samples.len(), Ordering::Relaxed);
+        Ok(samples.to_vec())
+    }
+    fn stream(&self) -> Box<dyn ResampleStream> {
+        Box::new(self.clone())
+    }
+}
+
+impl ResampleStream for CountingResampler {
+    fn push(
+        &mut self,
+        samples: &[Sample],
+        input: AudioFormat,
+        out: &mut Vec<Sample>,
+    ) -> Result<(), DomainError> {
+        out.extend(self.to_whisper(samples, input)?);
+        Ok(())
+    }
+    fn flush(&mut self, _out: &mut Vec<Sample>) -> Result<(), DomainError> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn each_captured_sample_is_resampled_once() {
+    let frames = vec![sine(16_000, 0.5), sine(16_000, 0.5), sine(16_000, 0.5)];
+    let capture = FakeCapture::new(AudioFormat::WHISPER, frames);
+    let resampler = CountingResampler::default();
+    let (sink, _log) = RecordingSink::new(false);
+    let transcriber = FakeTranscriber::new();
+    let pipeline =
+        StreamingPipeline::new(capture, Arc::new(resampler.clone()), transcriber.clone())
+            .with_audio_sink(Box::new(sink));
+    let mut handle = pipeline
+        .start(StreamingOptions {
+            chunk_ms: 1_000,
+            ..StreamingOptions::default()
+        })
+        .await
+        .unwrap();
+
+    drain_until_stopped(&mut handle).await;
+    // VAD, ASR and the saved audio all reuse one conversion.
+    assert_eq!(transcriber.call_count(), 3);
+    assert_eq!(resampler.converted.load(Ordering::Relaxed), 48_000);
+}
+
 #[tokio::test]
 async fn audio_sink_receives_every_emitted_chunk_as_16k_mono() {
     let stereo = AudioFormat {
