@@ -52,6 +52,13 @@ impl<S: FrameSink> RecordToSink<S> {
 
     /// Drives the capture for `duration`, forwarding every frame to the
     /// sink. Returns once the deadline is reached or the stream ends.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the capture cannot start, the sink rejects a frame, or
+    /// the device comes back in another format mid-recording
+    /// ([`DomainError::AudioCaptureFailed`]); the sink is finished first,
+    /// so the audio captured until then is kept.
     pub async fn execute(
         mut self,
         spec: CaptureSpec,
@@ -88,6 +95,22 @@ impl<S: FrameSink> RecordToSink<S> {
                     break;
                 }
             };
+            // One recording holds one format. A device that reconnected
+            // in another configuration ends it, keeping what was written.
+            if frame.format != format {
+                warn!(
+                    ?format,
+                    new = ?frame.format,
+                    "capture format changed mid-recording; stopping recording"
+                );
+                let _ = stream.stop().await;
+                self.sink.finish().ok();
+                return Err(DomainError::AudioCaptureFailed(format!(
+                    "capture format changed from {format:?} to {:?} during the recording \
+                     (the device reconnected); the audio before it was kept",
+                    frame.format
+                )));
+            }
             samples += frame.samples.len() as u64;
             if let Err(e) = self.sink.accept(&frame) {
                 warn!(error = %e, "sink rejected frame; stopping recording");
@@ -130,11 +153,15 @@ mod tests {
     };
     use pretty_assertions::assert_eq;
 
-    /// Synthetic stream that yields N frames then ends.
+    /// Synthetic stream that yields N frames then ends; with `switch`,
+    /// frames after the first `.0` ones carry format `.1`, like a device
+    /// that reconnected in another configuration.
     struct FakeStream {
         format: AudioFormat,
         remaining: usize,
         chunk: Vec<f32>,
+        switch: Option<(usize, AudioFormat)>,
+        sent: usize,
     }
 
     #[async_trait]
@@ -149,9 +176,14 @@ mod tests {
             self.remaining -= 1;
             // Yield to the runtime so timeouts work as expected.
             tokio::task::yield_now().await;
+            let format = match self.switch {
+                Some((after, later)) if self.sent >= after => later,
+                _ => self.format,
+            };
+            self.sent += 1;
             Some(AudioFrame {
                 samples: self.chunk.clone(),
-                format: self.format,
+                format,
                 captured_at_ns: 0,
             })
         }
@@ -165,6 +197,7 @@ mod tests {
         format: AudioFormat,
         chunk: Vec<f32>,
         frames: usize,
+        switch: Option<(usize, AudioFormat)>,
     }
 
     #[async_trait]
@@ -177,6 +210,8 @@ mod tests {
                 format: self.format,
                 remaining: self.frames,
                 chunk: self.chunk.clone(),
+                switch: self.switch,
+                sent: 0,
             }))
         }
     }
@@ -202,6 +237,7 @@ mod tests {
             format: AudioFormat::WHISPER,
             chunk: vec![0.0; 1_600], // 100 ms at 16 kHz mono
             frames: 5,
+            switch: None,
         });
         let sink = CountingSink::default();
         let report = RecordToSink::new(capture.clone(), sink.clone())
@@ -223,6 +259,7 @@ mod tests {
             format: AudioFormat::WHISPER,
             chunk: vec![0.0; 16],
             frames: usize::MAX,
+            switch: None,
         });
         let sink = CountingSink::default();
         let report = RecordToSink::new(capture, sink.clone())
@@ -231,5 +268,35 @@ mod tests {
             .unwrap();
         assert!(report.elapsed >= Duration::from_millis(50));
         assert!(sink.0.lock().unwrap().2);
+    }
+
+    /// One WAV holds one format: a device that comes back in another
+    /// one stops the recording with a clear error instead of writing
+    /// audio at the wrong speed. What was captured before is finished.
+    #[tokio::test]
+    async fn format_change_mid_recording_stops_with_a_clear_error() {
+        let later = AudioFormat {
+            sample_rate_hz: 48_000,
+            channels: 2,
+        };
+        let capture = Arc::new(FakeCapture {
+            format: AudioFormat::WHISPER,
+            chunk: vec![0.0; 1_600],
+            frames: 5,
+            switch: Some((2, later)),
+        });
+        let sink = CountingSink::default();
+        let err = RecordToSink::new(capture, sink.clone())
+            .execute(CaptureSpec::default_microphone(), Duration::from_secs(10))
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(&err, DomainError::AudioCaptureFailed(m) if m.contains("format changed")),
+            "unexpected error: {err:?}"
+        );
+        let g = sink.0.lock().unwrap();
+        assert_eq!(g.0, 2, "only the frames in the original format are written");
+        assert!(g.2, "sink.finish was not called");
     }
 }
