@@ -9,18 +9,16 @@
 //!    for offline use (CLI `transcribe` subcommand, tests).
 //! 3. Skips the resampler entirely when input is already 16 kHz mono.
 //!
-//! For real-time streaming during recording the resampler should be
-//! reused frame-by-frame; that path lands alongside the streaming ASR
-//! pipeline in Sprint 1.
-
-use std::sync::Mutex;
+//! For audio arriving in blocks, [`StreamResampler`] keeps the filter
+//! state across blocks so every sample is converted once and block
+//! edges leave no artefacts.
 
 use rubato::{
     Resampler as RubatoResampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType,
     WindowFunction,
 };
 
-use echo_domain::{AudioFormat, DomainError, Resampler, Sample};
+use echo_domain::{AudioFormat, DomainError, ResampleStream, Resampler, Sample};
 
 /// Whisper expects 16 kHz mono `f32`.
 pub const WHISPER_SAMPLE_RATE: u32 = 16_000;
@@ -51,25 +49,19 @@ impl From<ResampleError> for DomainError {
 }
 
 /// One-shot resample of `samples` (interleaved if multi-channel) into
-/// 16 kHz mono `f32`.
+/// 16 kHz mono `f32`, time-aligned with the input and as long as it.
 ///
-/// Returns the original buffer unchanged when the input is already in
-/// the target format.
+/// Returns the downmixed buffer unchanged when the input already runs
+/// at 16 kHz.
 pub fn resample_to_whisper(
     samples: &[Sample],
     format: AudioFormat,
 ) -> Result<Vec<Sample>, ResampleError> {
-    if format.channels == 0 || format.sample_rate_hz == 0 {
-        return Err(ResampleError::InvalidFormat(format));
-    }
-
-    let mono = downmix_to_mono(samples, format.channels);
-
-    if format.sample_rate_hz == WHISPER_SAMPLE_RATE {
-        return Ok(mono);
-    }
-
-    resample_mono(&mono, format.sample_rate_hz, WHISPER_SAMPLE_RATE)
+    let mut stream = StreamResampler::for_input(format, WHISPER_SAMPLE_RATE)?;
+    let mut out = Vec::with_capacity(samples.len());
+    stream.push(samples, format, &mut out)?;
+    stream.flush(&mut out)?;
+    Ok(out)
 }
 
 /// Equal-weight downmix. Stereo -> mean(L, R); 5.1 -> mean of all six
@@ -98,10 +90,7 @@ pub(crate) fn downmix_to_mono(samples: &[Sample], channels: u16) -> Vec<Sample> 
 pub(crate) const RESAMPLE_CHUNK_SIZE: usize = 1024;
 
 /// Build a fresh [`SincFixedIn`] resampler for the given rate pair.
-pub(crate) fn make_sinc_resampler(
-    from_hz: u32,
-    to_hz: u32,
-) -> Result<SincFixedIn<f32>, ResampleError> {
+fn make_sinc_resampler(from_hz: u32, to_hz: u32) -> Result<SincFixedIn<f32>, ResampleError> {
     let params = SincInterpolationParameters {
         sinc_len: 256,
         f_cutoff: 0.95,
@@ -114,89 +103,153 @@ pub(crate) fn make_sinc_resampler(
         .map_err(|e| ResampleError::Rubato(e.to_string()))
 }
 
-/// Push `samples` through an already-constructed resampler.
-fn process_mono(
-    resampler: &mut SincFixedIn<f32>,
-    samples: &[Sample],
-    ratio: f64,
-) -> Result<Vec<Sample>, ResampleError> {
-    if samples.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let total_in = samples.len();
-    let expected_out = ((total_in as f64) * ratio).round() as usize;
-
-    let mut input = Vec::with_capacity(total_in + RESAMPLE_CHUNK_SIZE);
-    input.extend_from_slice(samples);
-    let pad = (RESAMPLE_CHUNK_SIZE - (total_in % RESAMPLE_CHUNK_SIZE)) % RESAMPLE_CHUNK_SIZE;
-    input.resize(total_in + pad, 0.0);
-
-    let mut output: Vec<f32> = Vec::with_capacity(expected_out + RESAMPLE_CHUNK_SIZE);
-    let mut cursor = 0;
-    while cursor + RESAMPLE_CHUNK_SIZE <= input.len() {
-        let in_frame = vec![&input[cursor..cursor + RESAMPLE_CHUNK_SIZE]];
-        let out_frame = resampler
-            .process(&in_frame, None)
-            .map_err(|e| ResampleError::Rubato(e.to_string()))?;
-        output.extend_from_slice(&out_frame[0]);
-        cursor += RESAMPLE_CHUNK_SIZE;
-    }
-
-    output.truncate(expected_out);
-    Ok(output)
-}
-
-/// Resample a mono buffer from `from_hz` to `to_hz` using rubato's
-/// asynchronous sinc resampler with a balanced quality/speed preset.
+/// Stateful conversion of one continuous stream of interleaved samples
+/// to mono at a fixed target rate.
 ///
-/// Creates a fresh resampler each call — use [`RubatoResamplerAdapter`]
-/// for the streaming path where the sinc kernel is cached.
-fn resample_mono(
-    samples: &[Sample],
-    from_hz: u32,
-    to_hz: u32,
-) -> Result<Vec<Sample>, ResampleError> {
-    let mut resampler = make_sinc_resampler(from_hz, to_hz)?;
-    let ratio = f64::from(to_hz) / f64::from(from_hz);
-    process_mono(&mut resampler, samples, ratio)
+/// The sinc filter keeps its history between [`push`](Self::push)
+/// calls, so a stream cut into blocks resamples exactly like the whole
+/// signal at once. Its tail is drained by [`flush`](Self::flush), so
+/// output sample `k` lines up with input time `k / target_hz` and a
+/// flushed run holds `round(frames · target_hz / input_hz)` samples.
+/// (`SincFixedIn` starts centred on the first input sample, so its
+/// output is already aligned: dropping `output_delay()` samples would
+/// shift it early.)
+///
+/// The input format may change between calls (a device reconnected with
+/// another configuration): the audio of the old format is flushed first
+/// and the filter is rebuilt for the new one.
+pub struct StreamResampler {
+    target_hz: u32,
+    input: Option<AudioFormat>,
+    /// `None` while the input already runs at `target_hz`.
+    sinc: Option<SincFixedIn<Sample>>,
+    /// Mono input waiting for a full [`RESAMPLE_CHUNK_SIZE`] block.
+    pending: Vec<Sample>,
+    /// Input frames and output samples of the current run.
+    frames_in: u64,
+    frames_out: u64,
 }
 
-// ── Cached adapter for the streaming pipeline ───────────────────────
+impl StreamResampler {
+    /// A stream converting to mono at `target_hz`; the filter is built
+    /// on the first [`push`](Self::push).
+    pub fn new(target_hz: u32) -> Self {
+        Self {
+            target_hz,
+            input: None,
+            sinc: None,
+            pending: Vec::with_capacity(RESAMPLE_CHUNK_SIZE * 2),
+            frames_in: 0,
+            frames_out: 0,
+        }
+    }
 
-/// Cached sinc kernel + the rate pair it was built for.
-struct CachedSinc {
-    resampler: SincFixedIn<f32>,
-    from_hz: u32,
-    to_hz: u32,
+    /// A stream already configured for `input`, so an unusable format
+    /// fails here instead of on the first block.
+    pub fn for_input(input: AudioFormat, target_hz: u32) -> Result<Self, ResampleError> {
+        let mut stream = Self::new(target_hz);
+        stream.configure(input)?;
+        Ok(stream)
+    }
+
+    /// Convert the next block of interleaved `samples` in `input` format
+    /// and append the mono result to `out`.
+    pub fn push(
+        &mut self,
+        samples: &[Sample],
+        input: AudioFormat,
+        out: &mut Vec<Sample>,
+    ) -> Result<(), ResampleError> {
+        if self.input != Some(input) {
+            self.flush(out)?;
+            self.configure(input)?;
+        }
+        let mono = downmix_to_mono(samples, input.channels);
+        self.frames_in += mono.len() as u64;
+        if self.sinc.is_none() {
+            self.frames_out += mono.len() as u64;
+            out.extend_from_slice(&mono);
+            return Ok(());
+        }
+        self.pending.extend_from_slice(&mono);
+        while self.pending.len() >= RESAMPLE_CHUNK_SIZE {
+            self.process_block(out, u64::MAX)?;
+        }
+        Ok(())
+    }
+
+    /// Append the audio still held in the filter to `out` and start a
+    /// new run, so the run's output matches its input duration.
+    pub fn flush(&mut self, out: &mut Vec<Sample>) -> Result<(), ResampleError> {
+        if let (Some(input), true) = (self.input, self.sinc.is_some()) {
+            let ratio = f64::from(self.target_hz) / f64::from(input.sample_rate_hz);
+            let total = (self.frames_in as f64 * ratio).round() as u64;
+            while self.frames_out < total {
+                let progress = self.frames_out;
+                self.pending.resize(RESAMPLE_CHUNK_SIZE, 0.0);
+                self.process_block(out, total)?;
+                if self.frames_out == progress {
+                    break; // defensive: a block that yields nothing never will
+                }
+            }
+        }
+        self.restart();
+        Ok(())
+    }
+
+    fn configure(&mut self, input: AudioFormat) -> Result<(), ResampleError> {
+        if input.channels == 0 || input.sample_rate_hz == 0 || self.target_hz == 0 {
+            return Err(ResampleError::InvalidFormat(input));
+        }
+        self.sinc = if input.sample_rate_hz == self.target_hz {
+            None
+        } else {
+            Some(make_sinc_resampler(input.sample_rate_hz, self.target_hz)?)
+        };
+        self.input = Some(input);
+        self.restart();
+        Ok(())
+    }
+
+    fn restart(&mut self) {
+        self.pending.clear();
+        self.frames_in = 0;
+        self.frames_out = 0;
+        if let Some(sinc) = self.sinc.as_mut() {
+            sinc.reset();
+        }
+    }
+
+    /// Run one [`RESAMPLE_CHUNK_SIZE`] block of `pending` through the
+    /// filter, stopping at `cap` output samples for the run.
+    fn process_block(&mut self, out: &mut Vec<Sample>, cap: u64) -> Result<(), ResampleError> {
+        let Some(sinc) = self.sinc.as_mut() else {
+            return Ok(());
+        };
+        let block: Vec<Sample> = self.pending.drain(..RESAMPLE_CHUNK_SIZE).collect();
+        let produced = sinc
+            .process(&[block.as_slice()], None)
+            .map_err(|e| ResampleError::Rubato(e.to_string()))?;
+        let fresh = &produced[0];
+        let room = usize::try_from(cap.saturating_sub(self.frames_out)).unwrap_or(usize::MAX);
+        let fresh = &fresh[..fresh.len().min(room)];
+        out.extend_from_slice(fresh);
+        self.frames_out += fresh.len() as u64;
+        Ok(())
+    }
 }
 
-/// Adapter that satisfies the [`echo_domain::Resampler`] port using
-/// [`rubato::SincFixedIn`].  Caches the 256-tap sinc kernel across
-/// calls so the expensive filter construction only happens once per
-/// sample-rate pair (typically once per recording session).
-pub struct RubatoResamplerAdapter {
-    cached: Mutex<Option<CachedSinc>>,
-}
+// ── Adapter for the domain port ─────────────────────────────────────
+
+/// Satisfies the [`echo_domain::Resampler`] port with [`rubato`]'s sinc
+/// filter: one-shot conversions for whole buffers, and a
+/// [`StreamResampler`] per capture stream for audio arriving in blocks.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct RubatoResamplerAdapter;
 
 impl RubatoResamplerAdapter {
     pub fn new() -> Self {
-        Self {
-            cached: Mutex::new(None),
-        }
-    }
-}
-
-impl Default for RubatoResamplerAdapter {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl std::fmt::Debug for RubatoResamplerAdapter {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RubatoResamplerAdapter")
-            .finish_non_exhaustive()
+        Self
     }
 }
 
@@ -206,41 +259,29 @@ impl Resampler for RubatoResamplerAdapter {
         samples: &[Sample],
         input: AudioFormat,
     ) -> Result<Vec<Sample>, DomainError> {
-        if input.channels == 0 || input.sample_rate_hz == 0 {
-            return Err(ResampleError::InvalidFormat(input).into());
-        }
+        Ok(resample_to_whisper(samples, input)?)
+    }
 
-        let mono = downmix_to_mono(samples, input.channels);
+    fn stream(&self) -> Box<dyn ResampleStream> {
+        Box::new(WhisperStream(StreamResampler::new(WHISPER_SAMPLE_RATE)))
+    }
+}
 
-        if input.sample_rate_hz == WHISPER_SAMPLE_RATE {
-            return Ok(mono);
-        }
+/// [`StreamResampler`] fixed to 16 kHz, behind the domain port.
+struct WhisperStream(StreamResampler);
 
-        let from_hz = input.sample_rate_hz;
-        let to_hz = WHISPER_SAMPLE_RATE;
-        let ratio = f64::from(to_hz) / f64::from(from_hz);
+impl ResampleStream for WhisperStream {
+    fn push(
+        &mut self,
+        samples: &[Sample],
+        input: AudioFormat,
+        out: &mut Vec<Sample>,
+    ) -> Result<(), DomainError> {
+        Ok(self.0.push(samples, input, out)?)
+    }
 
-        let mut guard = self.cached.lock().unwrap_or_else(|e| e.into_inner());
-
-        // Reuse the cached kernel when the rate pair matches; otherwise
-        // build a fresh one and stash it.
-        let sinc = match guard.as_mut() {
-            Some(c) if c.from_hz == from_hz && c.to_hz == to_hz => {
-                c.resampler.reset();
-                &mut c.resampler
-            }
-            _ => {
-                let rs = make_sinc_resampler(from_hz, to_hz).map_err(DomainError::from)?;
-                *guard = Some(CachedSinc {
-                    resampler: rs,
-                    from_hz,
-                    to_hz,
-                });
-                &mut guard.as_mut().unwrap().resampler
-            }
-        };
-
-        Ok(process_mono(sinc, &mono, ratio)?)
+    fn flush(&mut self, out: &mut Vec<Sample>) -> Result<(), DomainError> {
+        Ok(self.0.flush(out)?)
     }
 }
 
@@ -312,6 +353,119 @@ mod tests {
         let out = resample_to_whisper(&interleaved, fmt).unwrap();
         let diff = (out.len() as i64 - 16_000_i64).unsigned_abs();
         assert!(diff <= 800, "len={}", out.len());
+    }
+
+    /// `seconds` of a `hz` sine at `rate` mono, amplitude 0.5.
+    fn tone(rate: u32, hz: f32, seconds: f32) -> Vec<Sample> {
+        let n = (rate as f32 * seconds) as usize;
+        (0..n)
+            .map(|i| 0.5 * (2.0 * std::f32::consts::PI * hz * i as f32 / rate as f32).sin())
+            .collect()
+    }
+
+    /// Silence of `len` samples with a unit impulse at `at`.
+    fn impulse(len: usize, at: usize) -> Vec<Sample> {
+        let mut x = vec![0.0; len];
+        x[at] = 1.0;
+        x
+    }
+
+    /// Index of the strongest sample in `x[from..to]`.
+    fn peak(x: &[Sample], from: usize, to: usize) -> usize {
+        (from..to)
+            .max_by(|&a, &b| x[a].abs().total_cmp(&x[b].abs()))
+            .unwrap()
+    }
+
+    fn max_abs_diff(a: &[Sample], b: &[Sample]) -> f32 {
+        a.iter()
+            .zip(b)
+            .map(|(x, y)| (x - y).abs())
+            .fold(0.0, f32::max)
+    }
+
+    const MONO_48K: AudioFormat = AudioFormat {
+        sample_rate_hz: 48_000,
+        channels: 1,
+    };
+
+    #[test]
+    fn one_shot_output_is_time_aligned_and_keeps_the_tail() {
+        // An impulse half a second in lands half a second in.
+        let out = resample_to_whisper(&impulse(48_000, 24_000), MONO_48K).unwrap();
+        assert_eq!(out.len(), 16_000);
+        let at = peak(&out, 0, out.len());
+        assert!(at.abs_diff(8_000) <= 1, "impulse moved to {at}");
+
+        // The last 5 ms of a tone are real audio, not dropped or padding.
+        let out = resample_to_whisper(&tone(48_000, 440.0, 1.0), MONO_48K).unwrap();
+        assert_eq!(out.len(), 16_000);
+        let tail_rms = (out[out.len() - 80..].iter().map(|s| s * s).sum::<f32>() / 80.0).sqrt();
+        assert!(tail_rms > 0.2, "tail lost: rms {tail_rms}");
+    }
+
+    #[test]
+    fn stream_in_device_sized_blocks_matches_one_shot() {
+        let input = tone(48_000, 440.0, 1.0);
+        let whole = resample_to_whisper(&input, MONO_48K).unwrap();
+
+        // ~10.7 ms cpal blocks, as the live pipeline receives them.
+        let mut stream = StreamResampler::new(WHISPER_SAMPLE_RATE);
+        let mut blocks = Vec::new();
+        for block in input.chunks(512) {
+            stream.push(block, MONO_48K, &mut blocks).unwrap();
+        }
+        stream.flush(&mut blocks).unwrap();
+
+        assert_eq!(blocks.len(), whole.len());
+        let diff = max_abs_diff(&blocks, &whole);
+        assert!(
+            diff < 1e-5,
+            "block edges changed the output: max diff {diff}"
+        );
+    }
+
+    #[test]
+    fn stream_follows_a_format_change_without_losing_time() {
+        // 0.5 s mono 48 kHz, then the device comes back as stereo 44.1 kHz;
+        // each part has an impulse 0.25 s into it.
+        let stereo_44k = AudioFormat {
+            sample_rate_hz: 44_100,
+            channels: 2,
+        };
+        let second: Vec<Sample> = impulse(22_050, 11_025)
+            .into_iter()
+            .flat_map(|s| [s, s])
+            .collect();
+        let mut stream = StreamResampler::new(WHISPER_SAMPLE_RATE);
+        let mut out = Vec::new();
+        stream
+            .push(&impulse(24_000, 12_000), MONO_48K, &mut out)
+            .unwrap();
+        stream.push(&second, stereo_44k, &mut out).unwrap();
+        stream.flush(&mut out).unwrap();
+
+        // 1 s of audio in, 1 s out: neither part is sped up or lost.
+        assert_eq!(out.len(), 16_000);
+        let first = peak(&out, 0, 8_000);
+        let second = peak(&out, 8_000, 16_000);
+        assert!(first.abs_diff(4_000) <= 1, "first impulse at {first}");
+        assert!(second.abs_diff(12_000) <= 1, "second impulse at {second}");
+    }
+
+    #[test]
+    fn stream_passes_16k_through_after_downmix() {
+        let stereo_16k = AudioFormat {
+            sample_rate_hz: 16_000,
+            channels: 2,
+        };
+        let mut stream = StreamResampler::new(WHISPER_SAMPLE_RATE);
+        let mut out = Vec::new();
+        stream
+            .push(&[0.2, 0.4, -1.0, 1.0], stereo_16k, &mut out)
+            .unwrap();
+        stream.flush(&mut out).unwrap();
+        assert_eq!(out, vec![0.3, 0.0]);
     }
 
     #[test]

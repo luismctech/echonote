@@ -20,8 +20,9 @@ use pretty_assertions::assert_eq;
 use echo_domain::ports::vad::VadFrame;
 use echo_domain::{
     AudioCapture, AudioFormat, AudioFrame, AudioSource, AudioStream, CaptureSpec, DeviceInfo,
-    Diarizer, DomainError, Resampler, Sample, Segment, SegmentId, Speaker, SpeakerId,
-    StreamingOptions, TranscribeOptions, Transcriber, Transcript, TranscriptEvent, Vad, VoiceState,
+    Diarizer, DomainError, ResampleStream, Resampler, Sample, Segment, SegmentId, Speaker,
+    SpeakerId, StreamingOptions, TranscribeOptions, Transcriber, Transcript, TranscriptEvent, Vad,
+    VoiceState,
 };
 
 use super::{referenced_speakers, StreamingHandle, StreamingPipeline};
@@ -98,6 +99,24 @@ impl Resampler for PassThroughResampler {
         _input: AudioFormat,
     ) -> Result<Vec<Sample>, DomainError> {
         Ok(samples.to_vec())
+    }
+    fn stream(&self) -> Box<dyn ResampleStream> {
+        Box::new(PassThroughResampler)
+    }
+}
+
+impl ResampleStream for PassThroughResampler {
+    fn push(
+        &mut self,
+        samples: &[Sample],
+        _input: AudioFormat,
+        out: &mut Vec<Sample>,
+    ) -> Result<(), DomainError> {
+        out.extend_from_slice(samples);
+        Ok(())
+    }
+    fn flush(&mut self, _out: &mut Vec<Sample>) -> Result<(), DomainError> {
+        Ok(())
     }
 }
 
@@ -1546,6 +1565,24 @@ impl Resampler for LeftChannelResampler {
             .step_by(usize::from(input.channels))
             .copied()
             .collect())
+    }
+    fn stream(&self) -> Box<dyn ResampleStream> {
+        Box::new(LeftChannelResampler)
+    }
+}
+
+impl ResampleStream for LeftChannelResampler {
+    fn push(
+        &mut self,
+        samples: &[Sample],
+        input: AudioFormat,
+        out: &mut Vec<Sample>,
+    ) -> Result<(), DomainError> {
+        out.extend(self.to_whisper(samples, input)?);
+        Ok(())
+    }
+    fn flush(&mut self, _out: &mut Vec<Sample>) -> Result<(), DomainError> {
+        Ok(())
     }
 }
 

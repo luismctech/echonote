@@ -31,7 +31,8 @@ pub use capture::{CpalMicrophoneCapture, MixControls, MixedStream, RoutingAudioC
 pub use capture::{ScreenCaptureKitCapture, SYSTEM_OUTPUT_DEVICE_ID};
 pub use output_device::{default_output_device_info, OutputDeviceInfo};
 pub use preprocess::resample::{
-    resample_to_whisper, ResampleError, RubatoResamplerAdapter, WHISPER_SAMPLE_RATE,
+    resample_to_whisper, ResampleError, RubatoResamplerAdapter, StreamResampler,
+    WHISPER_SAMPLE_RATE,
 };
 pub use preprocess::silero_vad::{
     SileroVad, SileroVadConfig, SILERO_FRAME_SAMPLES, SILERO_SAMPLE_RATE,

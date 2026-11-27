@@ -20,16 +20,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use rubato::{Resampler as RubatoResampler, SincFixedIn};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tracing::{debug, warn};
 
 use echo_domain::{AudioFormat, AudioFrame, AudioStream, DomainError, Sample};
 
-use crate::preprocess::resample::{
-    downmix_to_mono, make_sinc_resampler, ResampleError, RESAMPLE_CHUNK_SIZE,
-};
+use crate::preprocess::resample::{ResampleError, StreamResampler};
 
 /// Samples per emitted mixed frame. ~10 ms at 16 kHz mono.
 /// Picked to match the cadence of upstream capture frames.
@@ -112,16 +109,8 @@ impl MixedStream {
         // Build the per-source normalizers up front so we surface any
         // resampler-construction error synchronously instead of panicking
         // inside the spawned task.
-        let mic_norm = SourceNormalizer::new(mic_format, target_format).map_err(|e| {
-            DomainError::AudioCaptureFailed(format!(
-                "mic normalizer ({mic_format:?} -> {target_format:?}): {e}"
-            ))
-        })?;
-        let sys_norm = SourceNormalizer::new(sys_format, target_format).map_err(|e| {
-            DomainError::AudioCaptureFailed(format!(
-                "sys normalizer ({sys_format:?} -> {target_format:?}): {e}"
-            ))
-        })?;
+        let mic_norm = normalizer("mic", mic_format, target_format)?;
+        let sys_norm = normalizer("sys", sys_format, target_format)?;
 
         debug!(
             target = ?target_format,
@@ -197,73 +186,30 @@ impl Drop for MixedStream {
 // Per-source normalizer
 // ---------------------------------------------------------------------------
 
-/// Converts a single source's native samples into target-format mono
-/// samples. Owns a `SincFixedIn` resampler when the rates differ;
-/// otherwise the downmixed mono samples pass through.
-///
-/// The resampler runs in fixed input-chunks of `RESAMPLE_CHUNK_SIZE`
-/// frames; the normalizer pre-buffers incoming samples until a full chunk
-/// is available, then emits the resampled output.
-struct SourceNormalizer {
-    #[allow(dead_code)]
+/// Builds the stateful converter of one source to the mono target
+/// rate. It follows the format each frame carries, so a source that
+/// reconnects with another configuration keeps its speed and timing.
+fn normalizer(
+    source: &str,
     native: AudioFormat,
-    #[allow(dead_code)]
     target: AudioFormat,
-    resampler: Option<SincFixedIn<Sample>>,
-    /// Pre-buffer of mono samples in the *native* rate awaiting a full
-    /// chunk before being pushed through `rubato`.
-    pending: Vec<Sample>,
+) -> Result<StreamResampler, DomainError> {
+    let built = if target.channels == 1 {
+        StreamResampler::for_input(native, target.sample_rate_hz)
+    } else {
+        Err(ResampleError::InvalidFormat(target))
+    };
+    built.map_err(|e| {
+        DomainError::AudioCaptureFailed(format!(
+            "{source} normalizer ({native:?} -> {target:?}): {e}"
+        ))
+    })
 }
 
-impl SourceNormalizer {
-    fn new(native: AudioFormat, target: AudioFormat) -> Result<Self, ResampleError> {
-        if target.channels != 1 {
-            return Err(ResampleError::InvalidFormat(target));
-        }
-        let resampler = if native.sample_rate_hz != target.sample_rate_hz {
-            Some(make_sinc_resampler(
-                native.sample_rate_hz,
-                target.sample_rate_hz,
-            )?)
-        } else {
-            None
-        };
-        Ok(Self {
-            native,
-            target,
-            resampler,
-            pending: Vec::with_capacity(RESAMPLE_CHUNK_SIZE * 2),
-        })
-    }
-
-    /// Push native-format samples; append target-format mono samples to `out`.
-    fn push(&mut self, samples: &[Sample], out: &mut Vec<Sample>) {
-        if samples.is_empty() {
-            return;
-        }
-        // 1. Downmix to mono if the source is multi-channel.
-        let mono: Vec<Sample> = if self.native.channels > 1 {
-            downmix_to_mono(samples, self.native.channels)
-        } else {
-            samples.to_vec()
-        };
-        // 2. Same rate? Pass mono through directly.
-        let Some(rs) = self.resampler.as_mut() else {
-            out.extend_from_slice(&mono);
-            return;
-        };
-        // 3. Different rate: buffer + chunked rubato.
-        self.pending.extend_from_slice(&mono);
-        while self.pending.len() >= RESAMPLE_CHUNK_SIZE {
-            // Drain a chunk into a contiguous buffer for rubato.
-            let chunk: Vec<Sample> = self.pending.drain(..RESAMPLE_CHUNK_SIZE).collect();
-            match rs.process(&[chunk.as_slice()], None) {
-                Ok(frames) => out.extend_from_slice(&frames[0]),
-                Err(e) => {
-                    warn!(error = %e, "mixed-stream: resampler error; dropping chunk");
-                }
-            }
-        }
+/// Appends `frame`, converted to the target format, to `buf`.
+fn normalize(norm: &mut StreamResampler, frame: &AudioFrame, buf: &mut Vec<Sample>, source: &str) {
+    if let Err(e) = norm.push(&frame.samples, frame.format, buf) {
+        warn!(source, error = %e, format = ?frame.format, "mixed-stream: cannot convert frame; dropping it");
     }
 }
 
@@ -275,8 +221,8 @@ impl SourceNormalizer {
 async fn run_mixer(
     mut mic: Box<dyn AudioStream>,
     mut sys: Box<dyn AudioStream>,
-    mut mic_norm: SourceNormalizer,
-    mut sys_norm: SourceNormalizer,
+    mut mic_norm: StreamResampler,
+    mut sys_norm: StreamResampler,
     target_format: AudioFormat,
     tx: mpsc::Sender<AudioFrame>,
     mut stop_rx: oneshot::Receiver<()>,
@@ -356,7 +302,7 @@ async fn run_mixer(
             }
             frame = mic.next_frame() => {
                 match frame {
-                    Some(f) => mic_norm.push(&f.samples, &mut mic_buf),
+                    Some(f) => normalize(&mut mic_norm, &f, &mut mic_buf, "mic"),
                     None => {
                         debug!("mixed-stream: mic stream ended");
                         break;
@@ -365,7 +311,7 @@ async fn run_mixer(
             }
             frame = sys.next_frame() => {
                 match frame {
-                    Some(f) => sys_norm.push(&f.samples, &mut sys_buf),
+                    Some(f) => normalize(&mut sys_norm, &f, &mut sys_buf, "sys"),
                     None => {
                         debug!("mixed-stream: system stream ended");
                         break;
@@ -646,6 +592,43 @@ mod tests {
                 "frame {i} must carry both tones: 440 Hz {p440}, 1 kHz {p1000}, floor {silence}"
             );
         }
+    }
+
+    /// A mic that reconnects with another configuration tags its frames
+    /// with the new format; the mixer must follow it so the mic keeps
+    /// its speed and stays aligned with system audio.
+    #[tokio::test]
+    async fn mic_format_change_after_reconnect_keeps_time() {
+        let mono_48k = AudioFormat {
+            sample_rate_hz: 48_000,
+            channels: 1,
+        };
+        let stereo_16k = AudioFormat {
+            sample_rate_hz: 16_000,
+            channels: 2,
+        };
+        // 100 ms before the reconnect, 100 ms after it.
+        let mut mic_frames = frames_of(4_800, 960, 440.0, mono_48k);
+        mic_frames.extend(frames_of(3_200, 640, 440.0, stereo_16k));
+        let mic = ScriptedStream::boxed(mono_48k, mic_frames);
+        let fmt = AudioFormat::WHISPER;
+        let sys = ScriptedStream::boxed(fmt, frames_of(3_200, 320, 1_000.0, fmt));
+        let (mut stream, _ctrl) = MixedStream::new(mic, sys, fmt).expect("build mixed stream");
+
+        let frames = drain(&mut stream, Duration::from_millis(200)).await;
+        let all: Vec<f32> = frames
+            .iter()
+            .flat_map(|f| f.samples.iter().copied())
+            .collect();
+        assert_eq!(all.len(), 3_200, "200 ms in from each source, 200 ms out");
+        let after = &all[1_600..];
+        let p440 = tone_power(after, 440.0, fmt.sample_rate_hz);
+        let p1000 = tone_power(after, 1_000.0, fmt.sample_rate_hz);
+        let floor = tone_power(after, 2_500.0, fmt.sample_rate_hz);
+        assert!(
+            p440 > 10.0 * floor && p1000 > 10.0 * floor,
+            "after the reconnect both tones must survive: 440 Hz {p440}, 1 kHz {p1000}, floor {floor}"
+        );
     }
 
     /// A source that stops delivering must not stall the other: after a

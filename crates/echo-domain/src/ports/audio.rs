@@ -161,8 +161,11 @@ impl CaptureSpec {
 /// when [`AudioStream::stop`] is called or the stream is dropped.
 #[async_trait]
 pub trait AudioStream: Send {
-    /// Format of the underlying device. Available after [`AudioCapture::start`]
-    /// returns; may differ from the [`CaptureSpec::preferred_format`].
+    /// Format of the underlying device when the stream started. Available
+    /// after [`AudioCapture::start`] returns; may differ from the
+    /// [`CaptureSpec::preferred_format`]. A stream that reconnects its
+    /// device may continue in another format: consumers convert each
+    /// frame by its own [`AudioFrame::format`].
     fn format(&self) -> AudioFormat;
 
     /// Returns the next captured frame, or `None` when the stream ends
