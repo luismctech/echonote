@@ -13,6 +13,7 @@
 //! state across blocks so every sample is converted once and block
 //! edges leave no artefacts.
 
+use std::sync::Mutex;
 
 use rubato::{
     Resampler as RubatoResampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType,
@@ -302,12 +303,26 @@ impl FormatConverter {
 /// Satisfies the [`echo_domain::Resampler`] port with [`rubato`]'s sinc
 /// filter: one-shot conversions for whole buffers, and a
 /// [`StreamResampler`] per capture stream for audio arriving in blocks.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct RubatoResamplerAdapter;
+///
+/// One-shot conversions reuse one cached filter (building one costs
+/// about as much as converting a second of audio). The cache is taken
+/// with `try_lock`, so concurrent callers never wait on each other: a
+/// caller that finds it busy builds its own filter.
+#[derive(Default)]
+pub struct RubatoResamplerAdapter {
+    one_shot: Mutex<Option<StreamResampler>>,
+}
 
 impl RubatoResamplerAdapter {
     pub fn new() -> Self {
-        Self
+        Self::default()
+    }
+}
+
+impl std::fmt::Debug for RubatoResamplerAdapter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RubatoResamplerAdapter")
+            .finish_non_exhaustive()
     }
 }
 
@@ -317,7 +332,21 @@ impl Resampler for RubatoResamplerAdapter {
         samples: &[Sample],
         input: AudioFormat,
     ) -> Result<Vec<Sample>, DomainError> {
-        Ok(resample_to_whisper(samples, input)?)
+        let Ok(mut cached) = self.one_shot.try_lock() else {
+            return Ok(resample_to_whisper(samples, input)?);
+        };
+        let stream = cached.get_or_insert_with(|| StreamResampler::new(WHISPER_SAMPLE_RATE));
+        let mut out = Vec::with_capacity(samples.len());
+        // `push` rebuilds the filter only when the format differs from
+        // the previous call; `flush` leaves it reset for the next one.
+        let converted = stream
+            .push(samples, input, &mut out)
+            .and_then(|()| stream.flush(&mut out));
+        if converted.is_err() {
+            *cached = None; // never keep a stream in an unknown state
+        }
+        converted?;
+        Ok(out)
     }
 
     fn stream(&self) -> Box<dyn ResampleStream> {
@@ -545,6 +574,31 @@ mod tests {
         let left: Vec<Sample> = out.iter().step_by(2).copied().collect();
         let at = peak(&left, 0, 2_000);
         assert!(ideal[at].abs() > 0.45, "tone lost its timing at {at}");
+    }
+
+    #[test]
+    fn adapter_reuses_its_filter_without_carrying_state() {
+        let stereo_44k = AudioFormat {
+            sample_rate_hz: 44_100,
+            channels: 2,
+        };
+        let adapter = RubatoResamplerAdapter::new();
+        let a = tone(48_000, 440.0, 0.3);
+        let b: Vec<Sample> = tone(44_100, 220.0, 0.3)
+            .into_iter()
+            .flat_map(|s| [s, s])
+            .collect();
+        let c = tone(48_000, 880.0, 0.2);
+        // Each call equals a fresh one-shot conversion, in any order.
+        for (x, fmt) in [
+            (&a, MONO_48K),
+            (&b, stereo_44k),
+            (&c, MONO_48K),
+            (&a, MONO_48K),
+        ] {
+            let reused = adapter.to_whisper(x, fmt).unwrap();
+            assert_eq!(reused, resample_to_whisper(x, fmt).unwrap());
+        }
     }
 
     #[test]
