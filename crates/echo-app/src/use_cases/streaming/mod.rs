@@ -41,8 +41,11 @@
 //! clock and the audio sink, are shed while transcription runs behind
 //! capture, and never change how final chunks are cut or transcribed.
 //!
-//! Chunk offsets are derived from the device frames actually emitted,
-//! so segment timestamps stay exact with variable-length chunks.
+//! Captured audio is converted to 16 kHz mono once, as it arrives, by
+//! the format each frame carries (a device may reconnect in another
+//! one). Chunk offsets are derived from the 16 kHz samples actually
+//! emitted, so segment timestamps stay exact with variable-length
+//! chunks.
 //! Pausing flushes the buffered audio first; paused audio is not part
 //! of session time.
 //!
@@ -71,9 +74,9 @@ use tracing::{debug, error, info, warn};
 use chunker::{draft_due, ChunkBounds, Cut, SpeechTimeline, TimedFrame};
 use echo_domain::{
     AudioCapture, AudioFormat, AudioFrame, AudioStream, CaptureSpec, ChunkContext, Diarizer,
-    DomainError, Punctuator, RefineOutcome, Resampler, Sample, SpeakerId, SpeakerMerge, SpeakerRef,
-    SpeakerSpan, StreamingOptions, StreamingSessionId, TranscribeOptions, Transcriber,
-    TranscriptEvent, Vad, VoiceState,
+    DomainError, Punctuator, RefineOutcome, ResampleStream, Resampler, Sample, SpeakerId,
+    SpeakerMerge, SpeakerRef, SpeakerSpan, StreamingOptions, StreamingSessionId, TranscribeOptions,
+    Transcriber, TranscriptEvent, Vad, VoiceState,
 };
 use gain::AutoGain;
 pub use refine::DEFAULT_REFINE_TIMEOUT;
@@ -431,6 +434,9 @@ impl Drop for StreamingHandle {
 /// captured before a pause, or keep audio captured during it.
 struct CapturedFrame {
     samples: Vec<Sample>,
+    /// Format of `samples`; may change mid-session after a device
+    /// reconnect.
+    format: AudioFormat,
     paused: bool,
 }
 
@@ -439,8 +445,10 @@ struct CapturedFrame {
 struct CaptureMeter {
     /// Wall-clock time covered by non-paused frames, in microseconds.
     active_us: AtomicU64,
-    /// Samples queued by the reader and not yet taken by the pipeline.
-    backlog_samples: AtomicU64,
+    /// Duration of the audio queued by the reader and not yet taken by
+    /// the pipeline, in microseconds. Counted per frame in its own
+    /// format, so a device that reconnects in another one stays exact.
+    backlog_us: AtomicU64,
 }
 
 /// Drain `stream` into `frames` until stop is signalled (or the stop
@@ -482,10 +490,13 @@ async fn read_capture(
             meter.active_us.fetch_add(gap_us, Ordering::Relaxed);
         }
         last_arrival = now;
-        let len = frame.samples.len() as u64;
-        meter.backlog_samples.fetch_add(len, Ordering::Relaxed);
+        meter.backlog_us.fetch_add(
+            duration_us(frame.samples.len(), frame.format),
+            Ordering::Relaxed,
+        );
         let captured = CapturedFrame {
             samples: frame.samples,
+            format: frame.format,
             paused,
         };
         if frames.send(captured).is_err() {
@@ -540,17 +551,20 @@ async fn run_pipeline(
         PipelineSource::Prestarted(s) => s,
     };
 
-    let format = stream.format();
+    let capture_format = stream.format();
     let _ = events
         .send(TranscriptEvent::Started {
             session_id,
-            input_format: format,
+            input_format: capture_format,
         })
         .await;
 
+    // Captured audio is converted to 16 kHz mono once, as it arrives;
+    // the VAD, drafts, ASR, diarizer and saved audio all reuse it.
+    let format = AudioFormat::WHISPER;
+    let mut intake = resampler.stream();
     let mut chunker = Chunker::new(vad, format, &options);
     let mut emitter = ChunkEmitter {
-        resampler,
         transcriber,
         diarizer,
         punctuator,
@@ -597,17 +611,20 @@ async fn run_pipeline(
     // every frame it queued has been processed, so no audio captured
     // before stop is lost.
     while let Some(frame) = frame_rx.recv().await {
-        emitter
-            .meter
-            .backlog_samples
-            .fetch_sub(frame.samples.len() as u64, Ordering::Relaxed);
+        emitter.meter.backlog_us.fetch_sub(
+            duration_us(frame.samples.len(), frame.format),
+            Ordering::Relaxed,
+        );
         let is_paused = frame.paused;
 
         // Emit state-change events exactly once per transition.
         if is_paused && !was_paused {
             debug!(%session_id, "pipeline paused");
             // Transcribe what was captured before the pause instead of
-            // dropping it, then report the pause.
+            // dropping it, then report the pause. The audio after the
+            // pause is not contiguous, so the resampler starts afresh.
+            let tail = flush_intake(intake.as_mut(), session_id);
+            take_in(tail, auto_gain.as_mut(), &mut emitter, &mut buffer);
             chunker.flush(&mut buffer, &mut emitter).await;
             let _ = events.send(TranscriptEvent::Paused { session_id }).await;
             was_paused = true;
@@ -633,13 +650,14 @@ async fn run_pipeline(
             continue;
         }
 
-        // After the pause check, so paused audio is never measured.
-        let mut samples = frame.samples;
-        if let Some(gain) = auto_gain.as_mut() {
-            gain.process(&mut samples);
+        // After the pause check, so paused audio is never measured. The
+        // frame's own format wins: a device that reconnected may have
+        // come back in another one.
+        let mut pcm = Vec::new();
+        if let Err(e) = intake.push(&frame.samples, frame.format, &mut pcm) {
+            warn!(%session_id, error = %e, format = ?frame.format, "cannot convert captured audio; dropping frame");
         }
-        emitter.intake_frames += samples.len() as u64 / u64::from(emitter.format.channels.max(1));
-        buffer.extend_from_slice(&samples);
+        take_in(pcm, auto_gain.as_mut(), &mut emitter, &mut buffer);
         chunker.drain_ready(&mut buffer, &mut emitter).await;
     }
 
@@ -652,6 +670,8 @@ async fn run_pipeline(
     }
 
     // Flush whatever is still buffered as final, possibly-shorter chunks.
+    let tail = flush_intake(intake.as_mut(), session_id);
+    take_in(tail, auto_gain.as_mut(), &mut emitter, &mut buffer);
     chunker.flush(&mut buffer, &mut emitter).await;
     emitter.finish_audio();
 
@@ -856,7 +876,7 @@ impl SpeechChunker {
 
     async fn drain_ready(&mut self, buffer: &mut Vec<Sample>, emitter: &mut ChunkEmitter) {
         if buffer.len() - self.analyzed >= self.block {
-            self.analyze(buffer, emitter).await;
+            self.analyze(buffer).await;
         }
         while let Some(cut) = self.timeline.next_cut(&self.bounds) {
             self.emit(cut, buffer, emitter).await;
@@ -891,7 +911,7 @@ impl SpeechChunker {
 
     async fn flush(&mut self, buffer: &mut Vec<Sample>, emitter: &mut ChunkEmitter) {
         if buffer.len() > self.analyzed {
-            self.analyze(buffer, emitter).await;
+            self.analyze(buffer).await;
         }
         while let Some(cut) = self.timeline.final_cut(&self.bounds, buffer.len()) {
             self.emit(cut, buffer, emitter).await;
@@ -902,42 +922,22 @@ impl SpeechChunker {
         self.last_draft_end = None;
     }
 
-    /// Push the unanalysed tail of `buffer` through the VAD and record
-    /// its frames in buffer coordinates. The VAD sees 16 kHz audio, so
-    /// frame ends are mapped back proportionally to device frames. A
-    /// failing resampler or VAD marks the block voiced: transcribing
+    /// Push the unanalysed tail of `buffer` (16 kHz mono, as the VAD
+    /// expects) through the VAD and record its frames in buffer
+    /// coordinates. A failing VAD marks the block voiced: transcribing
     /// noise is better than silently dropping speech.
-    async fn analyze(&mut self, buffer: &[Sample], emitter: &ChunkEmitter) {
+    async fn analyze(&mut self, buffer: &[Sample]) {
         let start = self.analyzed;
         let block = &buffer[start..];
         self.analyzed = buffer.len();
-        let channels = usize::from(emitter.format.channels.max(1));
-        let block_frames = block.len() / channels;
-
-        let fail_open = |timeline: &mut SpeechTimeline| {
-            timeline.push(TimedFrame {
-                end: start + block_frames * channels,
-                probability: 1.0,
-                state: VoiceState::Voiced,
-            });
-        };
-
-        let resampled = match emitter.resampler.to_whisper(block, emitter.format) {
-            Ok(r) if !r.is_empty() => r,
-            Ok(_) => return,
-            Err(e) => {
-                warn!(error = %e, "resampler failed during VAD analysis; treating block as speech");
-                fail_open(&mut self.timeline);
-                return;
-            }
-        };
-        match self.vad.push_frames(&resampled).await {
+        if block.is_empty() {
+            return;
+        }
+        match self.vad.push_frames(block).await {
             Ok(frames) => {
                 for f in frames {
-                    let frame_end =
-                        (f.end_sample * block_frames / resampled.len()).min(block_frames);
                     self.timeline.push(TimedFrame {
-                        end: start + frame_end * channels,
+                        end: start + f.end_sample.min(block.len()),
                         probability: f.probability,
                         state: f.state,
                     });
@@ -945,7 +945,11 @@ impl SpeechChunker {
             }
             Err(e) => {
                 warn!(error = %e, "VAD failed; treating block as speech");
-                fail_open(&mut self.timeline);
+                self.timeline.push(TimedFrame {
+                    end: buffer.len(),
+                    probability: 1.0,
+                    state: VoiceState::Voiced,
+                });
             }
         }
     }
@@ -972,22 +976,22 @@ impl SpeechChunker {
 }
 
 /// Turns chunks into events and keeps the session clock. Offsets come
-/// from the device frames actually emitted (`emitted_frames`), so
+/// from the 16 kHz samples actually emitted (`emitted_frames`), so
 /// variable-length chunks keep segment timestamps exact.
 struct ChunkEmitter {
-    resampler: Arc<dyn Resampler>,
     transcriber: Arc<dyn Transcriber>,
     diarizer: Option<Box<dyn Diarizer>>,
     punctuator: Option<Arc<dyn Punctuator>>,
     session_id: StreamingSessionId,
+    /// Format of the chunk buffer: always [`AudioFormat::WHISPER`].
     format: AudioFormat,
     transcribe_options: TranscribeOptions,
     silence_threshold: f32,
     events: mpsc::Sender<TranscriptEvent>,
     chunk_index: u32,
-    /// Device frames (samples per channel) emitted so far.
+    /// Frames (16 kHz mono samples) emitted so far.
     emitted_frames: u64,
-    /// Non-paused device frames taken from the capture queue into the
+    /// Non-paused 16 kHz frames taken from the capture queue into the
     /// buffer so far: emitted plus the open chunk. Lag is measured
     /// against this, so waiting for a pause does not count as lag.
     intake_frames: u64,
@@ -1056,8 +1060,8 @@ impl ChunkEmitter {
 
     /// Captured audio queued but not yet buffered, in milliseconds.
     fn backlog_ms(&self) -> u32 {
-        let backlog = self.meter.backlog_samples.load(Ordering::Relaxed);
-        samples_to_ms(usize::try_from(backlog).unwrap_or(usize::MAX), self.format)
+        let backlog_us = self.meter.backlog_us.load(Ordering::Relaxed);
+        u32::try_from(backlog_us / 1_000).unwrap_or(u32::MAX)
     }
 
     /// `Some((backlog_ms, behind_ms))` when a draft must be skipped
@@ -1081,17 +1085,12 @@ impl ChunkEmitter {
     /// text emits nothing; the final chunk follows anyway.
     async fn draft(&self, raw: &[Sample], start: usize) {
         let session_id = self.session_id;
-        let resampled = match self.resampler.to_whisper(raw, self.format) {
-            Ok(s) if !s.is_empty() => s,
-            Ok(_) => return,
-            Err(e) => {
-                debug!(%session_id, error = %e, "resampler failed; no draft");
-                return;
-            }
-        };
+        if raw.is_empty() {
+            return;
+        }
         let transcript = match self
             .transcriber
-            .transcribe(&resampled, &self.transcribe_options)
+            .transcribe(raw, &self.transcribe_options)
             .await
         {
             Ok(t) => t,
@@ -1144,27 +1143,14 @@ impl ChunkEmitter {
             .await;
     }
 
-    /// Write `raw` to the audio sink as 16 kHz mono. A failed resample
-    /// writes silence of the same duration so later audio stays aligned
-    /// with session time.
+    /// Write `raw` (16 kHz mono, like every chunk) to the audio sink.
     fn save_audio(&mut self, raw: &[Sample]) {
         let Some(sink) = self.audio_sink.as_mut() else {
             return;
         };
-        let samples = self
-            .resampler
-            .to_whisper(raw, self.format)
-            .unwrap_or_else(|e| {
-                warn!(error = %e, "resampler failed; saving silence for this chunk");
-                let channels = u64::from(self.format.channels.max(1));
-                let frames = raw.len() as u64 / channels;
-                let rate = u64::from(self.format.sample_rate_hz.max(1));
-                let len = frames * u64::from(AudioFormat::WHISPER.sample_rate_hz) / rate;
-                vec![0.0; usize::try_from(len).unwrap_or(0)]
-            });
         let frame = AudioFrame {
-            samples,
-            format: AudioFormat::WHISPER,
+            samples: raw.to_vec(),
+            format: self.format,
             captured_at_ns: 0,
         };
         let sink = sink
@@ -1243,21 +1229,13 @@ impl ChunkEmitter {
             return 0;
         }
 
-        let resampled = match self.resampler.to_whisper(raw_samples, self.format) {
-            Ok(s) => s,
-            Err(e) => {
-                warn!(error = %e, chunk_index, "resampler failed; dropping chunk");
-                return 0;
-            }
-        };
-
-        // Per-chunk neural VAD gate (fixed policy) runs on the resampled
+        // Per-chunk neural VAD gate (fixed policy) runs on the
         // 16 kHz mono buffer (the sample rate Silero was trained for). We
         // always push the chunk — even loud ones — so the LSTM hidden
         // state stays in sync with the audio stream; the decision to skip
         // transcription is based purely on the returned `VoiceState`.
         if let Gate::Vad(v) = gate {
-            match v.push(&resampled).await {
+            match v.push(raw_samples).await {
                 Ok(VoiceState::Silence) => {
                     debug!(%session_id, chunk_index, chunk_rms, "skipping silent chunk (neural VAD)");
                     self.send_skipped(raw_samples, chunk_rms).await;
@@ -1293,14 +1271,14 @@ impl ChunkEmitter {
             epoch: self.epoch,
         };
         let spans = match self.diarizer.as_deref_mut() {
-            Some(d) => assign_speaker_spans(d, &resampled, ctx, session_id).await,
+            Some(d) => assign_speaker_spans(d, raw_samples, ctx, session_id).await,
             None => Vec::new(),
         };
 
         let asr_started = Instant::now();
         let result = self
             .transcriber
-            .transcribe(&resampled, &self.transcribe_options)
+            .transcribe(raw_samples, &self.transcribe_options)
             .await;
         let asr_elapsed = asr_started.elapsed();
 
@@ -1491,6 +1469,44 @@ async fn assign_speaker_spans(
             Vec::new()
         }
     }
+}
+
+/// Normalises the level of `pcm` (16 kHz mono from the intake
+/// resampler), counts it as taken in and appends it to the chunk buffer.
+fn take_in(
+    mut pcm: Vec<Sample>,
+    auto_gain: Option<&mut AutoGain>,
+    emitter: &mut ChunkEmitter,
+    buffer: &mut Vec<Sample>,
+) {
+    if pcm.is_empty() {
+        return;
+    }
+    if let Some(gain) = auto_gain {
+        gain.process(&mut pcm);
+    }
+    emitter.intake_frames += pcm.len() as u64;
+    buffer.extend_from_slice(&pcm);
+}
+
+/// The audio the intake resampler still holds for filter context; it
+/// starts afresh afterwards. A failure loses at most that tail.
+fn flush_intake(intake: &mut dyn ResampleStream, session_id: StreamingSessionId) -> Vec<Sample> {
+    let mut tail = Vec::new();
+    if let Err(e) = intake.flush(&mut tail) {
+        warn!(%session_id, error = %e, "cannot flush the capture resampler; dropping its tail");
+    }
+    tail
+}
+
+/// Duration of `samples` interleaved samples in `format`, in
+/// microseconds (0 for a degenerate format).
+fn duration_us(samples: usize, format: AudioFormat) -> u64 {
+    if format.channels == 0 || format.sample_rate_hz == 0 {
+        return 0;
+    }
+    let frames = samples as u64 / u64::from(format.channels);
+    frames * 1_000_000 / u64::from(format.sample_rate_hz)
 }
 
 fn chunk_size_in_samples(format: AudioFormat, chunk_ms: u32) -> usize {

@@ -8,8 +8,9 @@
 //! the RMS gate, Whisper, the diarizer and the saved audio see it.
 //!
 //! The stage is pure and deterministic (no I/O, no clocks) and works on
-//! interleaved device-format frames of any rate and channel count, so
-//! it behaves identically on every OS.
+//! interleaved frames of any rate and channel count (the pipeline feeds
+//! it the 16 kHz mono audio of its intake resampler), so it behaves
+//! identically on every OS.
 //!
 //! # Algorithm
 //!

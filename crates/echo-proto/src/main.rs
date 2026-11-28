@@ -660,13 +660,19 @@ async fn run_record(duration_secs: u64, output: PathBuf, device: Option<String>)
         .await
         .context("recording failed")?;
 
+    // Read the totals back from the file: after a device format change
+    // the sink converts, so the capture's own counts are not what was
+    // written.
+    let written = hound::WavReader::open(&output)
+        .with_context(|| format!("failed to read back {}", output.display()))?;
+    let spec = written.spec();
     println!(
         "wrote {bytes}-sample wav to {path}\n  duration: {dur:.2} s\n  format:   {rate} Hz × {ch} ch\n  frames:   {frames}",
-        bytes = report.samples,
+        bytes = written.len(),
         path = output.display(),
         dur = report.elapsed.as_secs_f64(),
-        rate = report.format.sample_rate_hz,
-        ch = report.format.channels,
+        rate = spec.sample_rate,
+        ch = spec.channels,
         frames = report.frames,
     );
     Ok(())
@@ -706,7 +712,9 @@ impl FrameSink for WavFrameSink {
             .inner
             .as_mut()
             .ok_or_else(|| DomainError::Invariant("wav sink already finalized".into()))?;
-        sink.write_frame(frame)
+        // A microphone that reconnects in another format keeps recording:
+        // its frames are converted to the file's format.
+        sink.write_converting(frame)
             .map_err(|e| DomainError::Invariant(format!("wav write: {e}")))
     }
 

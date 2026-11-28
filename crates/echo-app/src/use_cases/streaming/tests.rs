@@ -20,11 +20,12 @@ use pretty_assertions::assert_eq;
 use echo_domain::ports::vad::VadFrame;
 use echo_domain::{
     AudioCapture, AudioFormat, AudioFrame, AudioSource, AudioStream, CaptureSpec, DeviceInfo,
-    Diarizer, DomainError, Resampler, Sample, Segment, SegmentId, Speaker, SpeakerId,
-    StreamingOptions, TranscribeOptions, Transcriber, Transcript, TranscriptEvent, Vad, VoiceState,
+    Diarizer, DomainError, ResampleStream, Resampler, Sample, Segment, SegmentId, Speaker,
+    SpeakerId, StreamingOptions, TranscribeOptions, Transcriber, Transcript, TranscriptEvent, Vad,
+    VoiceState,
 };
 
-use super::{referenced_speakers, StreamingHandle, StreamingPipeline};
+use super::{duration_us, referenced_speakers, StreamingHandle, StreamingPipeline};
 use echo_domain::SpeakerRef;
 
 /// Yields N pre-baked frames then EOF.
@@ -98,6 +99,24 @@ impl Resampler for PassThroughResampler {
         _input: AudioFormat,
     ) -> Result<Vec<Sample>, DomainError> {
         Ok(samples.to_vec())
+    }
+    fn stream(&self) -> Box<dyn ResampleStream> {
+        Box::new(PassThroughResampler)
+    }
+}
+
+impl ResampleStream for PassThroughResampler {
+    fn push(
+        &mut self,
+        samples: &[Sample],
+        _input: AudioFormat,
+        out: &mut Vec<Sample>,
+    ) -> Result<(), DomainError> {
+        out.extend_from_slice(samples);
+        Ok(())
+    }
+    fn flush(&mut self, _out: &mut Vec<Sample>) -> Result<(), DomainError> {
+        Ok(())
     }
 }
 
@@ -1102,6 +1121,7 @@ enum Step {
 /// Stream that drives the pipeline's pause flag between frames, so
 /// pause/resume lands at deterministic points of the audio.
 struct SteppedStream {
+    format: AudioFormat,
     steps: std::vec::IntoIter<Step>,
     paused: Arc<std::sync::OnceLock<Arc<std::sync::atomic::AtomicBool>>>,
 }
@@ -1109,7 +1129,7 @@ struct SteppedStream {
 #[async_trait]
 impl AudioStream for SteppedStream {
     fn format(&self) -> AudioFormat {
-        AudioFormat::WHISPER
+        self.format
     }
     async fn next_frame(&mut self) -> Option<AudioFrame> {
         // The flag only exists once the pipeline has started.
@@ -1123,7 +1143,7 @@ impl AudioStream for SteppedStream {
                 Step::Frame(samples) => {
                     return Some(AudioFrame {
                         samples,
-                        format: AudioFormat::WHISPER,
+                        format: self.format,
                         captured_at_ns: 0,
                     })
                 }
@@ -1152,6 +1172,7 @@ async fn pause_flushes_buffered_speech_and_resume_resets_the_vad() {
     ];
     let paused_slot = Arc::new(std::sync::OnceLock::new());
     let stream = SteppedStream {
+        format: AudioFormat::WHISPER,
         steps: steps.into_iter(),
         paused: Arc::clone(&paused_slot),
     };
@@ -1547,6 +1568,180 @@ impl Resampler for LeftChannelResampler {
             .copied()
             .collect())
     }
+    fn stream(&self) -> Box<dyn ResampleStream> {
+        Box::new(LeftChannelResampler)
+    }
+}
+
+impl ResampleStream for LeftChannelResampler {
+    fn push(
+        &mut self,
+        samples: &[Sample],
+        input: AudioFormat,
+        out: &mut Vec<Sample>,
+    ) -> Result<(), DomainError> {
+        out.extend(self.to_whisper(samples, input)?);
+        Ok(())
+    }
+    fn flush(&mut self, _out: &mut Vec<Sample>) -> Result<(), DomainError> {
+        Ok(())
+    }
+}
+
+/// Capture whose frames carry their own format, like a microphone that
+/// reconnected with another configuration mid-session.
+struct TaggedCapture {
+    format: AudioFormat,
+    frames: Mutex<Option<Vec<AudioFrame>>>,
+}
+
+struct TaggedStream {
+    format: AudioFormat,
+    frames: std::vec::IntoIter<AudioFrame>,
+}
+
+#[async_trait]
+impl AudioCapture for TaggedCapture {
+    async fn list_devices(&self, _source: AudioSource) -> Result<Vec<DeviceInfo>, DomainError> {
+        Ok(vec![])
+    }
+    async fn start(&self, _spec: CaptureSpec) -> Result<Box<dyn AudioStream>, DomainError> {
+        let frames = self.frames.lock().unwrap().take().unwrap_or_default();
+        Ok(Box::new(TaggedStream {
+            format: self.format,
+            frames: frames.into_iter(),
+        }))
+    }
+}
+
+#[async_trait]
+impl AudioStream for TaggedStream {
+    fn format(&self) -> AudioFormat {
+        self.format
+    }
+    async fn next_frame(&mut self) -> Option<AudioFrame> {
+        tokio::task::yield_now().await;
+        self.frames.next()
+    }
+    async fn stop(&mut self) -> Result<(), DomainError> {
+        self.frames.by_ref().for_each(drop);
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn device_format_change_mid_session_keeps_session_time() {
+    let mono_48k = AudioFormat {
+        sample_rate_hz: 48_000,
+        channels: 1,
+    };
+    let stereo_16k = AudioFormat {
+        sample_rate_hz: 16_000,
+        channels: 2,
+    };
+    // 1 s before the device reconnects, 1 s after it in another format.
+    let frames = vec![
+        AudioFrame {
+            samples: sine(48_000, 0.5),
+            format: mono_48k,
+            captured_at_ns: 0,
+        },
+        AudioFrame {
+            samples: sine(16_000, 0.5).into_iter().flat_map(|s| [s, s]).collect(),
+            format: stereo_16k,
+            captured_at_ns: 0,
+        },
+    ];
+    let capture = Arc::new(TaggedCapture {
+        format: mono_48k,
+        frames: Mutex::new(Some(frames)),
+    });
+    let transcriber = FakeTranscriber::new();
+    let (sink, log) = RecordingSink::new(false);
+    let pipeline = StreamingPipeline::new(
+        capture,
+        Arc::new(echo_audio::RubatoResamplerAdapter::new()),
+        transcriber.clone(),
+    )
+    .with_audio_sink(Box::new(sink));
+    let mut handle = pipeline
+        .start(StreamingOptions {
+            chunk_ms: 1_000,
+            ..StreamingOptions::default()
+        })
+        .await
+        .unwrap();
+
+    let events = drain_until_stopped(&mut handle).await;
+    assert!(matches!(
+        events.last(),
+        Some(TranscriptEvent::Stopped { .. })
+    ));
+    // Two seconds captured, two seconds of session audio: the frames
+    // after the reconnect are neither sped up nor slowed down.
+    let log = log.lock().unwrap();
+    assert_eq!(log.samples.len(), 32_000);
+    assert_eq!(transcriber.call_count(), 2);
+}
+
+/// Pass-through resampler that counts every input sample it converts,
+/// one-shot or streamed.
+#[derive(Clone, Default)]
+struct CountingResampler {
+    converted: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl Resampler for CountingResampler {
+    fn to_whisper(
+        &self,
+        samples: &[Sample],
+        _input: AudioFormat,
+    ) -> Result<Vec<Sample>, DomainError> {
+        self.converted.fetch_add(samples.len(), Ordering::Relaxed);
+        Ok(samples.to_vec())
+    }
+    fn stream(&self) -> Box<dyn ResampleStream> {
+        Box::new(self.clone())
+    }
+}
+
+impl ResampleStream for CountingResampler {
+    fn push(
+        &mut self,
+        samples: &[Sample],
+        input: AudioFormat,
+        out: &mut Vec<Sample>,
+    ) -> Result<(), DomainError> {
+        out.extend(self.to_whisper(samples, input)?);
+        Ok(())
+    }
+    fn flush(&mut self, _out: &mut Vec<Sample>) -> Result<(), DomainError> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn each_captured_sample_is_resampled_once() {
+    let frames = vec![sine(16_000, 0.5), sine(16_000, 0.5), sine(16_000, 0.5)];
+    let capture = FakeCapture::new(AudioFormat::WHISPER, frames);
+    let resampler = CountingResampler::default();
+    let (sink, _log) = RecordingSink::new(false);
+    let transcriber = FakeTranscriber::new();
+    let pipeline =
+        StreamingPipeline::new(capture, Arc::new(resampler.clone()), transcriber.clone())
+            .with_audio_sink(Box::new(sink));
+    let mut handle = pipeline
+        .start(StreamingOptions {
+            chunk_ms: 1_000,
+            ..StreamingOptions::default()
+        })
+        .await
+        .unwrap();
+
+    drain_until_stopped(&mut handle).await;
+    // VAD, ASR and the saved audio all reuse one conversion.
+    assert_eq!(transcriber.call_count(), 3);
+    assert_eq!(resampler.converted.load(Ordering::Relaxed), 48_000);
 }
 
 #[tokio::test]
@@ -1634,6 +1829,7 @@ async fn audio_sink_skips_paused_audio() {
     ];
     let paused_slot = Arc::new(std::sync::OnceLock::new());
     let stream = SteppedStream {
+        format: AudioFormat::WHISPER,
         steps: steps.into_iter(),
         paused: Arc::clone(&paused_slot),
     };
@@ -1927,6 +2123,7 @@ async fn pause_applies_to_frames_by_capture_time_not_dequeue_time() {
     ];
     let paused_slot = Arc::new(std::sync::OnceLock::new());
     let stream = SteppedStream {
+        format: AudioFormat::WHISPER,
         steps: steps.into_iter(),
         paused: Arc::clone(&paused_slot),
     };
@@ -2001,4 +2198,101 @@ async fn stop_without_reading_events_does_not_deadlock_on_a_large_backlog() {
     let total_ms = stopped_totals(&events).1;
     assert!(total_ms > 0 && total_ms <= 20_000, "total {total_ms} ms");
     assert_eq!(total_ms % 100, 0, "whole 100 ms frames, got {total_ms} ms");
+}
+
+/// `ms` of a 440 Hz tone in `format`, split into steps of `block` frames.
+fn tone_steps(format: AudioFormat, ms: usize, block: usize) -> Vec<Step> {
+    let rate = format.sample_rate_hz as usize;
+    let channels = usize::from(format.channels);
+    let all: Vec<f32> = (0..rate * ms / 1_000)
+        .flat_map(|i| {
+            let s = 0.5 * (2.0 * std::f32::consts::PI * 440.0 * i as f32 / rate as f32).sin();
+            std::iter::repeat_n(s, channels)
+        })
+        .collect();
+    all.chunks(block * channels)
+        .map(|c| Step::Frame(c.to_vec()))
+        .collect()
+}
+
+/// Pause and resume on 48 kHz stereo capture through the production
+/// resampler: the intake is flushed at the pause, so chunk offsets and
+/// the saved audio match active capture time exactly.
+#[tokio::test]
+async fn pause_resume_at_48k_stereo_keeps_session_time() {
+    let format = AudioFormat {
+        sample_rate_hz: 48_000,
+        channels: 2,
+    };
+    let mut steps = tone_steps(format, 1_500, 480);
+    steps.push(Step::Pause);
+    steps.extend(tone_steps(format, 700, 480)); // discarded while paused
+    steps.push(Step::Resume);
+    steps.extend(tone_steps(format, 1_250, 441));
+    let paused_slot = Arc::new(std::sync::OnceLock::new());
+    let stream = SteppedStream {
+        format,
+        steps: steps.into_iter(),
+        paused: Arc::clone(&paused_slot),
+    };
+    let transcriber = FakeTranscriber::new();
+    let (sink, log) = RecordingSink::new(false);
+    let pipeline = StreamingPipeline::new(
+        FakeCapture::new(format, vec![]),
+        Arc::new(echo_audio::RubatoResamplerAdapter::new()),
+        transcriber.clone(),
+    )
+    .with_audio_sink(Box::new(sink));
+    let mut handle = pipeline
+        .start_with_stream(
+            Box::new(stream),
+            StreamingOptions {
+                chunk_ms: 1_000,
+                ..StreamingOptions::default()
+            },
+        )
+        .await
+        .unwrap();
+    paused_slot.set(handle.paused_flag()).unwrap();
+
+    let events = drain_until_stopped(&mut handle).await;
+    let lifecycle: Vec<String> = events
+        .iter()
+        .filter_map(|e| match e {
+            TranscriptEvent::Chunk { offset_ms, .. } => Some(format!("chunk@{offset_ms}")),
+            TranscriptEvent::Skipped { offset_ms, .. } => Some(format!("skip@{offset_ms}")),
+            TranscriptEvent::Paused { .. } => Some("paused".into()),
+            TranscriptEvent::Resumed { .. } => Some("resumed".into()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        lifecycle,
+        vec![
+            "chunk@0",
+            "chunk@1000",
+            "paused",
+            "resumed",
+            "chunk@1500",
+            "chunk@2500"
+        ]
+    );
+    // 1.5 s before the pause + 1.25 s after it.
+    assert_eq!(log.lock().unwrap().samples.len(), 44_000);
+}
+
+#[test]
+fn queued_audio_duration_follows_each_frame_format() {
+    let stereo_48k = AudioFormat {
+        sample_rate_hz: 48_000,
+        channels: 2,
+    };
+    // 10 ms either way, whatever the format.
+    assert_eq!(duration_us(960, stereo_48k), 10_000);
+    assert_eq!(duration_us(160, AudioFormat::WHISPER), 10_000);
+    let degenerate = AudioFormat {
+        sample_rate_hz: 0,
+        channels: 1,
+    };
+    assert_eq!(duration_us(160, degenerate), 0);
 }
