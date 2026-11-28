@@ -183,6 +183,10 @@ impl WavSink {
 
 impl Drop for WavSink {
     fn drop(&mut self) {
+        // Audio the converter still holds is real audio: write it first.
+        if let Err(e) = self.flush_converter() {
+            tracing::warn!(path = %self.path.display(), error = %e, "wav sink drop: converted tail lost");
+        }
         if let Some(w) = self.writer.take() {
             // Best-effort flush: errors at drop time would be eaten by
             // the runtime, so log and move on.
