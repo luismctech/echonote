@@ -26,9 +26,9 @@ pub mod preprocess;
 pub mod sink;
 
 pub use buffer::SamplePool;
-pub use capture::{CpalMicrophoneCapture, MixControls, MixedStream, RoutingAudioCapture};
 #[cfg(target_os = "macos")]
-pub use capture::{ScreenCaptureKitCapture, SYSTEM_OUTPUT_DEVICE_ID};
+pub use capture::{CoreAudioTapCapture, ScreenCaptureKitCapture, SYSTEM_OUTPUT_DEVICE_ID};
+pub use capture::{CpalMicrophoneCapture, MixControls, MixedStream, RoutingAudioCapture};
 pub use output_device::{default_output_device_info, OutputDeviceInfo};
 pub use preprocess::resample::{
     resample_to_whisper, FormatConverter, ResampleError, RubatoResamplerAdapter, StreamResampler,
