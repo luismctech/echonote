@@ -33,6 +33,18 @@ the channel listed in that document.
 - **Xcode Command Line Tools** on macOS (`xcode-select --install`).
 - **Rust 1.99.0+** (pinned via `rust-toolchain.toml`).
 - **Node.js 20 LTS** and **pnpm 10** (pinned via `packageManager`; build-script allowlist lives in `pnpm-workspace.yaml`).
+- **OpenSSL 3** on macOS when Homebrew links OpenSSL 4: llama.cpp's vendored
+  cpp-httplib does not compile against OpenSSL 4. Install it with
+  `brew install openssl@3` and export these variables before building, as CI does:
+
+  ```bash
+  export OPENSSL_ROOT_DIR="$(brew --prefix openssl@3)"
+  export CMAKE_PREFIX_PATH="$OPENSSL_ROOT_DIR"
+  export PKG_CONFIG_PATH="$OPENSSL_ROOT_DIR/lib/pkgconfig"
+  ```
+
+  If a build already failed, delete `target/*/build/llama-cpp-sys-2-*/out/build/CMakeCache.txt`
+  so CMake searches again.
 
 ### First run
 
