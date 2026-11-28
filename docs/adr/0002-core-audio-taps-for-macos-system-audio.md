@@ -38,8 +38,11 @@ A spike on macOS 27.2 (`odd/tasks/core-audio-taps.md`, T0) confirmed:
    on macOS older than 14.2 and whenever the tap cannot list or start.
    `RoutingAudioCapture::with_default_adapters` composes the two.
 3. `AudioHardwareCreateProcessTap` / `AudioHardwareDestroyProcessTap` are resolved with
-   **`dlsym` at runtime**. Rust `extern` declarations are strong imports, so naming them would
-   stop the app from launching on macOS 11–14.1. A missing symbol doubles as the version gate.
+   **`dlsym` at runtime**. Rust `extern` declarations are not weak; the linker binds them lazily
+   (`dyld_info -fixups`: `lazy-bind`), so calling them on macOS 11–14.1 would abort the process.
+   With `dlsym`, a missing symbol is a normal "not supported" and doubles as the version gate.
+   cpal 0.18 already imports both (lazily) for a loopback path EchoNote does not use on macOS.
+   Launching on macOS older than 14.2 has not been tested.
 4. The adapter **fills silence** itself. When no buffer arrives for 200 ms, it sends zero frames
    up to wall-clock time, so the stream keeps the session timeline the way a microphone does.
    The timeline counts nanoseconds of audio sent, measured from the moment the tap went live, so

@@ -12,12 +12,13 @@
 //! ## Availability
 //!
 //! `AudioHardwareCreateProcessTap` / `AudioHardwareDestroyProcessTap`
-//! only exist from macOS 14.2. Rust `extern` declarations are strong
-//! imports, so naming them directly would stop the whole app from
-//! launching on older systems (the app supports macOS 11). They are
-//! resolved at runtime with `dlsym` instead ([`TapApi`]); a missing
-//! symbol means "no taps here" and the caller falls back to
-//! ScreenCaptureKit.
+//! only exist from macOS 14.2, and Rust `extern` declarations are not
+//! weak: the linker binds them lazily (`lazy-bind` in `dyld_info
+//! -fixups`), so a call on an older system would abort the process (the
+//! app supports macOS 11). They are resolved at runtime with `dlsym`
+//! instead ([`TapApi`]); a missing symbol means "no taps here" and the
+//! caller falls back to ScreenCaptureKit. (cpal 0.18 also imports both,
+//! lazily, for a loopback path EchoNote does not use on macOS.)
 //!
 //! ## Permission
 //!
@@ -83,7 +84,7 @@ use objc2_core_audio::{
     AudioObjectPropertyAddress, CATapDescription, CATapMuteBehavior,
 };
 use objc2_core_audio_types::{
-    kAudioFormatFlagIsFloat, kAudioFormatFlagIsNonInterleaved, AudioBufferList,
+    kAudioFormatFlagIsFloat, kAudioFormatFlagIsNonInterleaved, AudioBuffer, AudioBufferList,
     AudioStreamBasicDescription, AudioTimeStamp,
 };
 use objc2_core_foundation::CFDictionary;
@@ -802,9 +803,15 @@ unsafe extern "C-unwind" fn io_proc<const NON_INTERLEAVED: bool>(
     // lives until after the IOProc is destroyed.
     let shared = unsafe { &*client.cast::<Shared>() };
     // SAFETY: Core Audio passes a valid list of `mNumberBuffers` buffers.
-    let list = unsafe { input.as_ref() };
-    let buffers =
-        unsafe { std::slice::from_raw_parts(list.mBuffers.as_ptr(), list.mNumberBuffers as usize) };
+    // The Rust type declares `mBuffers: [AudioBuffer; 1]`, so the slice
+    // is built from a raw pointer to the field, not from that array.
+    let buffers = unsafe {
+        let list = input.as_ptr();
+        std::slice::from_raw_parts(
+            std::ptr::addr_of!((*list).mBuffers).cast::<AudioBuffer>(),
+            (*list).mNumberBuffers as usize,
+        )
+    };
     let planes: Vec<Plane<'_>> = buffers
         .iter()
         .filter(|b| !b.mData.is_null())
@@ -1090,6 +1097,20 @@ mod tests {
     }
 
     #[test]
+    fn a_pause_shorter_than_quiet_after_is_not_filled_then_caught_up() {
+        // Bounded skew: a gap under QUIET_AFTER stays unfilled until the
+        // output has been quiet long enough, then the whole gap is filled.
+        assert_eq!(
+            silence_to_emit(MS(1_150), MS(1_000), 48_000, MS(150), QUIET_AFTER),
+            0
+        );
+        assert_eq!(
+            silence_to_emit(MS(1_250), MS(1_000), 48_000, MS(250), QUIET_AFTER),
+            12_000
+        );
+    }
+
+    #[test]
     fn silence_never_rewinds_a_stream_ahead_of_the_clock() {
         assert_eq!(
             silence_to_emit(MS(1_000), MS(1_041), 48_000, MS(500), QUIET_AFTER),
@@ -1222,8 +1243,10 @@ mod tests {
 
     #[test]
     fn the_default_output_is_alive_and_an_unknown_device_is_not() {
-        let (device, _uid) = default_output().unwrap();
-        assert!(device_alive(device));
+        // CI runners may have no output device.
+        if let Ok((device, _uid)) = default_output() {
+            assert!(device_alive(device));
+        }
         assert!(!device_alive(0xDEAD));
     }
 
