@@ -185,6 +185,14 @@ impl Drop for StartedStream {
     }
 }
 
+/// Format of the frames a stream built from `supported` delivers.
+fn format_of(supported: &SupportedStreamConfig) -> AudioFormat {
+    AudioFormat {
+        sample_rate_hz: supported.sample_rate(),
+        channels: supported.channels(),
+    }
+}
+
 fn start_capture(spec: &CaptureSpec) -> Result<StartedStream, DomainError> {
     let host = cpal::default_host();
 
@@ -194,10 +202,7 @@ fn start_capture(spec: &CaptureSpec) -> Result<StartedStream, DomainError> {
         .map(|d| d.name().to_string())
         .unwrap_or_else(|_| "<unnamed>".to_string());
     let supported = pick_config(&device, spec.preferred_format)?;
-    let format = AudioFormat {
-        sample_rate_hz: supported.sample_rate(),
-        channels: supported.channels(),
-    };
+    let format = format_of(&supported);
     let sample_format = supported.sample_format();
     let config: StreamConfig = supported.into();
 
@@ -414,6 +419,9 @@ fn run_audio_thread(
     debug!("cpal stream live; monitoring for errors with auto-reconnect");
 
     let mut current_stream = Some(stream);
+    // Frames are tagged with the format of the stream that produced
+    // them; a reconnect may land on another configuration.
+    let mut format = format;
 
     // Main loop: poll for stop signal, stream errors, or starvation.
     loop {
@@ -448,15 +456,25 @@ fn run_audio_thread(
             match reconnect_stream(
                 &device_id,
                 preferred_format,
-                format,
                 &tx,
                 start,
                 &stream_error,
                 &last_frame_ms,
                 &mut stop_rx,
             ) {
-                Some(new_stream) => {
-                    info!("microphone stream reconnected successfully");
+                Some((new_stream, new_format)) => {
+                    if new_format == format {
+                        info!("microphone stream reconnected successfully");
+                    } else {
+                        info!(
+                            old.rate = format.sample_rate_hz,
+                            old.ch = format.channels,
+                            new.rate = new_format.sample_rate_hz,
+                            new.ch = new_format.channels,
+                            "microphone stream reconnected with a different format"
+                        );
+                    }
+                    format = new_format;
                     current_stream = Some(new_stream);
                 }
                 None => {
@@ -475,17 +493,18 @@ fn run_audio_thread(
 }
 
 /// Attempts to rebuild and play a CPAL stream on the same (or default)
-/// device. Returns `None` if stop was requested or retries exhausted.
+/// device, with the format its frames will carry (the device may come
+/// back with another configuration). Returns `None` if stop was
+/// requested or retries exhausted.
 fn reconnect_stream(
     device_id: &Option<String>,
     preferred_format: AudioFormat,
-    format: AudioFormat,
     tx: &FrameSender,
     start: std::time::Instant,
     stream_error: &Arc<AtomicBool>,
     last_frame_ms: &Arc<AtomicU64>,
     stop_rx: &mut oneshot::Receiver<()>,
-) -> Option<cpal::Stream> {
+) -> Option<(cpal::Stream, AudioFormat)> {
     let mut delay = RECONNECT_BASE_DELAY;
 
     for attempt in 1..=MAX_RECONNECT_ATTEMPTS {
@@ -537,6 +556,7 @@ fn reconnect_stream(
             }
         };
 
+        let new_format = format_of(&supported);
         let new_sample_format = supported.sample_format();
         let new_config: StreamConfig = supported.into();
 
@@ -548,13 +568,13 @@ fn reconnect_stream(
             &device,
             new_config,
             new_sample_format,
-            format,
+            new_format,
             tx,
             start,
             stream_error,
             last_frame_ms,
         ) {
-            Ok(stream) => return Some(stream),
+            Ok(stream) => return Some((stream, new_format)),
             Err(e) => {
                 warn!(attempt, error = %e, "rebuild stream failed");
                 delay = (delay * 2).min(RECONNECT_MAX_DELAY);

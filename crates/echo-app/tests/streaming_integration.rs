@@ -208,11 +208,17 @@ async fn pipeline_with_real_resampler_48khz() {
     ));
 }
 
-/// VAD that reports one frame per push from a script of states.
-struct ScriptedVad(std::vec::IntoIter<VoiceState>);
+/// VAD that, like Silero, reports one verdict per 512-sample window at
+/// its real position: voiced up to `voiced_until` samples, then silent.
+struct TimedVad {
+    voiced_until: usize,
+    seen: usize,
+    /// Samples of the current window received in earlier pushes.
+    carry: usize,
+}
 
 #[async_trait]
-impl Vad for ScriptedVad {
+impl Vad for TimedVad {
     fn sample_rate_hz(&self) -> u32 {
         16_000
     }
@@ -220,32 +226,39 @@ impl Vad for ScriptedVad {
         unreachable!("speech-aligned chunking uses push_frames")
     }
     async fn push_frames(&mut self, samples: &[Sample]) -> Result<Vec<VadFrame>, DomainError> {
-        let state = self.0.next().expect("VAD script exhausted");
-        let probability = if state == VoiceState::Voiced {
-            0.9
-        } else {
-            0.1
-        };
-        Ok(vec![VadFrame {
-            end_sample: samples.len(),
-            probability,
-            state,
-        }])
+        const WINDOW: usize = 512;
+        let total = self.carry + samples.len();
+        let frames = (1..=total / WINDOW)
+            .map(|k| {
+                self.seen += WINDOW;
+                let voiced = self.seen <= self.voiced_until;
+                VadFrame {
+                    end_sample: k * WINDOW - self.carry,
+                    probability: if voiced { 0.9 } else { 0.1 },
+                    state: if voiced {
+                        VoiceState::Voiced
+                    } else {
+                        VoiceState::Silence
+                    },
+                }
+            })
+            .collect();
+        self.carry = total % WINDOW;
+        Ok(frames)
     }
     fn reset(&mut self) {}
 }
 
-/// Speech-aligned cuts found on the 16 kHz VAD stream must land on the
-/// matching 48 kHz stereo device frames: chunk offsets and durations
-/// follow real sample counts through the production resampler.
+/// Speech-aligned cuts on 48 kHz stereo capture: chunk offsets and
+/// durations follow real sample counts through the production
+/// resampler, whatever block sizes it releases.
 #[tokio::test]
-async fn speech_aligned_cuts_map_back_to_48khz_stereo_frames() {
+async fn speech_aligned_cuts_keep_session_time_for_48khz_stereo() {
     let format = AudioFormat {
         sample_rate_hz: 48_000,
         channels: 2,
     };
-    // 6 s in 100 ms stereo frames; the pipeline analyses 200 ms blocks,
-    // so the script has one verdict per 200 ms: 4 s speech, 2 s silence.
+    // 6 s in 100 ms stereo frames: 4 s speech, 2 s silence.
     let frames = (0..60)
         .map(|_| {
             sine_at(48_000, 4_800, 0.5)
@@ -254,14 +267,16 @@ async fn speech_aligned_cuts_map_back_to_48khz_stereo_frames() {
                 .collect()
         })
         .collect();
-    let mut script = vec![VoiceState::Voiced; 20];
-    script.extend([VoiceState::Silence; 10]);
-
     let capture = FakeCapture::new(format, frames);
     let resampler = Arc::new(RubatoResamplerAdapter::new()) as Arc<dyn Resampler>;
     let transcriber = FakeTranscriber::new();
-    let pipeline = StreamingPipeline::new(capture, resampler, transcriber.clone())
-        .with_vad(Box::new(ScriptedVad(script.into_iter())));
+    let pipeline = StreamingPipeline::new(capture, resampler, transcriber.clone()).with_vad(
+        Box::new(TimedVad {
+            voiced_until: 4 * 16_000,
+            seen: 0,
+            carry: 0,
+        }),
+    );
     let mut handle = pipeline
         .start(StreamingOptions {
             min_chunk_ms: 3_000,
