@@ -170,6 +170,22 @@ mod tests {
     }
 
     #[test]
+    fn a_stop_consumed_by_retry_is_still_seen_by_the_caller() {
+        // Callers tell "stopped" from "gave up" after `retry` returns None.
+        let (tx, mut rx) = oneshot::channel();
+        tx.send(()).unwrap();
+        let _: Option<()> = retry(FAST, &mut rx, |_| Ok(()));
+        assert!(stop_requested(&mut rx));
+    }
+
+    #[test]
+    fn exhausted_retries_without_stop_are_not_a_stop() {
+        let (_tx, mut rx) = oneshot::channel::<()>();
+        let _: Option<()> = retry(FAST, &mut rx, |_| Err(unavailable()));
+        assert!(!stop_requested(&mut rx));
+    }
+
+    #[test]
     fn a_dropped_stop_sender_counts_as_stop() {
         let (tx, mut rx) = oneshot::channel::<()>();
         drop(tx);

@@ -330,6 +330,7 @@ fn run_audio_thread(
                     format = new_format;
                     current = Some(stream);
                 }
+                None if stop_requested(&mut stop_rx) => break,
                 None => {
                     warn!("WASAPI loopback reconnection failed — ending capture");
                     break;
