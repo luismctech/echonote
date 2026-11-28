@@ -11,6 +11,7 @@
 pub mod cpal_microphone;
 pub(crate) mod interleave;
 pub mod mixed;
+pub(crate) mod reconnect;
 pub mod routing;
 pub mod sample_convert;
 pub mod stream_error;
