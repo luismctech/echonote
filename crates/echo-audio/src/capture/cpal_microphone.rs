@@ -98,7 +98,7 @@ impl AudioCapture for CpalMicrophoneCapture {
 // ---------------------------------------------------------------------------
 
 fn enumerate_input_devices() -> Result<Vec<DeviceInfo>, DomainError> {
-    let host = cpal::default_host();
+    let host = super::device_host();
     let default_id = host
         .default_input_device()
         .and_then(|d| d.description().ok().map(|desc| desc.name().to_string()))
@@ -195,7 +195,7 @@ fn format_of(supported: &SupportedStreamConfig) -> AudioFormat {
 }
 
 fn start_capture(spec: &CaptureSpec) -> Result<StartedStream, DomainError> {
-    let host = cpal::default_host();
+    let host = super::device_host();
 
     let device = pick_device(&host, spec.device_id.as_deref())?;
     let device_name = device
@@ -499,7 +499,7 @@ fn reconnect_stream(
     retry(Backoff::DEVICE, stop_rx, |_| {
         // Re-acquire the device and re-pick its config: it may come back
         // reconfigured.
-        let host = cpal::default_host();
+        let host = super::device_host();
         let device = pick_device(&host, device_id.as_deref())?;
         let supported = pick_config(&device, preferred_format)?;
         let new_format = format_of(&supported);

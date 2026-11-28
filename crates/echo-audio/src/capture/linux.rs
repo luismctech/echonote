@@ -1,11 +1,13 @@
 //! Linux system-audio capture via PulseAudio monitor sources.
 //!
 //! PulseAudio (and PipeWire's PulseAudio compatibility layer) exposes a
-//! "Monitor of &lt;sink&gt;" source for every output sink. On most Linux
-//! desktops the PulseAudio-ALSA bridge makes these appear as regular
-//! input devices through cpal's default ALSA host. We find the monitor
-//! source for the default output sink and open a standard cpal input
-//! stream on it.
+//! "Monitor of &lt;sink&gt;" source for every output sink. cpal's ALSA
+//! host only sees ALSA PCMs (`default`, `pulse`, `hw:…`), never those
+//! sources, so the adapter talks to the sound server through cpal's
+//! PulseAudio host, picks the monitor of the default output sink (see
+//! [`super::monitor_select`]) and opens a standard cpal input stream on
+//! it. Without a reachable PulseAudio server it scans the ALSA host for
+//! a device whose name still reads "Monitor of".
 //!
 //! The adapter mirrors [`super::cpal_microphone::CpalMicrophoneCapture`]:
 //! a dedicated `std::thread` owns the cpal `Stream` (which is `!Send`),
@@ -26,6 +28,7 @@ use echo_domain::{
     DomainError, Sample,
 };
 
+use super::monitor_select::{choose_monitor, Source};
 use super::sample_convert::{self, rank_format};
 use super::stream_error::{classify, Severity};
 
@@ -89,73 +92,84 @@ impl AudioCapture for PulseMonitorCapture {
 // Internals
 // ---------------------------------------------------------------------------
 
-/// PulseAudio monitor sources contain "Monitor of" in their name.
-fn is_monitor_device(name: &str) -> bool {
-    let lower = name.to_lowercase();
-    lower.contains("monitor of") || lower.contains("monitor_of")
+const NO_MONITOR: &str =
+    "no PulseAudio monitor sources found — is PulseAudio or PipeWire (pipewire-pulse) running?";
+
+/// cpal's PulseAudio host when the sound server is reachable, else the
+/// ALSA host.
+fn monitor_host() -> cpal::Host {
+    match cpal::host_from_id(cpal::HostId::PulseAudio) {
+        Ok(host) => host,
+        Err(e) => {
+            warn!(error = %e, "PulseAudio server unreachable; scanning ALSA devices for a monitor");
+            super::device_host()
+        }
+    }
+}
+
+/// A host's input sources and the name of its default output sink.
+struct Sources {
+    devices: Vec<(Device, Source)>,
+    default_sink: Option<String>,
+}
+
+fn list_sources(host: &cpal::Host) -> Result<Sources, DomainError> {
+    let devices = host
+        .input_devices()
+        .map_err(|e| DomainError::AudioDeviceUnavailable(format!("input_devices: {e}")))?
+        .map(|dev| {
+            let name = dev
+                .description()
+                .map(|d| d.name().to_string())
+                .unwrap_or_else(|_| "<unnamed>".to_string());
+            let id = dev
+                .id()
+                .map(|id| id.id().to_string())
+                .unwrap_or_else(|_| name.clone());
+            (dev, Source { id, name })
+        })
+        .collect();
+    let default_sink = host
+        .default_output_device()
+        .and_then(|dev| dev.id().ok())
+        .map(|id| id.id().to_string());
+    Ok(Sources {
+        devices,
+        default_sink,
+    })
 }
 
 fn enumerate_monitor_devices() -> Result<Vec<DeviceInfo>, DomainError> {
-    let host = cpal::default_host();
-    let devices = host
-        .input_devices()
-        .map_err(|e| DomainError::AudioDeviceUnavailable(format!("input_devices: {e}")))?;
+    let sources = list_sources(&monitor_host())?;
+    let infos: Vec<Source> = sources.devices.into_iter().map(|(_, s)| s).collect();
+    let default = choose_monitor(&infos, None, sources.default_sink.as_deref())
+        .ok_or_else(|| DomainError::AudioDeviceUnavailable(NO_MONITOR.into()))?;
 
-    let mut monitors = Vec::new();
-    for dev in devices {
-        let name = dev
-            .description()
-            .map(|d| d.name().to_string())
-            .unwrap_or_else(|_| "<unnamed>".to_string());
-        if is_monitor_device(&name) {
-            monitors.push(DeviceInfo {
-                id: name.clone(),
-                is_default: monitors.is_empty(),
-                name,
-            });
-        }
-    }
-
-    if monitors.is_empty() {
-        return Err(DomainError::AudioDeviceUnavailable(
-            "no PulseAudio monitor sources found — is PulseAudio or PipeWire running?".into(),
-        ));
-    }
-
-    Ok(monitors)
+    Ok(infos
+        .into_iter()
+        .enumerate()
+        .filter(|(_, s)| s.is_monitor())
+        .map(|(i, s)| DeviceInfo {
+            id: s.id,
+            name: s.name,
+            is_default: i == default,
+        })
+        .collect())
 }
 
-/// Find the best monitor device: prefer one whose name matches
-/// `device_id`, else fall back to the first monitor source.
-fn pick_monitor_device(host: &cpal::Host, device_id: Option<&str>) -> Result<Device, DomainError> {
-    let devices = host
-        .input_devices()
-        .map_err(|e| DomainError::AudioDeviceUnavailable(format!("input_devices: {e}")))?;
-
-    let mut fallback: Option<Device> = None;
-    for dev in devices {
-        let name = dev
-            .description()
-            .map(|d| d.name().to_string())
-            .unwrap_or_default();
-        if !is_monitor_device(&name) {
-            continue;
-        }
-        if let Some(target) = device_id {
-            if name == target {
-                return Ok(dev);
-            }
-        }
-        if fallback.is_none() {
-            fallback = Some(dev);
-        }
-    }
-
-    fallback.ok_or_else(|| {
-        DomainError::AudioDeviceUnavailable(
-            "no PulseAudio monitor sources found — is PulseAudio or PipeWire running?".into(),
-        )
-    })
+/// The monitor to capture: `device_id` when it names one, else the
+/// monitor of the default output sink, else the first monitor.
+fn pick_monitor_device(device_id: Option<&str>) -> Result<(Device, String), DomainError> {
+    let sources = list_sources(&monitor_host())?;
+    let infos: Vec<Source> = sources.devices.iter().map(|(_, s)| s.clone()).collect();
+    let index = choose_monitor(&infos, device_id, sources.default_sink.as_deref())
+        .ok_or_else(|| DomainError::AudioDeviceUnavailable(NO_MONITOR.into()))?;
+    let (device, source) = sources
+        .devices
+        .into_iter()
+        .nth(index)
+        .expect("index from choose_monitor");
+    Ok((device, source.name))
 }
 
 type FrameSender = mpsc::Sender<AudioFrame>;
@@ -206,13 +220,7 @@ impl Drop for StartedStream {
 }
 
 fn start_capture(spec: &CaptureSpec) -> Result<StartedStream, DomainError> {
-    let host = cpal::default_host();
-
-    let device = pick_monitor_device(&host, spec.device_id.as_deref())?;
-    let device_name = device
-        .description()
-        .map(|d| d.name().to_string())
-        .unwrap_or_else(|_| "<unnamed>".to_string());
+    let (device, device_name) = pick_monitor_device(spec.device_id.as_deref())?;
     let supported = pick_config(&device, spec.preferred_format)?;
     let format = AudioFormat {
         sample_rate_hz: supported.sample_rate(),
