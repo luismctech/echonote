@@ -311,7 +311,6 @@ fn run_audio_thread(
             warn!("WASAPI loopback stream ended — reopening the default output");
             let reopened = retry(Backoff::DEVICE, &mut stop_rx, |_| {
                 let opened = open_default_loopback(preferred)?;
-                failed.store(false, Ordering::Release);
                 let stream = play_loopback(&opened, &tx, start, &failed)?;
                 Ok((stream, opened.format))
             });
@@ -355,6 +354,8 @@ fn play_loopback(
     failed: &Arc<AtomicBool>,
 ) -> Result<cpal::Stream, DomainError> {
     let format = opened.format;
+    // The previous stream is gone; only errors of the new one count.
+    failed.store(false, Ordering::Release);
     let err_fn = {
         let failed = Arc::clone(failed);
         move |err: cpal::Error| match classify(&err) {

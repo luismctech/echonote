@@ -32,7 +32,9 @@ use super::monitor_select::{choose_monitor, Source};
 use super::sample_convert::{self, rank_format};
 use super::stream_error::{classify, Severity};
 
-/// Synthetic device ID for the default monitor source.
+/// Synthetic device ID for the default monitor source. `list_devices`
+/// reports PulseAudio source names instead; passing this id (or any id
+/// that names no monitor) captures the default output's monitor.
 pub const SYSTEM_OUTPUT_DEVICE_ID: &str = "linux:pulseaudio:monitor-default";
 
 const CHANNEL_CAPACITY_HINT: usize = 512;
