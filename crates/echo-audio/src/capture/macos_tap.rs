@@ -452,6 +452,7 @@ fn run_capture_thread(
 
     let mut format = format;
     let mut current = Some(tap);
+    let mut quiet = false;
     while !stop_requested(&mut stop_rx) {
         // Switching the default output keeps a global tap working, but
         // losing the device that clocks the aggregate (headphones
@@ -479,7 +480,15 @@ fn run_capture_thread(
                 }
             }
         }
+        let was_quiet = quiet;
+        quiet = timeline.since_last_buffer() >= QUIET_AFTER;
+        if quiet != was_quiet {
+            // A tap without the permission also goes quiet; the log line
+            // lets a silent session be told apart from a broken one.
+            debug!(quiet, "Core Audio tap output quiet state changed");
+        }
         fill_silence(&timeline, format, &tx);
+        report_drops(&timeline);
         thread::sleep(SUPERVISE_EVERY);
     }
 
@@ -501,7 +510,9 @@ fn fill_silence(timeline: &Timeline, format: AudioFormat, tx: &mpsc::Sender<Audi
         let frames = missing.min(max_frames);
         let at = timeline.advance(frames, format.sample_rate_hz);
         let samples = vec![0.0; frames as usize * usize::from(format.channels)];
-        send_frame(tx, samples, format, at);
+        if !send_frame(tx, samples, format, at) {
+            timeline.dropped.fetch_add(1, Ordering::Relaxed);
+        }
         missing -= frames;
     }
 }
@@ -527,19 +538,32 @@ fn frames_in(span: Duration, rate_hz: u32) -> u64 {
     (span.as_nanos() * u128::from(rate_hz) / 1_000_000_000) as u64
 }
 
+/// Queues a frame without blocking; `false` when the consumer's queue is
+/// full and the frame was dropped. Callers count drops in the
+/// [`Timeline`] instead of logging, because the IOProc runs on Core
+/// Audio's real-time thread; the capture thread reports them.
 fn send_frame(
     tx: &mpsc::Sender<AudioFrame>,
     samples: Vec<Sample>,
     format: AudioFormat,
     captured_at_ns: u64,
-) {
+) -> bool {
     let frame = AudioFrame {
         samples,
         format,
         captured_at_ns,
     };
-    if let Err(mpsc::error::TrySendError::Full(_)) = tx.try_send(frame) {
-        warn!("audio frame dropped — consumer is slower than the Core Audio tap");
+    !matches!(tx.try_send(frame), Err(mpsc::error::TrySendError::Full(_)))
+}
+
+/// Logs (from the capture thread) the frames dropped since the last call.
+fn report_drops(timeline: &Timeline) {
+    let dropped = timeline.dropped.swap(0, Ordering::Relaxed);
+    if dropped > 0 {
+        warn!(
+            frames = dropped,
+            "audio frames dropped — consumer is slower than the Core Audio tap"
+        );
     }
 }
 
@@ -554,6 +578,8 @@ fn send_frame(
 struct Timeline {
     start: Instant,
     sent_ns: AtomicU64,
+    /// Frames dropped on a full queue, not yet reported.
+    dropped: AtomicU64,
     live_ns: AtomicU64,
     last_buffer_ns: AtomicU64,
 }
@@ -563,6 +589,7 @@ impl Timeline {
         Self {
             start: Instant::now(),
             sent_ns: AtomicU64::new(0),
+            dropped: AtomicU64::new(0),
             live_ns: AtomicU64::new(0),
             last_buffer_ns: AtomicU64::new(u64::MAX),
         }
@@ -841,7 +868,9 @@ unsafe extern "C-unwind" fn io_proc<const NON_INTERLEAVED: bool>(
     let at = shared
         .timeline
         .advance(frames, shared.format.sample_rate_hz);
-    send_frame(&shared.tx, samples, shared.format, at);
+    if !send_frame(&shared.tx, samples, shared.format, at) {
+        shared.timeline.dropped.fetch_add(1, Ordering::Relaxed);
+    }
     NO_ERR
 }
 
@@ -1293,10 +1322,42 @@ mod tests {
     }
 
     #[test]
-    fn this_mac_has_process_taps() {
-        // CI and dev Macs run macOS 14.2+; older systems take the
-        // ScreenCaptureKit fallback instead.
-        assert!(CoreAudioTapCapture::is_supported());
+    fn process_taps_are_found_exactly_from_macos_14_2() {
+        let version = std::process::Command::new("sw_vers")
+            .arg("-productVersion")
+            .output()
+            .expect("sw_vers");
+        let version = String::from_utf8_lossy(&version.stdout);
+        let mut parts = version
+            .trim()
+            .split('.')
+            .map(|p| p.parse::<u32>().unwrap_or(0));
+        let (major, minor) = (parts.next().unwrap_or(0), parts.next().unwrap_or(0));
+        let has_taps = (major, minor) >= (14, 2);
+        assert_eq!(
+            CoreAudioTapCapture::is_supported(),
+            has_taps,
+            "macOS {version}"
+        );
+    }
+
+    #[test]
+    fn frames_dropped_on_a_full_queue_are_counted_not_lost_silently() {
+        let (tx, _rx) = mpsc::channel(1);
+        let format = AudioFormat {
+            sample_rate_hz: 1_000,
+            channels: 1,
+        };
+        assert!(send_frame(&tx, vec![0.0; 10], format, 0));
+        assert!(!send_frame(&tx, vec![0.0; 10], format, 10_000_000));
+        let timeline = Timeline {
+            start: Instant::now() - MS(500),
+            ..Timeline::new()
+        };
+        fill_silence(&timeline, format, &tx);
+        assert!(timeline.dropped.load(Ordering::Relaxed) >= 1);
+        report_drops(&timeline);
+        assert_eq!(timeline.dropped.load(Ordering::Relaxed), 0);
     }
 
     #[tokio::test]

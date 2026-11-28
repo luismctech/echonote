@@ -81,6 +81,11 @@ A spike on macOS 27.2 (`odd/tasks/core-audio-taps.md`, T0) confirmed:
   Recording, requested for the next session, and Screen Recording, for the ScreenCaptureKit
   fallback. A follow-up is to ask for System Audio Recording during onboarding.
 - The Screen Recording usage string stays in `Info.plist` for the fallback.
+- The fallback applies when a session **starts**. If the tap's clock device disappears and the
+  tap cannot be rebuilt, that session's system audio ends; ScreenCaptureKit does not take over
+  mid-session. That can happen when a Mac's only output, such as a headset, disconnects.
+- If the permission is revoked mid-session, the tap goes quiet and the stream carries silence. A
+  debug log marks each switch into and out of the quiet state.
 
 ## Alternatives
 
