@@ -12,8 +12,9 @@
 //! │ RoutingAudioCapture   ├──────────────────▶│ CpalMicrophoneCapture│
 //! │ (Arc<dyn …> facade)   │                   └─────────────────────┘
 //! │                       │  SystemOutput      ┌─────────────────────┐
-//! │                       ├──────────────────▶│ ScreenCaptureKit-   │
-//! │                       │                   │ Capture (macOS)     │
+//! │                       ├──────────────────▶│ macOS: Core Audio   │
+//! │                       │                   │ tap, falling back to│
+//! │                       │                   │ ScreenCaptureKit    │
 //! │                       │  Mixed             └─────────────────────┘
 //! │                       ├──────────────────▶ Both adapters → MixedStream
 //! └───────────────────────┘
@@ -35,7 +36,7 @@ use super::mixed::{MixControls, MixedStream};
 use crate::CpalMicrophoneCapture;
 
 #[cfg(target_os = "macos")]
-use super::ScreenCaptureKitCapture;
+use super::{CoreAudioTapCapture, FallbackAudioCapture, ScreenCaptureKitCapture};
 
 #[cfg(target_os = "windows")]
 use super::WasapiLoopbackCapture;
@@ -88,7 +89,9 @@ impl RoutingAudioCapture {
     /// Build with the default per-OS adapters:
     ///
     /// - microphone: [`CpalMicrophoneCapture`] on every platform.
-    /// - system output: [`ScreenCaptureKitCapture`] on macOS,
+    /// - system output: on macOS 14.2+ a [`CoreAudioTapCapture`] that
+    ///   falls back to [`ScreenCaptureKitCapture`] (the only one on older
+    ///   macOS),
     ///   [`WasapiLoopbackCapture`] on Windows,
     ///   [`PulseMonitorCapture`] on Linux.
     #[must_use]
@@ -96,8 +99,17 @@ impl RoutingAudioCapture {
         let microphone: Arc<dyn AudioCapture> = Arc::new(CpalMicrophoneCapture::new());
 
         #[cfg(target_os = "macos")]
-        let system_output: Option<Arc<dyn AudioCapture>> =
-            Some(Arc::new(ScreenCaptureKitCapture::new()));
+        let system_output: Option<Arc<dyn AudioCapture>> = {
+            let sck: Arc<dyn AudioCapture> = Arc::new(ScreenCaptureKitCapture::new());
+            if CoreAudioTapCapture::is_supported() {
+                Some(Arc::new(FallbackAudioCapture::new(
+                    Arc::new(CoreAudioTapCapture::new()),
+                    sck,
+                )))
+            } else {
+                Some(sck)
+            }
+        };
 
         #[cfg(target_os = "windows")]
         let system_output: Option<Arc<dyn AudioCapture>> =
@@ -221,6 +233,23 @@ mod tests {
 
     use echo_domain::{AudioFormat, AudioFrame};
     use pretty_assertions::assert_eq;
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn macos_system_audio_prefers_the_core_audio_tap() {
+        // macOS 14.2+ with System Audio Recording granted (dev Macs): the
+        // tap answers first, so ScreenCaptureKit is never asked. Without
+        // the grant (CI runners) the fallback would answer instead.
+        if !CoreAudioTapCapture::permission_granted() {
+            return;
+        }
+        let router = RoutingAudioCapture::with_default_adapters();
+        let devices = router
+            .list_devices(AudioSource::SystemOutput)
+            .await
+            .unwrap();
+        assert_eq!(devices[0].id, crate::capture::macos_tap::TAP_DEVICE_ID);
+    }
 
     /// Spy adapter that records every call so tests can assert the
     /// router dispatched to the right delegate without touching real

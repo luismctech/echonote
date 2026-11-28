@@ -1462,9 +1462,15 @@ name = "echo-audio"
 version = "0.6.0"
 dependencies = [
  "async-trait",
+ "block2",
  "cpal",
  "echo-domain",
  "hound",
+ "objc2",
+ "objc2-core-audio",
+ "objc2-core-audio-types",
+ "objc2-core-foundation",
+ "objc2-foundation",
  "pretty_assertions",
  "rubato",
  "screencapturekit",

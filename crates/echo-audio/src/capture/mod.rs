@@ -4,11 +4,14 @@
 //! used everywhere; the OS-specific submodules add **system audio
 //! (loopback)** capture using native APIs:
 //!
-//! - **macOS**: [`macos::ScreenCaptureKitCapture`] via ScreenCaptureKit.
+//! - **macOS**: [`macos_tap::CoreAudioTapCapture`] via a Core Audio process
+//!   tap (14.2+), falling back to [`macos::ScreenCaptureKitCapture`]
+//!   (ScreenCaptureKit) through [`fallback::FallbackAudioCapture`].
 //! - **Windows**: [`windows::WasapiLoopbackCapture`] via WASAPI loopback.
 //! - **Linux**: [`linux::PulseMonitorCapture`] via PulseAudio monitor sources.
 
 pub mod cpal_microphone;
+pub mod fallback;
 pub(crate) mod interleave;
 pub mod mixed;
 // Used by the Linux adapter; built everywhere so its tests run on every CI runner.
@@ -20,6 +23,7 @@ pub mod sample_convert;
 pub mod stream_error;
 
 pub use cpal_microphone::CpalMicrophoneCapture;
+pub use fallback::FallbackAudioCapture;
 pub use mixed::{MixControls, MixedStream};
 pub use routing::RoutingAudioCapture;
 
@@ -39,7 +43,11 @@ pub(crate) fn device_host() -> cpal::Host {
 #[cfg(target_os = "macos")]
 pub mod macos;
 #[cfg(target_os = "macos")]
+pub mod macos_tap;
+#[cfg(target_os = "macos")]
 pub use macos::{ScreenCaptureKitCapture, SYSTEM_OUTPUT_DEVICE_ID};
+#[cfg(target_os = "macos")]
+pub use macos_tap::CoreAudioTapCapture;
 
 #[cfg(target_os = "linux")]
 pub mod linux;

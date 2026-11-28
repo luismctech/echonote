@@ -127,7 +127,7 @@ Estos principios son la constitución del proyecto. Cuando una decisión técnic
 | ML inference | ONNX Runtime via `ort` | ort 2.0 |
 | Base de datos | SQLite + SQLCipher | 3.45 |
 | Captura audio mic | cpal | 0.15 |
-| Captura audio sistema | wasapi (Win) / screencapturekit (Mac) / libpulse (Linux) | — |
+| Captura audio sistema | wasapi (Win) / Core Audio process taps en macOS 14.2+ con screencapturekit como respaldo (Mac, [ADR 0002](adr/0002-core-audio-taps-for-macos-system-audio.md)) / PulseAudio vía cpal (Linux) | — |
 | IPC | Tauri commands & events | — |
 | Build frontend | Vite | 5.x |
 | Build backend | Cargo | estable |
@@ -853,7 +853,8 @@ La app solo hace tráfico de red en estos casos:
 - `com.apple.security.device.audio-input` — micrófono
 - `com.apple.security.device.microphone` — redundante por TCC
 - `NSMicrophoneUsageDescription` en Info.plist
-- `NSScreenCaptureDescription` en Info.plist — ScreenCaptureKit pide esto aunque solo usemos audio
+- `NSAudioCaptureUsageDescription` en Info.plist — audio del sistema con Core Audio process taps (macOS 14.2+); macOS pide "Grabación de audio del sistema"
+- `NSScreenCaptureUsageDescription` en Info.plist — solo para el respaldo con ScreenCaptureKit (macOS < 14.2 o si el tap no arranca), que pide esto aunque solo usemos audio
 
 **Windows:**
 - `microphone` en el manifest de la app (Windows 10+).
