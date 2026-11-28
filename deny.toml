@@ -13,6 +13,22 @@ ignore = [
     "RUSTSEC-2024-0370", # proc-macro-error — unmaintained, transitive via Tauri/GTK macros
     "RUSTSEC-2024-0436", # paste — unmaintained, transitive via Tauri and tract
     "RUSTSEC-2026-0319", # anymap2 — unmaintained, transitive; no safe upgrade available
+    # zbus 5 helpers — unmaintained, Linux D-Bus via keepawake and
+    # tauri-plugin-single-instance; no maintained replacement in those crates yet.
+    "RUSTSEC-2026-0370", # zvariant
+    "RUSTSEC-2026-0371", # zbus_names
+    "RUSTSEC-2026-0372", # zvariant_derive
+    # zip 4.6.1 — only via tauri-plugin-updater 2.x, which extracts an update
+    # archive after verifying its minisign signature with our public key, so
+    # untrusted archives never reach zip. Fixed in zip 9; no 2.x updater uses it.
+    # Revisit with tauri-plugin-updater 3.0 (Dependabot alerts #24/#25 dismissed
+    # on the same grounds, 2026-11-27).
+    "RUSTSEC-2026-0367", # SUID/SGID bits kept on extraction
+    "RUSTSEC-2026-0368", # symlink targets outside the destination
+    "RUSTSEC-2026-0369", # permissions applied through symlinks
+    "RUSTSEC-2026-0429", # abort on a symlink entry with a large size
+    "RUSTSEC-2026-0545", # AES entries returned without their authentication code
+    "RUSTSEC-2026-0548", # ZipStreamReader local-header names
 ]
 
 [licenses]
