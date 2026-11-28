@@ -30,6 +30,7 @@ import type { SpeakerId } from "../types/speaker";
 import type {
   OutputDeviceInfo,
   StartStreamingOptions,
+  SystemAudioPermission,
   StreamingSessionId,
   TranscriptEvent,
 } from "../types/streaming";
@@ -116,6 +117,14 @@ export async function getMeetingId(
  */
 export async function getOutputDeviceInfo(): Promise<OutputDeviceInfo | null> {
   return invoke<OutputDeviceInfo | null>("get_output_device_info");
+}
+
+/**
+ * Ask for the "System Audio Recording" permission (macOS 14.2+) and
+ * resolve with the user's answer. `notNeeded` elsewhere.
+ */
+export async function requestSystemAudioPermission(): Promise<SystemAudioPermission> {
+  return invoke<SystemAudioPermission>("request_system_audio_permission");
 }
 
 /**

@@ -92,6 +92,7 @@ use objc2_foundation::{NSArray, NSDictionary, NSNumber, NSString};
 
 use super::interleave::{interleave, Plane};
 use super::reconnect::{retry, stop_requested, Backoff};
+use crate::SystemAudioPermission;
 
 /// Synthetic device id reported by [`CoreAudioTapCapture::list_devices`].
 pub const TAP_DEVICE_ID: &str = "macos:coreaudio-tap:default-output";
@@ -225,14 +226,66 @@ fn tap_permission(status: TccStatus, request: impl FnOnce()) -> Result<(), Domai
     }
 }
 
-/// Asks macOS for the permission at most once per process.
+/// Set once macOS has been asked, by a session start or by onboarding.
+static REQUESTED: AtomicBool = AtomicBool::new(false);
+
+/// Asks macOS for the permission at most once per process, without
+/// waiting for the answer (a session start must not block on a prompt).
 fn request_permission_once() {
-    static REQUESTED: AtomicBool = AtomicBool::new(false);
     if REQUESTED.swap(true, Ordering::AcqRel) {
         return;
     }
     if let Some(tcc) = Tcc::get() {
-        tcc.request();
+        tcc.request(|granted| {
+            info!(granted, "System Audio Recording permission answered");
+        });
+    }
+}
+
+/// What [`request_permission`] does for a given state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PermissionStep {
+    Answer(SystemAudioPermission),
+    Ask,
+}
+
+/// Prompts only when taps exist (`taps_supported`) and TCC reports the
+/// permission as not granted; an unreadable state needs no tap
+/// permission because the tap is never used then.
+fn permission_step(taps_supported: bool, status: TccStatus) -> PermissionStep {
+    match (taps_supported, status) {
+        (false, _) | (true, TccStatus::Unknown) => {
+            PermissionStep::Answer(SystemAudioPermission::NotNeeded)
+        }
+        (true, TccStatus::Granted) => PermissionStep::Answer(SystemAudioPermission::Granted),
+        (true, TccStatus::NotGranted) => PermissionStep::Ask,
+    }
+}
+
+/// See [`crate::request_system_audio_permission`]: asks macOS and waits
+/// for the user's answer. A permission declined earlier answers "no"
+/// without showing a prompt.
+pub(crate) async fn request_permission() -> SystemAudioPermission {
+    let tcc = match permission_step(TapApi::get().is_some(), TccStatus::current()) {
+        PermissionStep::Answer(answer) => return answer,
+        PermissionStep::Ask => match Tcc::get() {
+            Some(tcc) => tcc,
+            None => return SystemAudioPermission::NotNeeded,
+        },
+    };
+    REQUESTED.store(true, Ordering::Release);
+    let (tx, rx) = oneshot::channel();
+    let tx = std::sync::Mutex::new(Some(tx));
+    tcc.request(move |granted| {
+        info!(granted, "System Audio Recording permission answered");
+        if let Some(tx) = tx.lock().ok().and_then(|mut slot| slot.take()) {
+            let _ = tx.send(granted);
+        }
+    });
+    match rx.await {
+        Ok(true) => SystemAudioPermission::Granted,
+        // A dropped callback counts as "no": the tap stays unused.
+        Ok(false) | Err(_) => SystemAudioPermission::Denied,
     }
 }
 
@@ -290,15 +343,11 @@ impl Tcc {
         unsafe { (self.preflight)(Retained::as_ptr(&service), std::ptr::null()) }
     }
 
-    /// Shows the macOS prompt if the user was never asked; returns at once.
-    fn request(self) {
+    /// Shows the macOS prompt if the user was never asked; returns at
+    /// once and calls `on_answer` (on a TCC queue) with the result.
+    fn request(self, on_answer: impl Fn(bool) + 'static) {
         let service = NSString::from_str(Self::SERVICE);
-        let done = RcBlock::new(|granted: u8| {
-            info!(
-                granted = granted != 0,
-                "System Audio Recording permission answered"
-            );
-        });
+        let done = RcBlock::new(move |granted: u8| on_answer(granted != 0));
         // SAFETY: as above; TCC copies the block before returning.
         unsafe { (self.request)(Retained::as_ptr(&service), std::ptr::null(), &*done) };
     }
@@ -1310,6 +1359,28 @@ mod tests {
             Err(DomainError::AudioDeviceUnavailable(_))
         ));
         assert!(!asked);
+    }
+
+    #[test]
+    fn onboarding_asks_only_when_taps_exist_and_the_permission_is_missing() {
+        use crate::SystemAudioPermission as P;
+        assert_eq!(
+            permission_step(true, TccStatus::Granted),
+            PermissionStep::Answer(P::Granted)
+        );
+        assert_eq!(
+            permission_step(true, TccStatus::NotGranted),
+            PermissionStep::Ask
+        );
+        // SPI gone or no taps: the other adapter needs no tap permission.
+        assert_eq!(
+            permission_step(true, TccStatus::Unknown),
+            PermissionStep::Answer(P::NotNeeded)
+        );
+        assert_eq!(
+            permission_step(false, TccStatus::NotGranted),
+            PermissionStep::Answer(P::NotNeeded)
+        );
     }
 
     #[test]
