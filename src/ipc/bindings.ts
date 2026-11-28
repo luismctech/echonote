@@ -105,6 +105,12 @@ export const commands = {
 	isHeadphones: boolean,
 } | null, IpcError>(__TAURI_INVOKE("get_output_device_info")),
 	/**
+	 *  Ask for the "System Audio Recording" permission (macOS 14.2+) and
+	 *  wait for the user's answer. Used by onboarding so the first recording
+	 *  does not show a second prompt; never prompts twice per launch.
+	 */
+	requestSystemAudioPermission: () => typedError<SystemAudioPermission, IpcError>(__TAURI_INVOKE("request_system_audio_permission")),
+	/**
 	 *  Toggle which sources contribute to the mix for an active `Mixed` session.
 	 *  Returns `false` when the session is not found or was not started in Mixed mode.
 	 */
@@ -1600,6 +1606,21 @@ export type Summary_Serialize = {
 	/**  RFC 3339 instant the summary finished generating. */
 	createdAt: string,
 } & SummaryContent_Serialize;
+
+/**
+ *  State of the "System Audio Recording" permission after
+ *  [`request_system_audio_permission`].
+ */
+export type SystemAudioPermission = 
+/**  Granted: system audio uses the Core Audio tap (macOS 14.2+). */
+"granted" | 
+/**
+ *  Declined: system audio falls back to ScreenCaptureKit until the
+ *  user enables it in System Settings.
+ */
+"denied" | 
+/**  Nothing to ask on this platform or macOS version. */
+"notNeeded";
 
 /**
  *  One event emitted by the streaming pipeline.

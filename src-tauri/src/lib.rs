@@ -60,6 +60,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             commands::streaming::resume_streaming,
             commands::streaming::get_meeting_id,
             commands::streaming::get_output_device_info,
+            commands::streaming::request_system_audio_permission,
             commands::streaming::set_mix_sources,
             commands::meetings::list_meetings,
             commands::meetings::get_meeting,

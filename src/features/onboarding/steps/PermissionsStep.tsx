@@ -2,10 +2,21 @@ import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Mic, Check } from "lucide-react";
 
-import { startStreaming, stopStreaming, getMeetingId, deleteMeeting } from "../../../ipc/client";
+import {
+  startStreaming,
+  stopStreaming,
+  getMeetingId,
+  deleteMeeting,
+  requestSystemAudioPermission,
+} from "../../../ipc/client";
 import { isIpcError } from "../../../types/ipc-error";
+import {
+  permissionsOutcome,
+  type MicStatus,
+  type SystemAudioStatus,
+} from "../../../lib/onboardingPermissions";
 
-type Status = "idle" | "checking" | "granted" | "denied" | "deferred";
+type Status = MicStatus;
 
 /** Human-readable detail for a failed probe; plain strings pass through. */
 function errorDetail(err: unknown): string | null {
@@ -19,11 +30,17 @@ function errorDetail(err: unknown): string | null {
  * usable. A failure that is *not* about the microphone (no ASR model
  * installed yet) is reported as deferred rather than denied, so the
  * step never blames the user's audio setup for a backend problem.
+ *
+ * After the microphone, the step asks for "System Audio Recording"
+ * (macOS 14.2+), so the first recording does not stop to prompt for it
+ * and fall back to ScreenCaptureKit. Declining is not fatal: the step
+ * explains the fallback and lets the user continue.
  */
 export function PermissionsStep({ onNext }: Readonly<{ onNext: () => void }>) {
   const { t } = useTranslation();
   const [status, setStatus] = useState<Status>("idle");
   const [detail, setDetail] = useState<string | null>(null);
+  const [systemAudio, setSystemAudio] = useState<SystemAudioStatus>("pending");
 
   const checkPermissions = useCallback(async () => {
     setStatus("checking");
@@ -55,18 +72,32 @@ export function PermissionsStep({ onNext }: Readonly<{ onNext: () => void }>) {
     }
   }, []);
 
+  // One system-audio request per mount, once the microphone probe is
+  // done, so macOS never shows both prompts at the same time.
+  useEffect(() => {
+    if (systemAudio !== "pending" || status === "idle" || status === "checking") return;
+    setSystemAudio("checking");
+    requestSystemAudioPermission()
+      .then(setSystemAudio)
+      // The fallback capture still works; nothing to ask the user.
+      .catch(() => setSystemAudio("notNeeded"));
+  }, [status, systemAudio]);
+
+  const outcome = permissionsOutcome(status, systemAudio);
+
   // Auto-check on mount
   useEffect(() => {
     checkPermissions();
   }, [checkPermissions]);
 
-  // Auto-advance when granted or when the check could not run
+  // Auto-advance once the microphone works (or its check could not run)
+  // and system audio needs nothing more.
   useEffect(() => {
-    if (status === "granted" || status === "deferred") {
+    if (outcome === "advance") {
       const timer = setTimeout(onNext, 800);
       return () => clearTimeout(timer);
     }
-  }, [status, onNext]);
+  }, [outcome, onNext]);
 
   return (
     <div className="flex flex-1 flex-col items-center justify-center gap-8 px-8">
@@ -129,6 +160,36 @@ export function PermissionsStep({ onNext }: Readonly<{ onNext: () => void }>) {
                 {t("onboarding.skip")}
               </button>
             </div>
+          </>
+        )}
+
+        {systemAudio === "checking" && (
+          <p className="text-ui-md text-content-secondary animate-pulse">
+            {t("onboarding.systemAudioChecking")}
+          </p>
+        )}
+
+        {systemAudio === "granted" && (
+          <div className="flex items-center gap-2 text-ui-md font-medium text-emerald-600 dark:text-emerald-400">
+            <Check className="h-4 w-4" />
+            {t("onboarding.systemAudioGranted")}
+          </div>
+        )}
+
+        {systemAudio === "denied" && (
+          <>
+            <p className="max-w-sm text-ui-md text-content-secondary">
+              {t("onboarding.systemAudioDenied")}
+            </p>
+            {status !== "denied" && (
+              <button
+                type="button"
+                onClick={onNext}
+                className="rounded-full bg-accent-600 px-6 py-2 text-ui-sm font-medium text-white shadow-sm transition-all hover:bg-accent-700"
+              >
+                {t("onboarding.continue")}
+              </button>
+            )}
           </>
         )}
 

@@ -70,6 +70,39 @@ pub async fn get_output_device_info() -> Result<Option<OutputDeviceInfo>, IpcErr
     }))
 }
 
+/// State of the "System Audio Recording" permission after
+/// [`request_system_audio_permission`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub enum SystemAudioPermission {
+    /// Granted: system audio uses the Core Audio tap (macOS 14.2+).
+    Granted,
+    /// Declined: system audio falls back to ScreenCaptureKit until the
+    /// user enables it in System Settings.
+    Denied,
+    /// Nothing to ask on this platform or macOS version.
+    NotNeeded,
+}
+
+impl From<echo_audio::SystemAudioPermission> for SystemAudioPermission {
+    fn from(value: echo_audio::SystemAudioPermission) -> Self {
+        match value {
+            echo_audio::SystemAudioPermission::Granted => Self::Granted,
+            echo_audio::SystemAudioPermission::Denied => Self::Denied,
+            echo_audio::SystemAudioPermission::NotNeeded => Self::NotNeeded,
+        }
+    }
+}
+
+/// Ask for the "System Audio Recording" permission (macOS 14.2+) and
+/// wait for the user's answer. Used by onboarding so the first recording
+/// does not show a second prompt; never prompts twice per launch.
+#[tauri::command]
+#[specta::specta]
+pub async fn request_system_audio_permission() -> Result<SystemAudioPermission, IpcError> {
+    Ok(echo_audio::request_system_audio_permission().await.into())
+}
+
 /// Toggle which sources contribute to the mix for an active `Mixed` session.
 /// Returns `false` when the session is not found or was not started in Mixed mode.
 #[tauri::command]

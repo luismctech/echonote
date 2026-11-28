@@ -28,6 +28,12 @@ export type AudioFormat = {
  */
 export type AudioSourceKind = "microphone" | "systemOutput" | "mixed";
 
+/**
+ * "System Audio Recording" permission (macOS 14.2+ Core Audio tap):
+ * `notNeeded` on other platforms or older macOS.
+ */
+export type SystemAudioPermission = "granted" | "denied" | "notNeeded";
+
 /** Information about the system's current default audio output device. */
 export type OutputDeviceInfo = {
   name: string;
