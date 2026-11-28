@@ -67,6 +67,17 @@ const SCK_SAMPLE_RATE: u32 = 48_000;
 /// mono before Whisper anyway.
 const SCK_CHANNELS: u16 = 2;
 
+/// Width and height of the video frames ScreenCaptureKit still renders.
+/// An SCStream always captures video and we only read audio, so the
+/// frames are kept as small and as rare as the framework allows.
+const VIDEO_SIZE_PX: u32 = 2;
+
+/// Video frames per second (the lowest whole rate).
+const VIDEO_FPS: u32 = 1;
+
+/// Video frames buffered by ScreenCaptureKit (its minimum).
+const VIDEO_QUEUE_DEPTH: u32 = 3;
+
 /// Mirrors the cpal adapter's bound. Sized for ~5 s of 48 kHz stereo
 /// f32 (~2 MB) before backpressure warnings fire.
 const CHANNEL_CAPACITY_HINT: usize = 512;
@@ -231,14 +242,7 @@ fn start_capture(spec: &CaptureSpec) -> Result<StartedStream, DomainError> {
     // on the resampler downstream.
     let (sample_rate, channels) = effective_format(spec.preferred_format);
 
-    // SCStreamConfiguration's audio setters take `impl Into<i32>`. The
-    // domain ports use unsigned types because negative rates / channel
-    // counts are nonsense; we widen-then-cast here at the boundary.
-    #[allow(clippy::cast_possible_wrap)]
-    let config = SCStreamConfiguration::new()
-        .with_captures_audio(true)
-        .with_sample_rate(sample_rate as i32)
-        .with_channel_count(i32::from(channels));
+    let config = audio_only_config(sample_rate, channels);
 
     let format = AudioFormat {
         sample_rate_hz: sample_rate,
@@ -280,6 +284,25 @@ fn start_capture(spec: &CaptureSpec) -> Result<StartedStream, DomainError> {
             "SCK thread died before signalling readiness: {e}"
         ))),
     }
+}
+
+/// Stream configuration for system-audio capture: the requested audio
+/// format, a minimal video stream, and EchoNote's own output left out so
+/// playing a saved session during a recording is not transcribed again.
+fn audio_only_config(sample_rate: u32, channels: u16) -> SCStreamConfiguration {
+    // SCStreamConfiguration's audio setters take `impl Into<i32>`. The
+    // domain ports use unsigned types because negative rates / channel
+    // counts are nonsense; we widen-then-cast here at the boundary.
+    #[allow(clippy::cast_possible_wrap)]
+    SCStreamConfiguration::new()
+        .with_captures_audio(true)
+        .with_sample_rate(sample_rate as i32)
+        .with_channel_count(i32::from(channels))
+        .with_excludes_current_process_audio(true)
+        .with_width(VIDEO_SIZE_PX)
+        .with_height(VIDEO_SIZE_PX)
+        .with_fps(VIDEO_FPS)
+        .with_queue_depth(VIDEO_QUEUE_DEPTH)
 }
 
 /// Maps the caller's preferred format onto something ScreenCaptureKit
@@ -488,6 +511,31 @@ mod tests {
             channels: 0,
         });
         assert_eq!(ch, SCK_CHANNELS);
+    }
+
+    #[test]
+    fn audio_only_config_keeps_the_requested_audio_format() {
+        let config = audio_only_config(48_000, 2);
+        assert!(config.captures_audio());
+        assert_eq!(config.sample_rate(), 48_000);
+        assert_eq!(config.channel_count(), 2);
+    }
+
+    #[test]
+    fn audio_only_config_shrinks_the_unused_video_stream() {
+        let config = audio_only_config(48_000, 2);
+        assert_eq!(
+            (config.width(), config.height()),
+            (VIDEO_SIZE_PX, VIDEO_SIZE_PX)
+        );
+        assert_eq!(config.fps(), VIDEO_FPS);
+        assert_eq!(config.queue_depth(), VIDEO_QUEUE_DEPTH);
+    }
+
+    #[test]
+    fn audio_only_config_excludes_echonote_own_audio() {
+        let config = audio_only_config(48_000, 2);
+        assert!(config.excludes_current_process_audio());
     }
 
     #[tokio::test]
