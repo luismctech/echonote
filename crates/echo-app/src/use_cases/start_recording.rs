@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::time::Instant;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use echo_domain::{AudioCapture, AudioFormat, AudioFrame, CaptureSpec, DomainError};
 
@@ -28,7 +28,7 @@ pub trait FrameSink: Send {
 /// Outcome of a recording run.
 #[derive(Debug, Clone, Copy)]
 pub struct RecordingReport {
-    /// Format actually negotiated with the device.
+    /// Format negotiated with the device at start.
     pub format: AudioFormat,
     /// Number of frames the sink accepted.
     pub frames: u64,
@@ -53,12 +53,15 @@ impl<S: FrameSink> RecordToSink<S> {
     /// Drives the capture for `duration`, forwarding every frame to the
     /// sink. Returns once the deadline is reached or the stream ends.
     ///
+    /// Frames reach the sink in their own format: a device that
+    /// reconnects mid-recording may change it (the report keeps the
+    /// format at start).
+    ///
     /// # Errors
     ///
-    /// Fails if the capture cannot start, the sink rejects a frame, or
-    /// the device comes back in another format mid-recording
-    /// ([`DomainError::AudioCaptureFailed`]); the sink is finished first,
-    /// so the audio captured until then is kept.
+    /// Fails if the capture cannot start or the sink rejects a frame;
+    /// the sink is finished first, so the audio written until then is
+    /// kept (a failure to finish is logged).
     pub async fn execute(
         mut self,
         spec: CaptureSpec,
@@ -77,6 +80,7 @@ impl<S: FrameSink> RecordToSink<S> {
 
         let mut frames: u64 = 0;
         let mut samples: u64 = 0;
+        let mut current = format;
 
         loop {
             let now = Instant::now();
@@ -95,27 +99,26 @@ impl<S: FrameSink> RecordToSink<S> {
                     break;
                 }
             };
-            // One recording holds one format. A device that reconnected
-            // in another configuration ends it, keeping what was written.
-            if frame.format != format {
-                warn!(
-                    ?format,
+            // A device that reconnected may come back in another format.
+            // Frames keep their own format; the sink decides how to store
+            // them (a WAV file converts them to its own).
+            if frame.format != current {
+                info!(
+                    old = ?current,
                     new = ?frame.format,
-                    "capture format changed mid-recording; stopping recording"
+                    "capture format changed mid-recording; the sink receives the new format"
                 );
-                let _ = stream.stop().await;
-                self.sink.finish().ok();
-                return Err(DomainError::AudioCaptureFailed(format!(
-                    "capture format changed from {format:?} to {:?} during the recording \
-                     (the device reconnected); the audio before it was kept",
-                    frame.format
-                )));
+                current = frame.format;
             }
             samples += frame.samples.len() as u64;
             if let Err(e) = self.sink.accept(&frame) {
                 warn!(error = %e, "sink rejected frame; stopping recording");
                 let _ = stream.stop().await;
-                self.sink.finish().ok();
+                if let Err(finish) = self.sink.finish() {
+                    // The rejection is the error the caller gets; still
+                    // report that what was written may be unusable too.
+                    error!(error = %finish, "finishing the sink after a rejected frame failed");
+                }
                 return Err(e);
             }
             frames += 1;
@@ -216,17 +219,27 @@ mod tests {
         }
     }
 
+    /// What a [`CountingSink`] received.
+    #[derive(Default)]
+    struct SinkLog {
+        frames: u64,
+        samples: u64,
+        finished: bool,
+        formats: Vec<AudioFormat>,
+    }
+
     #[derive(Default, Clone)]
-    struct CountingSink(Arc<Mutex<(u64, u64, bool)>>);
+    struct CountingSink(Arc<Mutex<SinkLog>>);
     impl FrameSink for CountingSink {
         fn accept(&mut self, frame: &AudioFrame) -> Result<(), DomainError> {
             let mut g = self.0.lock().unwrap();
-            g.0 += 1;
-            g.1 += frame.samples.len() as u64;
+            g.frames += 1;
+            g.samples += frame.samples.len() as u64;
+            g.formats.push(frame.format);
             Ok(())
         }
         fn finish(&mut self) -> Result<(), DomainError> {
-            self.0.lock().unwrap().2 = true;
+            self.0.lock().unwrap().finished = true;
             Ok(())
         }
     }
@@ -248,9 +261,9 @@ mod tests {
         assert_eq!(report.frames, 5);
         assert_eq!(report.samples, 5 * 1_600);
         let g = sink.0.lock().unwrap();
-        assert_eq!(g.0, 5);
-        assert_eq!(g.1, 5 * 1_600);
-        assert!(g.2, "sink.finish was not called");
+        assert_eq!(g.frames, 5);
+        assert_eq!(g.samples, 5 * 1_600);
+        assert!(g.finished, "sink.finish was not called");
     }
 
     #[tokio::test]
@@ -267,14 +280,14 @@ mod tests {
             .await
             .unwrap();
         assert!(report.elapsed >= Duration::from_millis(50));
-        assert!(sink.0.lock().unwrap().2);
+        assert!(sink.0.lock().unwrap().finished);
     }
 
-    /// One WAV holds one format: a device that comes back in another
-    /// one stops the recording with a clear error instead of writing
-    /// audio at the wrong speed. What was captured before is finished.
+    /// A device that comes back in another format keeps the recording
+    /// going: every frame reaches the sink with its own format, and the
+    /// sink (a WAV file converts) decides how to store it.
     #[tokio::test]
-    async fn format_change_mid_recording_stops_with_a_clear_error() {
+    async fn format_change_mid_recording_forwards_frames_in_their_format() {
         let later = AudioFormat {
             sample_rate_hz: 48_000,
             channels: 2,
@@ -286,17 +299,60 @@ mod tests {
             switch: Some((2, later)),
         });
         let sink = CountingSink::default();
+        let report = RecordToSink::new(capture, sink.clone())
+            .execute(CaptureSpec::default_microphone(), Duration::from_secs(10))
+            .await
+            .unwrap();
+
+        assert_eq!(report.frames, 5);
+        assert_eq!(report.format, AudioFormat::WHISPER, "format at start");
+        let g = sink.0.lock().unwrap();
+        assert_eq!(g.frames, 5);
+        assert_eq!(
+            g.formats,
+            vec![
+                AudioFormat::WHISPER,
+                AudioFormat::WHISPER,
+                later,
+                later,
+                later
+            ]
+        );
+        assert!(g.finished, "sink.finish was not called");
+    }
+
+    /// Rejects every frame and fails to finish, recording that it tried.
+    #[derive(Default, Clone)]
+    struct BrokenSink(Arc<Mutex<bool>>);
+    impl FrameSink for BrokenSink {
+        fn accept(&mut self, _frame: &AudioFrame) -> Result<(), DomainError> {
+            Err(DomainError::Invariant("disk full".into()))
+        }
+        fn finish(&mut self) -> Result<(), DomainError> {
+            *self.0.lock().unwrap() = true;
+            Err(DomainError::Invariant("header not written".into()))
+        }
+    }
+
+    /// The caller gets the rejection, not the finish failure, and the
+    /// sink is still asked to finish what it wrote.
+    #[tokio::test]
+    async fn rejected_frame_reports_the_rejection_after_finishing_the_sink() {
+        let capture = Arc::new(FakeCapture {
+            format: AudioFormat::WHISPER,
+            chunk: vec![0.0; 160],
+            frames: 3,
+            switch: None,
+        });
+        let sink = BrokenSink::default();
         let err = RecordToSink::new(capture, sink.clone())
             .execute(CaptureSpec::default_microphone(), Duration::from_secs(10))
             .await
             .unwrap_err();
-
         assert!(
-            matches!(&err, DomainError::AudioCaptureFailed(m) if m.contains("format changed")),
-            "unexpected error: {err:?}"
+            matches!(&err, DomainError::Invariant(m) if m == "disk full"),
+            "{err:?}"
         );
-        let g = sink.0.lock().unwrap();
-        assert_eq!(g.0, 2, "only the frames in the original format are written");
-        assert!(g.2, "sink.finish was not called");
+        assert!(*sink.0.lock().unwrap(), "sink.finish was not called");
     }
 }

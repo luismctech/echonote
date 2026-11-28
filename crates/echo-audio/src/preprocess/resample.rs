@@ -13,6 +13,7 @@
 //! state across blocks so every sample is converted once and block
 //! edges leave no artefacts.
 
+
 use rubato::{
     Resampler as RubatoResampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType,
     WindowFunction,
@@ -236,6 +237,63 @@ impl StreamResampler {
         out.extend_from_slice(fresh);
         self.frames_out += fresh.len() as u64;
         Ok(())
+    }
+}
+
+/// Converts a stream of frames in any format to one fixed `target`
+/// format: resampled by a [`StreamResampler`] to the target rate,
+/// downmixed to mono and copied to every target channel. For a sink
+/// bound to one format (a WAV file) whose source may change format
+/// mid-stream (a device that reconnects in another configuration).
+pub struct FormatConverter {
+    channels: usize,
+    mono: StreamResampler,
+    scratch: Vec<Sample>,
+}
+
+impl FormatConverter {
+    /// A converter producing interleaved frames in `target`.
+    pub fn new(target: AudioFormat) -> Result<Self, ResampleError> {
+        if target.channels == 0 || target.sample_rate_hz == 0 {
+            return Err(ResampleError::InvalidFormat(target));
+        }
+        Ok(Self {
+            channels: usize::from(target.channels),
+            mono: StreamResampler::new(target.sample_rate_hz),
+            scratch: Vec::new(),
+        })
+    }
+
+    /// Convert the next block of `samples` in `input` format and append
+    /// it to `out` in the target format.
+    pub fn push(
+        &mut self,
+        samples: &[Sample],
+        input: AudioFormat,
+        out: &mut Vec<Sample>,
+    ) -> Result<(), ResampleError> {
+        self.scratch.clear();
+        // A format change flushes the previous run first: keep that
+        // audio even when the new format turns out to be unusable.
+        let pushed = self.mono.push(samples, input, &mut self.scratch);
+        self.spread(out);
+        pushed
+    }
+
+    /// Append the audio still held in the filter to `out` and start a
+    /// new run.
+    pub fn flush(&mut self, out: &mut Vec<Sample>) -> Result<(), ResampleError> {
+        self.scratch.clear();
+        let flushed = self.mono.flush(&mut self.scratch);
+        self.spread(out);
+        flushed
+    }
+
+    fn spread(&self, out: &mut Vec<Sample>) {
+        out.reserve(self.scratch.len() * self.channels);
+        for &s in &self.scratch {
+            out.extend(std::iter::repeat_n(s, self.channels));
+        }
     }
 }
 
@@ -466,6 +524,27 @@ mod tests {
             .unwrap();
         stream.flush(&mut out).unwrap();
         assert_eq!(out, vec![0.3, 0.0]);
+    }
+
+    #[test]
+    fn format_converter_turns_any_format_into_the_target() {
+        let stereo_48k = AudioFormat {
+            sample_rate_hz: 48_000,
+            channels: 2,
+        };
+        let mut conv = FormatConverter::new(stereo_48k).unwrap();
+        let mut out = Vec::new();
+        conv.push(&tone(16_000, 440.0, 0.5), AudioFormat::WHISPER, &mut out)
+            .unwrap();
+        conv.flush(&mut out).unwrap();
+
+        // 0.5 s at 48 kHz, the same sample on both channels.
+        assert_eq!(out.len(), 24_000 * 2);
+        assert!(out.chunks(2).all(|f| f[0] == f[1]));
+        let ideal = tone(48_000, 440.0, 0.5);
+        let left: Vec<Sample> = out.iter().step_by(2).copied().collect();
+        let at = peak(&left, 0, 2_000);
+        assert!(ideal[at].abs() > 0.45, "tone lost its timing at {at}");
     }
 
     #[test]

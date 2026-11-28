@@ -11,6 +11,8 @@ use hound::{SampleFormat, WavSpec, WavWriter};
 
 use echo_domain::{AudioFormat, AudioFrame};
 
+use crate::preprocess::resample::{FormatConverter, ResampleError};
+
 /// Errors specific to the WAV sink. We keep them concrete here and let
 /// the application layer wrap them into a [`echo_domain::DomainError`]
 /// when crossing a port boundary.
@@ -28,6 +30,9 @@ pub enum WavError {
         expected: AudioFormat,
         actual: AudioFormat,
     },
+    /// A frame in another format could not be converted to the file's.
+    #[error("wav format conversion: {0}")]
+    Convert(#[from] ResampleError),
     /// `finalize` was already called.
     #[error("wav sink already finalized")]
     AlreadyFinalized,
@@ -57,6 +62,8 @@ pub struct WavSink {
     spec: AudioFormat,
     writer: Option<WavWriter<std::io::BufWriter<std::fs::File>>>,
     samples_written: u64,
+    /// Converts frames in another format (see [`Self::write_converting`]).
+    converter: Option<FormatConverter>,
 }
 
 impl WavSink {
@@ -84,6 +91,7 @@ impl WavSink {
             spec,
             writer: Some(writer),
             samples_written: 0,
+            converter: None,
         })
     }
 
@@ -108,14 +116,49 @@ impl WavSink {
                 actual: frame.format,
             });
         }
+        self.write_samples(&frame.samples)
+    }
+
+    /// Push a frame in any format. Frames in the file's format are
+    /// written as they are; others (a device that reconnected in another
+    /// configuration) are resampled to the file's rate and copied to
+    /// each of its channels, so the file keeps real time.
+    pub fn write_converting(&mut self, frame: &AudioFrame) -> Result<(), WavError> {
+        if frame.format == self.spec {
+            self.flush_converter()?;
+            return self.write_samples(&frame.samples);
+        }
+        let converter = match self.converter.as_mut() {
+            Some(converter) => converter,
+            None => self.converter.insert(FormatConverter::new(self.spec)?),
+        };
+        let mut samples = Vec::new();
+        let pushed = converter.push(&frame.samples, frame.format, &mut samples);
+        // Audio flushed from an earlier format is valid even if this
+        // frame's format is not.
+        self.write_samples(&samples)?;
+        Ok(pushed?)
+    }
+
+    /// Write the audio the converter still holds, if any.
+    fn flush_converter(&mut self) -> Result<(), WavError> {
+        let Some(mut converter) = self.converter.take() else {
+            return Ok(());
+        };
+        let mut tail = Vec::new();
+        converter.flush(&mut tail)?;
+        self.write_samples(&tail)
+    }
+
+    fn write_samples(&mut self, samples: &[f32]) -> Result<(), WavError> {
         let writer = self.writer.as_mut().ok_or(WavError::AlreadyFinalized)?;
-        for sample in &frame.samples {
+        for sample in samples {
             let clamped = sample.clamp(-1.0, 1.0);
             // Map [-1.0, 1.0] -> [i16::MIN+1, i16::MAX] symmetric.
             let scaled = (clamped * f32::from(i16::MAX)) as i16;
             writer.write_sample(scaled)?;
         }
-        self.samples_written += frame.samples.len() as u64;
+        self.samples_written += samples.len() as u64;
         Ok(())
     }
 
@@ -127,8 +170,10 @@ impl WavSink {
         Ok(())
     }
 
-    /// Flush the WAV header and close the file.
+    /// Write the audio still held by the format converter, flush the
+    /// WAV header and close the file.
     pub fn finalize(mut self) -> Result<PathBuf, WavError> {
+        self.flush_converter()?;
         if let Some(w) = self.writer.take() {
             w.finalize()?;
         }
@@ -204,6 +249,33 @@ mod tests {
 
         let reader = hound::WavReader::open(&path).unwrap();
         assert_eq!(reader.len(), 1_600);
+    }
+
+    /// A device that reconnects in another format keeps recording: its
+    /// frames are converted to the file's format, so the file keeps
+    /// real time.
+    #[test]
+    fn converts_frames_in_another_format_to_the_file_format() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("out.wav");
+        let fmt = AudioFormat {
+            sample_rate_hz: 48_000,
+            channels: 2,
+        };
+        let mut sink = WavSink::create(&path, fmt, WriteOptions::default()).unwrap();
+        // 100 ms native, 100 ms after a reconnect at 16 kHz mono, 100 ms native.
+        sink.write_converting(&frame(vec![0.25; 9_600], fmt))
+            .unwrap();
+        sink.write_converting(&frame(vec![0.25; 1_600], AudioFormat::WHISPER))
+            .unwrap();
+        sink.write_converting(&frame(vec![0.25; 9_600], fmt))
+            .unwrap();
+        let written = sink.finalize().unwrap();
+
+        let reader = hound::WavReader::open(&written).unwrap();
+        assert_eq!(reader.spec().sample_rate, 48_000);
+        assert_eq!(reader.spec().channels, 2);
+        assert_eq!(reader.len(), 3 * 9_600, "300 ms in, 300 ms written");
     }
 
     #[test]

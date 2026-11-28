@@ -706,7 +706,9 @@ impl FrameSink for WavFrameSink {
             .inner
             .as_mut()
             .ok_or_else(|| DomainError::Invariant("wav sink already finalized".into()))?;
-        sink.write_frame(frame)
+        // A microphone that reconnects in another format keeps recording:
+        // its frames are converted to the file's format.
+        sink.write_converting(frame)
             .map_err(|e| DomainError::Invariant(format!("wav write: {e}")))
     }
 
