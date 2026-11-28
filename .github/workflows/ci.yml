@@ -79,6 +79,21 @@ jobs:
         xcodebuild -version
         xcrun --show-sdk-version
 
+    # Homebrew on the macOS runners now links OpenSSL 4, whose const
+    # X509_NAME breaks llama.cpp's vendored cpp-httplib (llama-cpp-sys-2
+    # builds it with LLAMA_OPENSSL=ON and exposes no switch). Point CMake
+    # and pkg-config at OpenSSL 3 instead.
+    - name: Use OpenSSL 3 for llama.cpp (macOS)
+      if: runner.os == 'macOS'
+      run: |
+        brew list openssl@3 >/dev/null 2>&1 || brew install openssl@3
+        OPENSSL3="$(brew --prefix openssl@3)"
+        {
+          echo "OPENSSL_ROOT_DIR=$OPENSSL3"
+          echo "CMAKE_PREFIX_PATH=$OPENSSL3"
+          echo "PKG_CONFIG_PATH=$OPENSSL3/lib/pkgconfig"
+        } >> "$GITHUB_ENV"
+
     - name: Install toolchain (honors rust-toolchain.toml)
       uses: dtolnay/rust-toolchain@stable
       with:
@@ -91,8 +106,11 @@ jobs:
     # `pnpm tauri dev` keeps up with live audio. CI only needs the tests
     # to pass: compiling every dependency optimized pushed this job from
     # ~4 to 17-30 minutes. A Cargo config profile overrides Cargo.toml.
+    # The runner image no longer creates CARGO_HOME up front.
     - name: Build dependencies unoptimized (CI only)
-      run: printf '[profile.dev.package."*"]\nopt-level = 0\n' >> "${CARGO_HOME:-$HOME/.cargo}/config.toml"
+      run: |
+        mkdir -p "${CARGO_HOME:-$HOME/.cargo}"
+        printf '[profile.dev.package."*"]\nopt-level = 0\n' >> "${CARGO_HOME:-$HOME/.cargo}/config.toml"
 
     - name: Cache cargo registry and target
       uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2

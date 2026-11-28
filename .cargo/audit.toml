@@ -18,6 +18,19 @@ ignore = [
     # glib 0.18.5 — VariantStrIter iterator unsoundness (GTK3, Linux only);
     # patched in glib >= 0.20, which Tauri's GTK3 stack does not use yet.
     "RUSTSEC-2024-0429",
+
+    # ── Vulnerable but not reachable with untrusted input ──────────────────
+    # zip 4.6.1 — only via tauri-plugin-updater 2.x, which extracts an update
+    # archive after verifying its minisign signature with our public key, so
+    # untrusted archives never reach zip. Fixed in zip 9; no 2.x updater uses it.
+    # Revisit with tauri-plugin-updater 3.0 (Dependabot alerts #24/#25 dismissed
+    # on the same grounds, 2026-11-27).
+    "RUSTSEC-2026-0367", # SUID/SGID bits kept on extraction
+    "RUSTSEC-2026-0368", # symlink targets outside the destination
+    "RUSTSEC-2026-0369", # permissions applied through symlinks
+    "RUSTSEC-2026-0429", # abort on a symlink entry with a large size
+    "RUSTSEC-2026-0545", # AES entries returned without their authentication code
+    "RUSTSEC-2026-0548", # ZipStreamReader local-header names
 ]
 
 # Warn (but don't fail) on unmaintained crates not in the ignore list

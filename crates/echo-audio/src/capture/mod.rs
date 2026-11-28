@@ -12,6 +12,9 @@
 
 pub mod cpal_microphone;
 pub mod fallback;
+// Used by the macOS adapters; built everywhere so its tests run on every
+// CI runner.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) mod interleave;
 pub mod mixed;
 // Used by the Linux adapter; built everywhere so its tests run on every CI runner.
