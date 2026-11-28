@@ -10,9 +10,21 @@
 //! a dedicated `std::thread` owns the cpal `Stream` (which is `!Send`),
 //! frames flow through a `tokio::sync::mpsc` channel, and a oneshot
 //! signals the thread to tear down.
+//!
+//! ## Reconnect
+//!
+//! WASAPI never moves a stream to another endpoint: when the default
+//! output changes or the device is removed, cpal reports a fatal error
+//! (`StreamInvalidated` / `DeviceNotAvailable`) and the stream stops.
+//! The thread then reopens the loopback on the current default output
+//! with [`Backoff::DEVICE`]; frames carry the format of the stream that
+//! produced them. Unlike the microphone there is no starvation watchdog:
+//! a loopback stream delivers nothing while no application plays audio.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -25,7 +37,9 @@ use echo_domain::{
     DomainError, Sample,
 };
 
+use super::reconnect::{retry, stop_requested, Backoff};
 use super::sample_convert::{self, rank_format};
+use super::stream_error::{classify, Severity};
 
 /// Synthetic device ID exposed via [`WasapiLoopbackCapture::list_devices`].
 pub const SYSTEM_OUTPUT_DEVICE_ID: &str = "windows:wasapi:loopback-default";
@@ -35,6 +49,9 @@ const CHANNEL_CAPACITY_HINT: usize = 512;
 /// Buffer period hint for WASAPI. Overrides the device default period
 /// (which can be 20–100 ms on some drivers) to reduce callback latency.
 const BUFFER_PERIOD: Duration = Duration::from_millis(10);
+
+/// How often the audio thread checks for stop and stream failure.
+const SUPERVISE_EVERY: Duration = Duration::from_millis(50);
 
 /// Windows WASAPI loopback capture adapter.
 ///
@@ -152,40 +169,17 @@ impl Drop for StartedStream {
 }
 
 fn start_capture(spec: &CaptureSpec) -> Result<StartedStream, DomainError> {
-    let host = cpal::default_host();
-
-    let device = host.default_output_device().ok_or_else(|| {
-        DomainError::AudioDeviceUnavailable("no default output device for WASAPI loopback".into())
-    })?;
-    let device_name = device
-        .description()
-        .map(|d| d.name().to_string())
-        .unwrap_or_else(|_| "<unnamed>".to_string());
-    let supported = pick_output_config(&device, spec.preferred_format)?;
-    let format = AudioFormat {
-        sample_rate_hz: supported.sample_rate(),
-        channels: supported.channels(),
-    };
-    let sample_format = supported.sample_format();
-    let config: StreamConfig = supported.into();
-
-    info!(
-        device = %device_name,
-        actual.rate = format.sample_rate_hz,
-        actual.ch = format.channels,
-        sample_format = ?sample_format,
-        "starting WASAPI loopback capture"
-    );
+    let opened = open_default_loopback(spec.preferred_format)?;
+    let format = opened.format;
 
     let (tx, rx) = mpsc::channel::<AudioFrame>(CHANNEL_CAPACITY_HINT);
     let (stop_tx, stop_rx) = oneshot::channel::<()>();
     let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<(), DomainError>>();
+    let preferred = spec.preferred_format;
 
     let join = thread::Builder::new()
         .name("echo-audio-wasapi-loopback".into())
-        .spawn(move || {
-            run_audio_thread(device, config, sample_format, format, tx, stop_rx, ready_tx);
-        })
+        .spawn(move || run_audio_thread(opened, preferred, tx, stop_rx, ready_tx))
         .map_err(|e| DomainError::AudioCaptureFailed(format!("spawn audio thread: {e}")))?;
 
     match ready_rx.recv() {
@@ -200,6 +194,47 @@ fn start_capture(spec: &CaptureSpec) -> Result<StartedStream, DomainError> {
             "audio thread died before signalling readiness: {e}"
         ))),
     }
+}
+
+/// The default output device with the stream configuration picked for it.
+struct LoopbackDevice {
+    device: Device,
+    config: StreamConfig,
+    sample_format: SampleFormat,
+    format: AudioFormat,
+}
+
+/// Resolves the current default output device and its loopback format.
+fn open_default_loopback(preferred: AudioFormat) -> Result<LoopbackDevice, DomainError> {
+    let host = cpal::default_host();
+    let device = host.default_output_device().ok_or_else(|| {
+        DomainError::AudioDeviceUnavailable("no default output device for WASAPI loopback".into())
+    })?;
+    let device_name = device
+        .description()
+        .map(|d| d.name().to_string())
+        .unwrap_or_else(|_| "<unnamed>".to_string());
+    let supported = pick_output_config(&device, preferred)?;
+    let format = AudioFormat {
+        sample_rate_hz: supported.sample_rate(),
+        channels: supported.channels(),
+    };
+    let sample_format = supported.sample_format();
+
+    info!(
+        device = %device_name,
+        actual.rate = format.sample_rate_hz,
+        actual.ch = format.channels,
+        sample_format = ?sample_format,
+        "opening WASAPI loopback capture"
+    );
+
+    Ok(LoopbackDevice {
+        device,
+        config: supported.into(),
+        sample_format,
+        format,
+    })
 }
 
 /// Pick the output device's config closest to `preferred`.
@@ -246,58 +281,119 @@ fn pick_output_config(
 }
 
 fn run_audio_thread(
-    device: Device,
-    config: StreamConfig,
-    sample_format: SampleFormat,
-    format: AudioFormat,
+    opened: LoopbackDevice,
+    preferred: AudioFormat,
     tx: FrameSender,
-    stop_rx: oneshot::Receiver<()>,
+    mut stop_rx: oneshot::Receiver<()>,
     ready_tx: std::sync::mpsc::Sender<Result<(), DomainError>>,
 ) {
-    let start = std::time::Instant::now();
-    let err_fn = |err: cpal::Error| error!(error = %err, "WASAPI loopback stream error");
+    let start = Instant::now();
+    let failed = Arc::new(AtomicBool::new(false));
+    let mut format = opened.format;
 
-    // Build an *input* stream on the *output* device — cpal's WASAPI
-    // backend detects this and sets AUDCLNT_STREAMFLAGS_LOOPBACK.
-    let build_result = sample_convert::build_input_stream(
-        &device,
-        config,
-        sample_format,
-        {
-            let tx = tx.clone();
-            move |samples: Vec<Sample>| push_frame(&tx, format, start, samples.into_iter())
-        },
-        err_fn,
-        Some(BUFFER_PERIOD),
-    );
-
-    let stream = match build_result {
+    let stream = match play_loopback(&opened, &tx, start, &failed) {
         Ok(s) => s,
         Err(e) => {
             let _ = ready_tx.send(Err(e));
             return;
         }
     };
+    let _ = ready_tx.send(Ok(()));
+    debug!("WASAPI loopback stream live; watching for stop and stream failure");
 
-    if let Err(e) = stream.play() {
-        let _ = ready_tx.send(Err(DomainError::AudioCaptureFailed(format!(
-            "stream.play: {e}"
-        ))));
-        return;
+    let mut current = Some(stream);
+    loop {
+        if stop_requested(&mut stop_rx) {
+            break;
+        }
+        if failed.load(Ordering::Acquire) {
+            current.take();
+            warn!("WASAPI loopback stream ended — reopening the default output");
+            let reopened = retry(Backoff::DEVICE, &mut stop_rx, |_| {
+                let opened = open_default_loopback(preferred)?;
+                let stream = play_loopback(&opened, &tx, start, &failed)?;
+                Ok((stream, opened.format))
+            });
+            match reopened {
+                Some((stream, new_format)) => {
+                    if new_format != format {
+                        info!(
+                            old.rate = format.sample_rate_hz,
+                            old.ch = format.channels,
+                            new.rate = new_format.sample_rate_hz,
+                            new.ch = new_format.channels,
+                            "WASAPI loopback reconnected with a different format"
+                        );
+                    } else {
+                        info!("WASAPI loopback reconnected");
+                    }
+                    format = new_format;
+                    current = Some(stream);
+                }
+                None if stop_requested(&mut stop_rx) => break,
+                None => {
+                    warn!("WASAPI loopback reconnection failed — ending capture");
+                    break;
+                }
+            }
+        }
+        thread::sleep(SUPERVISE_EVERY);
     }
 
-    let _ = ready_tx.send(Ok(()));
-    debug!("WASAPI loopback stream live; parking thread until stop signal");
-
-    let _ = stop_rx.blocking_recv();
-    drop(stream);
+    drop(current);
     info!("WASAPI loopback capture stopped");
+}
+
+/// Builds and starts an input stream on the output device: cpal's WASAPI
+/// backend detects the render endpoint and sets
+/// `AUDCLNT_STREAMFLAGS_LOOPBACK`. A fatal stream error raises `failed`
+/// and silences the stream until the thread replaces it.
+fn play_loopback(
+    opened: &LoopbackDevice,
+    tx: &FrameSender,
+    start: Instant,
+    failed: &Arc<AtomicBool>,
+) -> Result<cpal::Stream, DomainError> {
+    let format = opened.format;
+    // The previous stream is gone; only errors of the new one count.
+    failed.store(false, Ordering::Release);
+    let err_fn = {
+        let failed = Arc::clone(failed);
+        move |err: cpal::Error| match classify(&err) {
+            Severity::Transient => debug!(error = %err, "transient WASAPI loopback stream error"),
+            Severity::Fatal => {
+                error!(error = %err, "WASAPI loopback stream error — will reconnect");
+                failed.store(true, Ordering::Release);
+            }
+        }
+    };
+    let stream = sample_convert::build_input_stream(
+        &opened.device,
+        opened.config,
+        opened.sample_format,
+        {
+            let tx = tx.clone();
+            let failed = Arc::clone(failed);
+            move |samples: Vec<Sample>| {
+                if failed.load(Ordering::Acquire) {
+                    return;
+                }
+                push_frame(&tx, format, start, samples.into_iter());
+            }
+        },
+        err_fn,
+        Some(BUFFER_PERIOD),
+    )?;
+    stream
+        .play()
+        .map_err(|e| DomainError::AudioCaptureFailed(format!("stream.play: {e}")))?;
+    Ok(stream)
 }
 
 fn push_frame(
     tx: &FrameSender,
     format: AudioFormat,
-    start: std::time::Instant,
+    start: Instant,
     samples: impl Iterator<Item = Sample>,
 ) {
     let captured_at_ns = start.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64;

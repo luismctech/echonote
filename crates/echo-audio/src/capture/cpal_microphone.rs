@@ -29,6 +29,7 @@ use echo_domain::{
     DomainError, Sample,
 };
 
+use super::reconnect::{retry, Backoff};
 use super::sample_convert::{self, rank_format};
 use super::stream_error::{classify, Severity};
 
@@ -97,7 +98,7 @@ impl AudioCapture for CpalMicrophoneCapture {
 // ---------------------------------------------------------------------------
 
 fn enumerate_input_devices() -> Result<Vec<DeviceInfo>, DomainError> {
-    let host = cpal::default_host();
+    let host = super::device_host();
     let default_id = host
         .default_input_device()
         .and_then(|d| d.description().ok().map(|desc| desc.name().to_string()))
@@ -194,7 +195,7 @@ fn format_of(supported: &SupportedStreamConfig) -> AudioFormat {
 }
 
 fn start_capture(spec: &CaptureSpec) -> Result<StartedStream, DomainError> {
-    let host = cpal::default_host();
+    let host = super::device_host();
 
     let device = pick_device(&host, spec.device_id.as_deref())?;
     let device_name = device
@@ -364,16 +365,6 @@ fn pick_config(
 /// How often a repeating transient stream error is logged (1 in N).
 const TRANSIENT_LOG_EVERY: u64 = 100;
 
-/// Maximum number of consecutive reconnection attempts before giving up.
-const MAX_RECONNECT_ATTEMPTS: u32 = 10;
-
-/// Base delay between reconnection attempts. Doubles on each retry
-/// (exponential backoff) up to 5 s.
-const RECONNECT_BASE_DELAY: Duration = Duration::from_millis(300);
-
-/// Maximum delay between reconnection attempts.
-const RECONNECT_MAX_DELAY: Duration = Duration::from_secs(5);
-
 /// If no audio frame arrives within this duration, the device is
 /// considered stalled (e.g. another app like Teams silently took it).
 /// Triggers reconnection.
@@ -505,84 +496,31 @@ fn reconnect_stream(
     last_frame_ms: &Arc<AtomicU64>,
     stop_rx: &mut oneshot::Receiver<()>,
 ) -> Option<(cpal::Stream, AudioFormat)> {
-    let mut delay = RECONNECT_BASE_DELAY;
-
-    for attempt in 1..=MAX_RECONNECT_ATTEMPTS {
-        // Check if stop was requested while we retry.
-        match stop_rx.try_recv() {
-            Ok(()) | Err(oneshot::error::TryRecvError::Closed) => return None,
-            Err(oneshot::error::TryRecvError::Empty) => {}
-        }
-
-        info!(
-            attempt,
-            max = MAX_RECONNECT_ATTEMPTS,
-            ?delay,
-            "reconnect attempt"
-        );
-
-        // Sleep in small increments so we can respond to stop requests quickly.
-        let sleep_step = Duration::from_millis(50);
-        let mut remaining = delay;
-        while remaining > Duration::ZERO {
-            let step = remaining.min(sleep_step);
-            std::thread::sleep(step);
-            remaining = remaining.saturating_sub(step);
-            // Re-check stop during the wait.
-            match stop_rx.try_recv() {
-                Ok(()) | Err(oneshot::error::TryRecvError::Closed) => return None,
-                Err(oneshot::error::TryRecvError::Empty) => {}
-            }
-        }
-
-        // Re-acquire the device (it may have been reconfigured).
-        let host = cpal::default_host();
-        let device = match pick_device(&host, device_id.as_deref()) {
-            Ok(d) => d,
-            Err(e) => {
-                warn!(attempt, error = %e, "device not available yet");
-                delay = (delay * 2).min(RECONNECT_MAX_DELAY);
-                continue;
-            }
-        };
-
-        // Re-pick config in case the device's supported formats changed.
-        let supported = match pick_config(&device, preferred_format) {
-            Ok(c) => c,
-            Err(e) => {
-                warn!(attempt, error = %e, "cannot pick config on reconnect");
-                delay = (delay * 2).min(RECONNECT_MAX_DELAY);
-                continue;
-            }
-        };
-
+    retry(Backoff::DEVICE, stop_rx, |_| {
+        // Re-acquire the device and re-pick its config: it may come back
+        // reconfigured.
+        let host = super::device_host();
+        let device = pick_device(&host, device_id.as_deref())?;
+        let supported = pick_config(&device, preferred_format)?;
         let new_format = format_of(&supported);
         let new_sample_format = supported.sample_format();
-        let new_config: StreamConfig = supported.into();
 
         // Reset error flag and frame timestamp before building the new stream.
         stream_error.store(false, Ordering::Release);
         last_frame_ms.store(epoch_ms_now(), Ordering::Release);
 
-        match build_and_play_stream(
+        let stream = build_and_play_stream(
             &device,
-            new_config,
+            supported.into(),
             new_sample_format,
             new_format,
             tx,
             start,
             stream_error,
             last_frame_ms,
-        ) {
-            Ok(stream) => return Some((stream, new_format)),
-            Err(e) => {
-                warn!(attempt, error = %e, "rebuild stream failed");
-                delay = (delay * 2).min(RECONNECT_MAX_DELAY);
-            }
-        }
-    }
-
-    None
+        )?;
+        Ok((stream, new_format))
+    })
 }
 
 /// Builds and starts a CPAL input stream. Shared by initial start and

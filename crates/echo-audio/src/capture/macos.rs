@@ -67,6 +67,17 @@ const SCK_SAMPLE_RATE: u32 = 48_000;
 /// mono before Whisper anyway.
 const SCK_CHANNELS: u16 = 2;
 
+/// Width and height of the video frames ScreenCaptureKit still renders.
+/// An SCStream always captures video and we only read audio, so the
+/// frames are kept as small and as rare as the framework allows.
+const VIDEO_SIZE_PX: u32 = 2;
+
+/// Video frames per second (the lowest whole rate).
+const VIDEO_FPS: u32 = 1;
+
+/// Video frames buffered by ScreenCaptureKit (its minimum).
+const VIDEO_QUEUE_DEPTH: u32 = 3;
+
 /// Mirrors the cpal adapter's bound. Sized for ~5 s of 48 kHz stereo
 /// f32 (~2 MB) before backpressure warnings fire.
 const CHANNEL_CAPACITY_HINT: usize = 512;
@@ -135,20 +146,70 @@ impl AudioCapture for ScreenCaptureKitCapture {
 // Internals
 // ---------------------------------------------------------------------------
 
-fn probe_default_display() -> Result<Vec<DeviceInfo>, DomainError> {
-    let content = SCShareableContent::get().map_err(|e| {
-        DomainError::AudioDeviceUnavailable(format!(
-            "ScreenCaptureKit unavailable (Screen Recording permission?): {e}"
-        ))
-    })?;
+#[link(name = "CoreGraphics", kind = "framework")]
+extern "C" {
+    /// Whether the process holds the Screen Recording permission. Never
+    /// prompts. macOS 10.15+.
+    fn CGPreflightScreenCaptureAccess() -> bool;
+    /// Shows the Screen Recording prompt (only the first time macOS asks).
+    /// macOS 10.15+.
+    fn CGRequestScreenCaptureAccess() -> bool;
+}
 
-    if content.displays().is_empty() {
-        return Err(DomainError::AudioDeviceUnavailable(
-            "ScreenCaptureKit reported zero displays — Screen Recording \
-             permission is likely missing"
-                .into(),
-        ));
+/// Shareable content for system-audio capture, with the Screen Recording
+/// permission read first so a failure can name its cause.
+fn shareable_content() -> Result<SCShareableContent, DomainError> {
+    // SAFETY: both functions take no arguments and only read or request
+    // the TCC state of the current process.
+    let granted = unsafe { CGPreflightScreenCaptureAccess() };
+    with_screen_recording(
+        granted,
+        || {
+            let content = SCShareableContent::get().map_err(|e| {
+                DomainError::AudioDeviceUnavailable(format!("ScreenCaptureKit unavailable: {e}"))
+            })?;
+            if content.displays().is_empty() {
+                return Err(DomainError::AudioDeviceUnavailable(
+                    "ScreenCaptureKit reported zero displays".into(),
+                ));
+            }
+            Ok(content)
+        },
+        || {
+            unsafe { CGRequestScreenCaptureAccess() };
+        },
+    )
+}
+
+/// Runs `attempt` (the ScreenCaptureKit call). When it fails and the
+/// preflight said the permission is missing (`granted` false), asks macOS
+/// to prompt through `request` and returns an error naming the setting.
+/// ScreenCaptureKit has the last word: the preflight keeps answering "not
+/// granted" after a grant until the app restarts, hence the restart hint.
+fn with_screen_recording<T>(
+    granted: bool,
+    attempt: impl FnOnce() -> Result<T, DomainError>,
+    request: impl FnOnce(),
+) -> Result<T, DomainError> {
+    let failure = match attempt() {
+        Ok(value) => return Ok(value),
+        Err(e) => e,
+    };
+    if granted {
+        return Err(failure);
     }
+    warn!(error = %failure, "Screen Recording permission missing; asking macOS to prompt");
+    request();
+    Err(DomainError::AudioDeviceUnavailable(
+        "system audio needs the Screen Recording permission: allow EchoNote in \
+             System Settings › Privacy & Security › Screen & System Audio Recording \
+             (Screen Recording before macOS 15), then restart EchoNote"
+            .into(),
+    ))
+}
+
+fn probe_default_display() -> Result<Vec<DeviceInfo>, DomainError> {
+    shareable_content()?;
 
     Ok(vec![DeviceInfo {
         id: SYSTEM_OUTPUT_DEVICE_ID.to_string(),
@@ -207,16 +268,9 @@ fn start_capture(spec: &CaptureSpec) -> Result<StartedStream, DomainError> {
     // follow-up issue; the MVP captures the full mix of the primary
     // display, which already isolates calls / browser tabs once paired
     // with VAD + diarization downstream.
-    let content = SCShareableContent::get().map_err(|e| {
-        DomainError::AudioDeviceUnavailable(format!(
-            "ScreenCaptureKit unavailable (Screen Recording permission?): {e}"
-        ))
-    })?;
-
+    let content = shareable_content()?;
     let display = content.displays().into_iter().next().ok_or_else(|| {
-        DomainError::AudioDeviceUnavailable(
-            "no shareable display — grant Screen Recording in System Settings".into(),
-        )
+        DomainError::AudioDeviceUnavailable("ScreenCaptureKit reported zero displays".into())
     })?;
 
     let filter = SCContentFilter::create()
@@ -231,14 +285,7 @@ fn start_capture(spec: &CaptureSpec) -> Result<StartedStream, DomainError> {
     // on the resampler downstream.
     let (sample_rate, channels) = effective_format(spec.preferred_format);
 
-    // SCStreamConfiguration's audio setters take `impl Into<i32>`. The
-    // domain ports use unsigned types because negative rates / channel
-    // counts are nonsense; we widen-then-cast here at the boundary.
-    #[allow(clippy::cast_possible_wrap)]
-    let config = SCStreamConfiguration::new()
-        .with_captures_audio(true)
-        .with_sample_rate(sample_rate as i32)
-        .with_channel_count(i32::from(channels));
+    let config = audio_only_config(sample_rate, channels);
 
     let format = AudioFormat {
         sample_rate_hz: sample_rate,
@@ -280,6 +327,25 @@ fn start_capture(spec: &CaptureSpec) -> Result<StartedStream, DomainError> {
             "SCK thread died before signalling readiness: {e}"
         ))),
     }
+}
+
+/// Stream configuration for system-audio capture: the requested audio
+/// format, a minimal video stream, and EchoNote's own output left out so
+/// playing a saved session during a recording is not transcribed again.
+fn audio_only_config(sample_rate: u32, channels: u16) -> SCStreamConfiguration {
+    // SCStreamConfiguration's audio setters take `impl Into<i32>`. The
+    // domain ports use unsigned types because negative rates / channel
+    // counts are nonsense; we widen-then-cast here at the boundary.
+    #[allow(clippy::cast_possible_wrap)]
+    SCStreamConfiguration::new()
+        .with_captures_audio(true)
+        .with_sample_rate(sample_rate as i32)
+        .with_channel_count(i32::from(channels))
+        .with_excludes_current_process_audio(true)
+        .with_width(VIDEO_SIZE_PX)
+        .with_height(VIDEO_SIZE_PX)
+        .with_fps(VIDEO_FPS)
+        .with_queue_depth(VIDEO_QUEUE_DEPTH)
 }
 
 /// Maps the caller's preferred format onto something ScreenCaptureKit
@@ -488,6 +554,73 @@ mod tests {
             channels: 0,
         });
         assert_eq!(ch, SCK_CHANNELS);
+    }
+
+    #[test]
+    fn audio_only_config_keeps_the_requested_audio_format() {
+        let config = audio_only_config(48_000, 2);
+        assert!(config.captures_audio());
+        assert_eq!(config.sample_rate(), 48_000);
+        assert_eq!(config.channel_count(), 2);
+    }
+
+    #[test]
+    fn audio_only_config_shrinks_the_unused_video_stream() {
+        let config = audio_only_config(48_000, 2);
+        assert_eq!(
+            (config.width(), config.height()),
+            (VIDEO_SIZE_PX, VIDEO_SIZE_PX)
+        );
+        assert_eq!(config.fps(), VIDEO_FPS);
+        assert_eq!(config.queue_depth(), VIDEO_QUEUE_DEPTH);
+    }
+
+    #[test]
+    fn audio_only_config_excludes_echonote_own_audio() {
+        let config = audio_only_config(48_000, 2);
+        assert!(config.excludes_current_process_audio());
+    }
+
+    fn sck_unavailable() -> DomainError {
+        DomainError::AudioDeviceUnavailable("ScreenCaptureKit unavailable: -3801".into())
+    }
+
+    #[test]
+    fn a_working_capture_is_kept_even_if_the_preflight_says_no() {
+        // macOS keeps answering "not granted" after a grant until restart.
+        let mut prompted = false;
+        let outcome = with_screen_recording(false, || Ok("content"), || prompted = true);
+        assert_eq!(outcome.unwrap(), "content");
+        assert!(!prompted);
+    }
+
+    #[test]
+    fn a_failure_without_permission_prompts_once_and_names_the_setting() {
+        let mut prompts = 0;
+        let outcome: Result<(), _> =
+            with_screen_recording(false, || Err(sck_unavailable()), || prompts += 1);
+        assert_eq!(prompts, 1);
+        match outcome {
+            Err(DomainError::AudioDeviceUnavailable(msg)) => {
+                assert!(msg.contains("Screen & System Audio Recording"), "{msg}");
+                assert!(msg.contains("restart EchoNote"), "{msg}");
+            }
+            other => panic!("unexpected outcome: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_failure_with_permission_keeps_its_own_error() {
+        let mut prompted = false;
+        let outcome: Result<(), _> =
+            with_screen_recording(true, || Err(sck_unavailable()), || prompted = true);
+        assert!(!prompted);
+        match outcome {
+            Err(DomainError::AudioDeviceUnavailable(msg)) => {
+                assert!(msg.contains("-3801"), "{msg}")
+            }
+            other => panic!("unexpected outcome: {other:?}"),
+        }
     }
 
     #[tokio::test]

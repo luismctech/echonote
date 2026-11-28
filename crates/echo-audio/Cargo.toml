@@ -38,6 +38,12 @@ tract-onnx.workspace = true
 [target.'cfg(target_os = "macos")'.dependencies]
 screencapturekit.workspace = true
 
+# Linux system-audio capture: cpal's PulseAudio backend (a pure-Rust client
+# of the PulseAudio protocol, also served by PipeWire) lists the "Monitor of"
+# sources that the ALSA host never shows.
+[target.'cfg(target_os = "linux")'.dependencies]
+cpal = { workspace = true, features = ["pulseaudio"] }
+
 
 [dev-dependencies]
 pretty_assertions.workspace = true

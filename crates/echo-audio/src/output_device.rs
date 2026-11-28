@@ -20,7 +20,7 @@ pub struct OutputDeviceInfo {
 /// This call may briefly access the CoreAudio / WASAPI subsystem; run it
 /// on a blocking thread if latency matters.
 pub fn default_output_device_info() -> Option<OutputDeviceInfo> {
-    let device = cpal::default_host().default_output_device()?;
+    let device = crate::capture::device_host().default_output_device()?;
     let name = device.description().ok()?.name().to_string();
     let is_headphones = looks_like_headphones(&name);
     Some(OutputDeviceInfo {
