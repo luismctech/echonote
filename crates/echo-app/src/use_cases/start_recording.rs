@@ -32,7 +32,10 @@ pub struct RecordingReport {
     pub format: AudioFormat,
     /// Number of frames the sink accepted.
     pub frames: u64,
-    /// Number of PCM samples (per channel × channel count) written.
+    /// PCM samples (per channel × channel count) received from the
+    /// capture, each frame counted in its own format. After a device
+    /// format change this is not what a converting sink wrote: ask the
+    /// sink for that.
     pub samples: u64,
     /// Wall-clock duration of the capture.
     pub elapsed: Duration,
@@ -334,10 +337,31 @@ mod tests {
         }
     }
 
-    /// The caller gets the rejection, not the finish failure, and the
-    /// sink is still asked to finish what it wrote.
+    /// In-memory log destination for a test subscriber.
+    #[derive(Clone, Default)]
+    struct LogBuffer(Arc<Mutex<Vec<u8>>>);
+    impl std::io::Write for LogBuffer {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// The caller gets the rejection, the sink is still asked to finish
+    /// what it wrote, and a failed finish is logged, not swallowed.
     #[tokio::test]
     async fn rejected_frame_reports_the_rejection_after_finishing_the_sink() {
+        let logs = LogBuffer::default();
+        let writer = logs.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || writer.clone())
+            .with_ansi(false)
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+
         let capture = Arc::new(FakeCapture {
             format: AudioFormat::WHISPER,
             chunk: vec![0.0; 160],
@@ -354,5 +378,11 @@ mod tests {
             "{err:?}"
         );
         assert!(*sink.0.lock().unwrap(), "sink.finish was not called");
+        let logs = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
+        assert!(
+            logs.contains("finishing the sink after a rejected frame failed")
+                && logs.contains("header not written"),
+            "finish failure not logged: {logs}"
+        );
     }
 }
