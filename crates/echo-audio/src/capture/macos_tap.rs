@@ -58,7 +58,8 @@ use objc2_core_audio::{
     kAudioAggregateDeviceIsPrivateKey, kAudioAggregateDeviceIsStackedKey,
     kAudioAggregateDeviceMainSubDeviceKey, kAudioAggregateDeviceNameKey,
     kAudioAggregateDeviceSubDeviceListKey, kAudioAggregateDeviceTapAutoStartKey,
-    kAudioAggregateDeviceTapListKey, kAudioAggregateDeviceUIDKey, kAudioDevicePropertyDeviceUID,
+    kAudioAggregateDeviceTapListKey, kAudioAggregateDeviceUIDKey,
+    kAudioDevicePropertyDeviceIsAlive, kAudioDevicePropertyDeviceUID,
     kAudioHardwarePropertyDefaultOutputDevice, kAudioHardwarePropertyTranslatePIDToProcessObject,
     kAudioObjectPropertyElementMain, kAudioObjectPropertyScopeGlobal, kAudioObjectSystemObject,
     kAudioSubDeviceUIDKey, kAudioSubTapDriftCompensationKey, kAudioSubTapUIDKey,
@@ -75,7 +76,7 @@ use objc2_core_foundation::CFDictionary;
 use objc2_foundation::{NSArray, NSDictionary, NSNumber, NSString};
 
 use super::interleave::{interleave, Plane};
-use super::reconnect::stop_requested;
+use super::reconnect::{retry, stop_requested, Backoff};
 
 /// Synthetic device id reported by [`CoreAudioTapCapture::list_devices`].
 pub const TAP_DEVICE_ID: &str = "macos:coreaudio-tap:default-output";
@@ -296,12 +297,40 @@ fn run_capture_thread(
     timeline.mark_live();
     let _ = ready_tx.send(Ok(format));
 
+    let mut format = format;
+    let mut current = Some(tap);
     while !stop_requested(&mut stop_rx) {
+        // Switching the default output keeps a global tap working, but
+        // losing the device that clocks the aggregate (headphones
+        // unplugged) stops its IOProc: rebuild on the new default output.
+        if current.as_ref().is_some_and(|t| !device_alive(t.clock)) {
+            current = None;
+            warn!("Core Audio tap clock device went away — rebuilding the tap");
+            let rebuilt = retry(Backoff::DEVICE, &mut stop_rx, |_| {
+                Tap::open(api, tx.clone(), Arc::clone(&timeline))
+            });
+            match rebuilt {
+                Some(tap) => {
+                    info!(
+                        rate = tap.format.sample_rate_hz,
+                        ch = tap.format.channels,
+                        "Core Audio tap rebuilt"
+                    );
+                    format = tap.format;
+                    current = Some(tap);
+                }
+                None if stop_requested(&mut stop_rx) => break,
+                None => {
+                    warn!("Core Audio tap could not be rebuilt — ending capture");
+                    break;
+                }
+            }
+        }
         fill_silence(&timeline, format, &tx);
         thread::sleep(SUPERVISE_EVERY);
     }
 
-    drop(tap);
+    drop(current);
     info!("Core Audio tap capture stopped");
 }
 
@@ -309,7 +338,7 @@ fn run_capture_thread(
 fn fill_silence(timeline: &Timeline, format: AudioFormat, tx: &mpsc::Sender<AudioFrame>) {
     let mut missing = silence_to_emit(
         timeline.elapsed(),
-        timeline.frames.load(Ordering::Acquire),
+        timeline.sent(),
         format.sample_rate_hz,
         timeline.since_last_buffer(),
         QUIET_AFTER,
@@ -317,20 +346,20 @@ fn fill_silence(timeline: &Timeline, format: AudioFormat, tx: &mpsc::Sender<Audi
     let max_frames = frames_in(MAX_SILENT_FRAME, format.sample_rate_hz).max(1);
     while missing > 0 {
         let frames = missing.min(max_frames);
-        let at = timeline.frames.fetch_add(frames, Ordering::AcqRel);
+        let at = timeline.advance(frames, format.sample_rate_hz);
         let samples = vec![0.0; frames as usize * usize::from(format.channels)];
         send_frame(tx, samples, format, at);
         missing -= frames;
     }
 }
 
-/// Frames of silence to append so the stream keeps up with wall-clock
-/// time: zero while buffers keep arriving (less than `quiet_after` since
-/// the last one), otherwise whatever separates the frames already sent
-/// from `elapsed`.
+/// Frames of silence (at `rate_hz`) to append so the stream keeps up
+/// with wall-clock time: zero while buffers keep arriving (less than
+/// `quiet_after` since the last one), otherwise whatever separates the
+/// audio already `sent` from `elapsed`.
 fn silence_to_emit(
     elapsed: Duration,
-    sent_frames: u64,
+    sent: Duration,
     rate_hz: u32,
     since_last_buffer: Duration,
     quiet_after: Duration,
@@ -338,7 +367,7 @@ fn silence_to_emit(
     if since_last_buffer < quiet_after {
         return 0;
     }
-    frames_in(elapsed, rate_hz).saturating_sub(sent_frames)
+    frames_in(elapsed.saturating_sub(sent), rate_hz)
 }
 
 fn frames_in(span: Duration, rate_hz: u32) -> u64 {
@@ -349,11 +378,8 @@ fn send_frame(
     tx: &mpsc::Sender<AudioFrame>,
     samples: Vec<Sample>,
     format: AudioFormat,
-    at_frame: u64,
+    captured_at_ns: u64,
 ) {
-    let captured_at_ns = (u128::from(at_frame) * 1_000_000_000
-        / u128::from(format.sample_rate_hz.max(1)))
-    .min(u128::from(u64::MAX)) as u64;
     let frame = AudioFrame {
         samples,
         format,
@@ -368,12 +394,13 @@ fn send_frame(
 // Timeline shared between the IOProc and the capture thread
 // ---------------------------------------------------------------------------
 
-/// Frames sent so far (real or silent), when the tap went live and when
-/// its last buffer arrived, both as nanoseconds since `start`
-/// (`last_buffer_ns == u64::MAX`: none yet).
+/// Audio sent so far (real or silent) in nanoseconds — rate-agnostic,
+/// so a tap rebuilt at another sample rate continues the same timeline —
+/// plus when the tap went live and when its last buffer arrived, both as
+/// nanoseconds since `start` (`last_buffer_ns == u64::MAX`: none yet).
 struct Timeline {
     start: Instant,
-    frames: AtomicU64,
+    sent_ns: AtomicU64,
     live_ns: AtomicU64,
     last_buffer_ns: AtomicU64,
 }
@@ -382,7 +409,7 @@ impl Timeline {
     fn new() -> Self {
         Self {
             start: Instant::now(),
-            frames: AtomicU64::new(0),
+            sent_ns: AtomicU64::new(0),
             live_ns: AtomicU64::new(0),
             last_buffer_ns: AtomicU64::new(u64::MAX),
         }
@@ -394,6 +421,19 @@ impl Timeline {
     fn mark_live(&self) {
         let now = self.start.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64;
         self.live_ns.store(now, Ordering::Release);
+    }
+
+    /// Audio sent so far.
+    fn sent(&self) -> Duration {
+        Duration::from_nanos(self.sent_ns.load(Ordering::Acquire))
+    }
+
+    /// Accounts `frames` at `rate_hz` as sent; returns where they start
+    /// on the stream's timeline (their `captured_at_ns`).
+    fn advance(&self, frames: u64, rate_hz: u32) -> u64 {
+        let ns = u128::from(frames) * 1_000_000_000 / u128::from(rate_hz.max(1));
+        self.sent_ns
+            .fetch_add(ns.min(u128::from(u64::MAX)) as u64, Ordering::AcqRel)
     }
 
     /// Time since the tap went live.
@@ -445,6 +485,8 @@ struct Tap {
     io_proc: AudioDeviceIOProcID,
     started: bool,
     shared: Option<Box<Shared>>,
+    /// The output device clocking the aggregate (default output at open).
+    clock: AudioObjectID,
     format: AudioFormat,
 }
 
@@ -461,6 +503,7 @@ impl Tap {
             io_proc: None,
             started: false,
             shared: None,
+            clock: 0,
             format: AudioFormat {
                 sample_rate_hz: 0,
                 channels: 0,
@@ -503,7 +546,8 @@ impl Tap {
 
         // 3. Private aggregate device that reads the tap, clocked by the
         //    default output.
-        let output_uid = default_output_uid()?;
+        let (clock, output_uid) = default_output()?;
+        tap.clock = clock;
         // SAFETY: UUID() of an initialised description.
         let tap_uid = unsafe { description.UUID() }.UUIDString();
         let aggregate_uid = NSString::from_str(&format!(
@@ -635,7 +679,9 @@ unsafe extern "C-unwind" fn io_proc<const NON_INTERLEAVED: bool>(
         return NO_ERR;
     }
     shared.timeline.mark_buffer();
-    let at = shared.timeline.frames.fetch_add(frames, Ordering::AcqRel);
+    let at = shared
+        .timeline
+        .advance(frames, shared.format.sample_rate_hz);
     send_frame(&shared.tx, samples, shared.format, at);
     NO_ERR
 }
@@ -740,7 +786,8 @@ fn own_process_object() -> Option<AudioObjectID> {
     }
 }
 
-fn default_output_uid() -> Result<Retained<NSString>, DomainError> {
+/// The default output device and its UID.
+fn default_output() -> Result<(AudioObjectID, Retained<NSString>), DomainError> {
     let device: AudioObjectID =
         get_property(SYSTEM_OBJECT, kAudioHardwarePropertyDefaultOutputDevice)
             .map_err(|st| status_error("kAudioHardwarePropertyDefaultOutputDevice", st))?;
@@ -752,9 +799,15 @@ fn default_output_uid() -> Result<Retained<NSString>, DomainError> {
     let uid: *mut NSString = get_property(device, kAudioDevicePropertyDeviceUID)
         .map_err(|st| status_error("kAudioDevicePropertyDeviceUID", st))?;
     // SAFETY: the UID property returns a +1 CFString (toll-free bridged).
-    unsafe { Retained::from_raw(uid) }.ok_or_else(|| {
+    let uid = unsafe { Retained::from_raw(uid) }.ok_or_else(|| {
         DomainError::AudioDeviceUnavailable("default output device has no UID".into())
-    })
+    })?;
+    Ok((device, uid))
+}
+
+/// Whether Core Audio still reports `device` as present.
+fn device_alive(device: AudioObjectID) -> bool {
+    matches!(get_property::<u32>(device, kAudioDevicePropertyDeviceIsAlive), Ok(alive) if alive != 0)
 }
 
 /// The aggregate-device description AudioCap and Apple's sample use:
@@ -870,7 +923,7 @@ mod tests {
     #[test]
     fn no_silence_while_buffers_keep_arriving() {
         assert_eq!(
-            silence_to_emit(MS(1_000), 0, 48_000, MS(10), QUIET_AFTER),
+            silence_to_emit(MS(1_000), MS(0), 48_000, MS(10), QUIET_AFTER),
             0
         );
     }
@@ -879,7 +932,7 @@ mod tests {
     fn silence_fills_up_to_wall_clock_once_the_output_goes_quiet() {
         // 1 s elapsed, 0.5 s sent, quiet for 300 ms: 0.5 s of zeros.
         assert_eq!(
-            silence_to_emit(MS(1_000), 24_000, 48_000, MS(300), QUIET_AFTER),
+            silence_to_emit(MS(1_000), MS(500), 48_000, MS(300), QUIET_AFTER),
             24_000
         );
     }
@@ -887,7 +940,7 @@ mod tests {
     #[test]
     fn silence_never_rewinds_a_stream_ahead_of_the_clock() {
         assert_eq!(
-            silence_to_emit(MS(1_000), 50_000, 48_000, MS(500), QUIET_AFTER),
+            silence_to_emit(MS(1_000), MS(1_041), 48_000, MS(500), QUIET_AFTER),
             0
         );
     }
@@ -897,8 +950,21 @@ mod tests {
         let timeline = Timeline::new();
         assert!(timeline.since_last_buffer() <= timeline.start.elapsed());
         assert_eq!(
-            silence_to_emit(MS(400), 0, 16_000, MS(400), QUIET_AFTER),
+            silence_to_emit(MS(400), MS(0), 16_000, MS(400), QUIET_AFTER),
             6_400
+        );
+    }
+
+    #[test]
+    fn the_timeline_continues_across_a_sample_rate_change() {
+        // A tap rebuilt on another output may run at another rate.
+        let timeline = Timeline::new();
+        assert_eq!(timeline.advance(48_000, 48_000), 0);
+        assert_eq!(timeline.advance(22_050, 44_100), 1_000_000_000);
+        assert_eq!(timeline.sent(), MS(1_500));
+        assert_eq!(
+            silence_to_emit(MS(2_000), timeline.sent(), 44_100, MS(300), QUIET_AFTER),
+            22_050
         );
     }
 
@@ -932,7 +998,7 @@ mod tests {
         };
         let timeline = Timeline {
             start: Instant::now() - MS(350),
-            frames: AtomicU64::new(100),
+            sent_ns: AtomicU64::new(100_000_000),
             ..Timeline::new()
         };
         fill_silence(&timeline, format, &tx);
@@ -946,7 +1012,7 @@ mod tests {
         assert!(frames.iter().all(|f| f.frames_per_channel() <= 100));
         assert!(frames.iter().all(|f| f.samples.iter().all(|s| *s == 0.0)));
         assert_eq!(frames[0].captured_at_ns, 100_000_000);
-        assert_eq!(timeline.frames.load(Ordering::Acquire), 100 + total as u64);
+        assert_eq!(timeline.sent(), MS(100 + total as u64));
     }
 
     fn asbd(flags: u32, bits: u32, channels: u32, rate: f64) -> AudioStreamBasicDescription {
@@ -1000,6 +1066,13 @@ mod tests {
     fn osstatus_codes_are_shown_as_four_characters() {
         assert_eq!(fourcc(i32::from_be_bytes(*b"!dev")), "'!dev'");
         assert_eq!(fourcc(-50), "-50");
+    }
+
+    #[test]
+    fn the_default_output_is_alive_and_an_unknown_device_is_not() {
+        let (device, _uid) = default_output().unwrap();
+        assert!(device_alive(device));
+        assert!(!device_alive(0xDEAD));
     }
 
     #[test]
