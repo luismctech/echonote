@@ -37,6 +37,12 @@ tract-onnx.workspace = true
 # app's audio (Zoom, Teams, browser tabs) without virtual devices.
 [target.'cfg(target_os = "macos")'.dependencies]
 screencapturekit.workspace = true
+# Core Audio process taps (capture::macos_tap).
+objc2.workspace = true
+objc2-foundation.workspace = true
+objc2-core-foundation.workspace = true
+objc2-core-audio.workspace = true
+objc2-core-audio-types.workspace = true
 
 # Linux system-audio capture: cpal's PulseAudio backend (a pure-Rust client
 # of the PulseAudio protocol, also served by PipeWire) lists the "Monitor of"

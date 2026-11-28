@@ -39,6 +39,8 @@ pub(crate) fn device_host() -> cpal::Host {
 #[cfg(target_os = "macos")]
 pub mod macos;
 #[cfg(target_os = "macos")]
+pub mod macos_tap;
+#[cfg(target_os = "macos")]
 pub use macos::{ScreenCaptureKitCapture, SYSTEM_OUTPUT_DEVICE_ID};
 
 #[cfg(target_os = "linux")]
