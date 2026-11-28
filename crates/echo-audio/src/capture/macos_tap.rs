@@ -19,6 +19,19 @@
 //! symbol means "no taps here" and the caller falls back to
 //! ScreenCaptureKit.
 //!
+//! ## Permission
+//!
+//! macOS has no public way to read the "System Audio Recording"
+//! permission, and a tap without it starts fine but delivers only zeros
+//! (observed on macOS 27.2). The adapter therefore reads it through the
+//! private TCC SPI (`TCCAccessPreflight`, resolved with `dlopen`, as
+//! AudioCap does) and starts a tap only when it reports "granted". In any
+//! other case the start fails, so [`super::fallback::FallbackAudioCapture`]
+//! uses ScreenCaptureKit for that session, and macOS is asked once
+//! (`TCCAccessRequest`, non-blocking) so the next session can use the tap.
+//! If the SPI is missing or changes meaning, only `0` counts as granted:
+//! the worst case is ScreenCaptureKit, never a silent tap (ADR 0002).
+//!
 //! ## Silence
 //!
 //! The IOProc only runs while some process plays audio: in silence the
@@ -36,7 +49,7 @@
 use std::ffi::{c_char, c_void, CStr};
 use std::mem::size_of;
 use std::ptr::NonNull;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc as sync_mpsc;
 use std::sync::{Arc, OnceLock};
 use std::thread;
@@ -51,6 +64,7 @@ use echo_domain::{
     DomainError, Sample,
 };
 
+use block2::{Block, RcBlock};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject};
 use objc2::{AnyThread, Message};
@@ -113,6 +127,13 @@ impl CoreAudioTapCapture {
     pub fn is_supported() -> bool {
         TapApi::get().is_some()
     }
+
+    /// Whether the "System Audio Recording" permission is granted, as
+    /// the private TCC call reports it (`false` when unknown).
+    #[must_use]
+    pub fn permission_granted() -> bool {
+        TccStatus::current() == TccStatus::Granted
+    }
 }
 
 #[async_trait]
@@ -120,6 +141,7 @@ impl AudioCapture for CoreAudioTapCapture {
     async fn list_devices(&self, source: AudioSource) -> Result<Vec<DeviceInfo>, DomainError> {
         reject_microphone(source)?;
         TapApi::get().ok_or_else(unsupported)?;
+        tap_permission(TccStatus::current(), || {})?;
         Ok(vec![DeviceInfo {
             id: TAP_DEVICE_ID.to_string(),
             name: "System Output (Core Audio tap)".to_string(),
@@ -130,6 +152,7 @@ impl AudioCapture for CoreAudioTapCapture {
     async fn start(&self, spec: CaptureSpec) -> Result<Box<dyn AudioStream>, DomainError> {
         reject_microphone(spec.source)?;
         let api = TapApi::get().ok_or_else(unsupported)?;
+        tap_permission(TccStatus::current(), request_permission_once)?;
         let started = tokio::task::spawn_blocking(move || start_capture(api))
             .await
             .map_err(|e| DomainError::AudioCaptureFailed(format!("start join: {e}")))??;
@@ -149,6 +172,135 @@ fn reject_microphone(source: AudioSource) -> Result<(), DomainError> {
 
 fn unsupported() -> DomainError {
     DomainError::AudioDeviceUnavailable("Core Audio process taps need macOS 14.2 or later".into())
+}
+
+// ---------------------------------------------------------------------------
+// System Audio Recording permission (private TCC SPI)
+// ---------------------------------------------------------------------------
+
+/// The "System Audio Recording" permission as TCC reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TccStatus {
+    Granted,
+    /// Denied, or not asked yet: TCC answers 2 for both.
+    NotGranted,
+    /// The private TCC call is unavailable.
+    Unknown,
+}
+
+impl TccStatus {
+    /// Only `0` means granted; any other code is treated as not granted.
+    fn from_preflight(code: Option<i32>) -> Self {
+        match code {
+            Some(0) => Self::Granted,
+            Some(_) => Self::NotGranted,
+            None => Self::Unknown,
+        }
+    }
+
+    fn current() -> Self {
+        Self::from_preflight(Tcc::get().map(Tcc::preflight))
+    }
+}
+
+/// Lets the tap start only with the permission granted. When it is not,
+/// calls `request` (macOS prompt for the next session) and fails so the
+/// fallback capture takes this session; when the state is unknown, fails
+/// without asking.
+fn tap_permission(status: TccStatus, request: impl FnOnce()) -> Result<(), DomainError> {
+    match status {
+        TccStatus::Granted => Ok(()),
+        TccStatus::NotGranted => {
+            request();
+            Err(DomainError::AudioDeviceUnavailable(
+                "the Core Audio tap needs the System Audio Recording permission; \
+                 macOS was asked to prompt, using the fallback capture meanwhile"
+                    .into(),
+            ))
+        }
+        TccStatus::Unknown => Err(DomainError::AudioDeviceUnavailable(
+            "cannot read the System Audio Recording permission; using the fallback capture".into(),
+        )),
+    }
+}
+
+/// Asks macOS for the permission at most once per process.
+fn request_permission_once() {
+    static REQUESTED: AtomicBool = AtomicBool::new(false);
+    if REQUESTED.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    if let Some(tcc) = Tcc::get() {
+        tcc.request();
+    }
+}
+
+type TccPreflight = unsafe extern "C" fn(*const NSString, *const c_void) -> i32;
+type TccRequest = unsafe extern "C" fn(*const NSString, *const c_void, *const Block<dyn Fn(u8)>);
+
+extern "C" {
+    fn dlopen(path: *const c_char, mode: i32) -> *mut c_void;
+}
+
+/// `RTLD_LAZY`.
+const RTLD_LAZY: i32 = 1;
+
+/// `TCCAccessPreflight` / `TCCAccessRequest` from the private TCC
+/// framework, looked up once.
+#[derive(Clone, Copy)]
+struct Tcc {
+    preflight: TccPreflight,
+    request: TccRequest,
+}
+
+impl Tcc {
+    const SERVICE: &str = "kTCCServiceAudioCapture";
+
+    fn get() -> Option<Self> {
+        static TCC: OnceLock<Option<Tcc>> = OnceLock::new();
+        *TCC.get_or_init(|| {
+            // SAFETY: dlopen/dlsym with NUL-terminated strings; the
+            // symbols have the signatures AudioCap uses (CFStringRef
+            // service, CFDictionaryRef options, block callback).
+            unsafe {
+                let handle = dlopen(
+                    c"/System/Library/PrivateFrameworks/TCC.framework/Versions/A/TCC".as_ptr(),
+                    RTLD_LAZY,
+                );
+                if handle.is_null() {
+                    return None;
+                }
+                let preflight = dlsym(handle, c"TCCAccessPreflight".as_ptr());
+                let request = dlsym(handle, c"TCCAccessRequest".as_ptr());
+                if preflight.is_null() || request.is_null() {
+                    return None;
+                }
+                Some(Tcc {
+                    preflight: std::mem::transmute::<*mut c_void, TccPreflight>(preflight),
+                    request: std::mem::transmute::<*mut c_void, TccRequest>(request),
+                })
+            }
+        })
+    }
+
+    fn preflight(self) -> i32 {
+        let service = NSString::from_str(Self::SERVICE);
+        // SAFETY: NSString is toll-free bridged to CFStringRef; no options.
+        unsafe { (self.preflight)(Retained::as_ptr(&service), std::ptr::null()) }
+    }
+
+    /// Shows the macOS prompt if the user was never asked; returns at once.
+    fn request(self) {
+        let service = NSString::from_str(Self::SERVICE);
+        let done = RcBlock::new(|granted: u8| {
+            info!(
+                granted = granted != 0,
+                "System Audio Recording permission answered"
+            );
+        });
+        // SAFETY: as above; TCC copies the block before returning.
+        unsafe { (self.request)(Retained::as_ptr(&service), std::ptr::null(), &*done) };
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1073,6 +1225,48 @@ mod tests {
         let (device, _uid) = default_output().unwrap();
         assert!(device_alive(device));
         assert!(!device_alive(0xDEAD));
+    }
+
+    #[test]
+    fn a_granted_permission_lets_the_tap_start_without_asking() {
+        let mut asked = false;
+        assert!(tap_permission(TccStatus::Granted, || asked = true).is_ok());
+        assert!(!asked);
+    }
+
+    #[test]
+    fn a_missing_permission_is_requested_once_and_hands_over_to_the_fallback() {
+        let mut asks = 0;
+        let outcome = tap_permission(TccStatus::NotGranted, || asks += 1);
+        assert_eq!(asks, 1);
+        match outcome {
+            Err(DomainError::AudioDeviceUnavailable(msg)) => {
+                assert!(msg.contains("System Audio Recording"), "{msg}")
+            }
+            other => panic!("unexpected outcome: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_unknown_permission_state_hands_over_without_asking() {
+        // The private TCC call is gone or changed: never risk a tap that
+        // would record silence.
+        let mut asked = false;
+        let outcome = tap_permission(TccStatus::Unknown, || asked = true);
+        assert!(matches!(
+            outcome,
+            Err(DomainError::AudioDeviceUnavailable(_))
+        ));
+        assert!(!asked);
+    }
+
+    #[test]
+    fn only_a_zero_preflight_counts_as_granted() {
+        // Observed: 0 granted, 2 denied or not asked yet.
+        assert_eq!(TccStatus::from_preflight(Some(0)), TccStatus::Granted);
+        assert_eq!(TccStatus::from_preflight(Some(1)), TccStatus::NotGranted);
+        assert_eq!(TccStatus::from_preflight(Some(2)), TccStatus::NotGranted);
+        assert_eq!(TccStatus::from_preflight(None), TccStatus::Unknown);
     }
 
     #[test]

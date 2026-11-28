@@ -76,6 +76,7 @@ screencapturekit = "11"
 # macOS-only Core Audio process taps (macOS 14.2+), the primary system-audio
 # path; ScreenCaptureKit stays the fallback. Same versions cpal already pulls in.
 objc2 = "0.6"
+block2 = "0.6"
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSDictionary", "NSObject", "NSString", "NSUUID", "NSValue"] }
 objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFDictionary"] }
 objc2-core-audio = { version = "0.3", default-features = false, features = ["std", "AudioHardware", "objc2", "objc2-core-audio-types", "objc2-foundation"] }

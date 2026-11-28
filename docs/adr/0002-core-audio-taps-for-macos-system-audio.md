@@ -44,7 +44,21 @@ A spike on macOS 27.2 (`odd/tasks/core-audio-taps.md`, T0) confirmed:
    up to wall-clock time, so the stream keeps the session timeline the way a microphone does.
    The timeline counts nanoseconds of audio sent, measured from the moment the tap went live, so
    a rebuilt tap at another rate continues it. The time spent setting up the tap is not counted.
-5. Switching the default output keeps a global tap working (observed: about 1 s gap, filled with
+5. **Permission gate.** A tap without the "System Audio Recording" permission starts without
+   error. It then delivers only zeros, observed on macOS 27.2: with the permission denied the
+   IOProc ran 260 times in 3 s, with every sample 0.0 while a tone played. While the prompt is
+   unanswered, `AudioDeviceStart` blocks for up to 30 s.
+
+   macOS has no public way to read this permission, so the adapter reads it through the private
+   TCC SPI (`TCCAccessPreflight`, loaded with `dlopen`). It returned 0 when granted and 2 when
+   denied or not yet asked.
+   - **Granted (`0`):** the tap starts.
+   - **Any other answer:** the start fails, so ScreenCaptureKit takes that session. macOS is
+     asked once, through `TCCAccessRequest`, which does not block, so the next session can use
+     the tap.
+   - **SPI missing (`dlopen` fails):** also falls back to ScreenCaptureKit, without asking.
+   Decided by the owner after the denial test.
+6. Switching the default output keeps a global tap working (observed: about 1 s gap, filled with
    silence). If the device that clocks the aggregate disappears, the tap is rebuilt on the new
    default output with the same backoff as the microphone.
 
@@ -56,9 +70,13 @@ A spike on macOS 27.2 (`odd/tasks/core-audio-taps.md`, T0) confirmed:
   contained in one module with ordered teardown in `Drop`.
 - No new crates: the `objc2*` crates are direct dependencies now, at the versions already in the
   lock.
-- macOS gives no public way to check this permission before use. How a denied permission is
-  detected is **open** (see Alternatives); until it is decided, a denied tap may deliver silence
-  instead of falling back.
+- The permission check uses a **private API**. That rules out the Mac App Store while it exists;
+  EchoNote ships with Developer ID and notarization. If Apple removes or changes the call, only
+  `0` counts as granted, so the worst case is today's ScreenCaptureKit path. The one bad case is
+  the call answering `0` while the permission is denied, which would bring back silent capture.
+- When neither permission has been granted, the first session can show two prompts: System Audio
+  Recording, requested for the next session, and Screen Recording, for the ScreenCaptureKit
+  fallback. A follow-up is to ask for System Audio Recording during onboarding.
 - The Screen Recording usage string stays in `Info.plist` for the fallback.
 
 ## Alternatives
@@ -69,5 +87,5 @@ A spike on macOS 27.2 (`odd/tasks/core-audio-taps.md`, T0) confirmed:
 | `cidre` bindings | `objc2-core-audio` already covers every call needed and is in the lock. |
 | Per-process taps (only the meeting app) | Needs choosing the app; a global tap minus EchoNote matches today's behaviour. |
 | Link the 14.2 symbols weakly (`-weak_framework` / `#[linkage]`) | Unstable or build-wide; `dlsym` is local to the module. |
-| Detect denial with private TCC SPI (`TCCAccessPreflight`), as AudioCap does | Reliable, but private API. Pending owner decision. |
-| Detect denial by a heuristic (callbacks with only zeros) | No private API, but apps that keep the output running with digital silence would look like a denial. |
+| Detect denial by a heuristic (callbacks with only zeros) | No private API, but an app that keeps the output running with digital silence (a call where nobody talks) would look like a denial. The first start can also block for 30 s while the prompt is unanswered. |
+| No detection | A denied permission would record silence without any signal. |

@@ -39,6 +39,7 @@ tract-onnx.workspace = true
 screencapturekit.workspace = true
 # Core Audio process taps (capture::macos_tap).
 objc2.workspace = true
+block2.workspace = true
 objc2-foundation.workspace = true
 objc2-core-foundation.workspace = true
 objc2-core-audio.workspace = true

@@ -237,8 +237,12 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn macos_system_audio_prefers_the_core_audio_tap() {
-        // macOS 14.2+ (every supported CI and dev Mac): the tap answers
-        // first, so ScreenCaptureKit is never asked for permission.
+        // macOS 14.2+ with System Audio Recording granted (dev Macs): the
+        // tap answers first, so ScreenCaptureKit is never asked. Without
+        // the grant (CI runners) the fallback would answer instead.
+        if !CoreAudioTapCapture::permission_granted() {
+            return;
+        }
         let router = RoutingAudioCapture::with_default_adapters();
         let devices = router
             .list_devices(AudioSource::SystemOutput)
