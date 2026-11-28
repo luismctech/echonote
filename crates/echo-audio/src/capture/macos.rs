@@ -146,7 +146,53 @@ impl AudioCapture for ScreenCaptureKitCapture {
 // Internals
 // ---------------------------------------------------------------------------
 
+#[link(name = "CoreGraphics", kind = "framework")]
+extern "C" {
+    /// Whether the process holds the Screen Recording permission. Never
+    /// prompts. macOS 10.15+.
+    fn CGPreflightScreenCaptureAccess() -> bool;
+    /// Shows the Screen Recording prompt (only the first time macOS asks).
+    /// macOS 10.15+.
+    fn CGRequestScreenCaptureAccess() -> bool;
+}
+
+/// Checks the Screen Recording permission before ScreenCaptureKit is
+/// touched, so a missing grant fails with a message the user can act on
+/// instead of an opaque framework error.
+fn check_screen_recording() -> Result<(), DomainError> {
+    // SAFETY: both functions take no arguments and only read or request
+    // the TCC state of the current process.
+    ensure_screen_recording(
+        || unsafe { CGPreflightScreenCaptureAccess() },
+        || {
+            unsafe { CGRequestScreenCaptureAccess() };
+        },
+    )
+}
+
+/// Returns `Ok` when `granted` says so; otherwise asks macOS to prompt
+/// once through `request` and returns the error to show. macOS keeps
+/// answering "not granted" until the app restarts after a grant, hence
+/// the restart hint.
+fn ensure_screen_recording(
+    granted: impl FnOnce() -> bool,
+    request: impl FnOnce(),
+) -> Result<(), DomainError> {
+    if granted() {
+        return Ok(());
+    }
+    warn!("Screen Recording permission missing; asking macOS to prompt");
+    request();
+    Err(DomainError::AudioDeviceUnavailable(
+        "system audio needs the Screen Recording permission: allow EchoNote in \
+         System Settings › Privacy & Security › Screen & System Audio Recording \
+         (Screen Recording before macOS 15), then restart EchoNote"
+            .into(),
+    ))
+}
+
 fn probe_default_display() -> Result<Vec<DeviceInfo>, DomainError> {
+    check_screen_recording()?;
     let content = SCShareableContent::get().map_err(|e| {
         DomainError::AudioDeviceUnavailable(format!(
             "ScreenCaptureKit unavailable (Screen Recording permission?): {e}"
@@ -218,6 +264,7 @@ fn start_capture(spec: &CaptureSpec) -> Result<StartedStream, DomainError> {
     // follow-up issue; the MVP captures the full mix of the primary
     // display, which already isolates calls / browser tabs once paired
     // with VAD + diarization downstream.
+    check_screen_recording()?;
     let content = SCShareableContent::get().map_err(|e| {
         DomainError::AudioDeviceUnavailable(format!(
             "ScreenCaptureKit unavailable (Screen Recording permission?): {e}"
@@ -536,6 +583,28 @@ mod tests {
     fn audio_only_config_excludes_echonote_own_audio() {
         let config = audio_only_config(48_000, 2);
         assert!(config.excludes_current_process_audio());
+    }
+
+    #[test]
+    fn granted_screen_recording_passes_without_prompting() {
+        let mut prompted = false;
+        let outcome = ensure_screen_recording(|| true, || prompted = true);
+        assert!(outcome.is_ok());
+        assert!(!prompted);
+    }
+
+    #[test]
+    fn missing_screen_recording_prompts_once_and_names_the_setting() {
+        let mut prompts = 0;
+        let outcome = ensure_screen_recording(|| false, || prompts += 1);
+        assert_eq!(prompts, 1);
+        match outcome {
+            Err(DomainError::AudioDeviceUnavailable(msg)) => {
+                assert!(msg.contains("Screen & System Audio Recording"), "{msg}");
+                assert!(msg.contains("restart EchoNote"), "{msg}");
+            }
+            other => panic!("unexpected outcome: {other:?}"),
+        }
     }
 
     #[tokio::test]
