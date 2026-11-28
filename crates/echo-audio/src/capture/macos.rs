@@ -4,7 +4,9 @@
 //! audio without virtual devices (BlackHole, Loopback, etc.). It became
 //! available in macOS 12.3 and gained audio-only support in 13.0
 //! (Ventura). EchoNote targets macOS 13+ for system audio, in line with
-//! `docs/ARCHITECTURE.md` §2.
+//! `docs/ARCHITECTURE.md` §2. On macOS 14.2+ the Core Audio tap
+//! ([`super::macos_tap`]) is used first and this adapter is the fallback
+//! (ADR 0002).
 //!
 //! ## Why not `cpal`?
 //!
